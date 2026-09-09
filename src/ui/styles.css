@@ -103,8 +103,13 @@ button {
   cursor: pointer;
 }
 
-.toolbar-button:hover {
+.toolbar-button:hover:not(:disabled) {
   background: var(--color-surface-raised);
+}
+
+.toolbar-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .toolbar-button--icon {
@@ -118,9 +123,18 @@ button {
   font-weight: 500;
 }
 
-.toolbar-button--primary:hover {
+.toolbar-button--primary:hover:not(:disabled) {
   filter: brightness(1.1);
   background: var(--color-accent);
+}
+
+.toolbar-button--danger {
+  border-color: #a83c38;
+  color: #ff8a80;
+}
+
+.toolbar-button--danger:hover:not(:disabled) {
+  background: rgba(216, 76, 68, 0.15);
 }
 
 .app-header__project {

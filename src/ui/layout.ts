@@ -11,6 +11,8 @@ export type AppShellOptions = {
   projectName: string;
   onViewChange: (preset: ViewPreset) => void;
   onAddWall: () => void;
+  onDuplicateWall: () => void;
+  onDeleteWall: () => void;
   wallStore: WallStore;
   selectionStore: SelectionStore;
 };
@@ -32,7 +34,10 @@ export function createAppShell(options: AppShellOptions): AppShell {
   const header = createHeader({
     projectName: options.projectName,
     onViewChange: options.onViewChange,
-    onAddWall: options.onAddWall
+    onAddWall: options.onAddWall,
+    onDuplicateWall: options.onDuplicateWall,
+    onDeleteWall: options.onDeleteWall,
+    selectionStore: options.selectionStore
   });
   const leftSidebar = createLeftSidebar();
   const rightSidebar = createRightSidebar(options.wallStore, options.selectionStore);

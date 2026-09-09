@@ -1,16 +1,22 @@
 import { el } from "./dom";
 import { createViewControls, type ViewPreset } from "./viewControls";
+import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 export type HeaderOptions = {
   projectName: string;
   onViewChange: (preset: ViewPreset) => void;
   onAddWall: () => void;
+  onDuplicateWall: () => void;
+  onDeleteWall: () => void;
+  selectionStore: SelectionStore;
 };
 
 /**
  * Top toolbar: branding, primary project actions, construction actions,
- * view controls, and the current project name. Only "Add Wall" and the
- * view controls are functional this milestone - the rest are placeholders.
+ * view controls, and the current project name. "Add Wall", "Duplicate
+ * Wall", "Delete Wall" and the view controls are functional - the rest
+ * are placeholders. Duplicate/Delete disable themselves when nothing is
+ * selected by subscribing to selectionStore directly.
  */
 export function createHeader(options: HeaderOptions): HTMLElement {
   const branding = el("div", { className: "app-header__brand" }, [
@@ -31,7 +37,33 @@ export function createHeader(options: HeaderOptions): HTMLElement {
     attrs: { type: "button" }
   });
   addWallButton.addEventListener("click", options.onAddWall);
-  const constructionActions = el("div", { className: "app-header__actions" }, [addWallButton]);
+
+  const duplicateWallButton = el("button", {
+    className: "toolbar-button",
+    text: "Duplicate Wall",
+    attrs: { type: "button" }
+  });
+  duplicateWallButton.addEventListener("click", options.onDuplicateWall);
+
+  const deleteWallButton = el("button", {
+    className: "toolbar-button toolbar-button--danger",
+    text: "Delete Wall",
+    attrs: { type: "button" }
+  });
+  deleteWallButton.addEventListener("click", options.onDeleteWall);
+
+  // Both act on the current selection, so both disable themselves when there isn't one.
+  options.selectionStore.subscribe((selectedId) => {
+    const hasSelection = selectedId !== null;
+    duplicateWallButton.disabled = !hasSelection;
+    deleteWallButton.disabled = !hasSelection;
+  });
+
+  const constructionActions = el("div", { className: "app-header__actions" }, [
+    addWallButton,
+    duplicateWallButton,
+    deleteWallButton
+  ]);
 
   const viewControls = createViewControls(options.onViewChange);
 

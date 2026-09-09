@@ -3,7 +3,7 @@ import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { WallStore } from "./engine/wall/WallStore";
 import { SelectionStore } from "./engine/selection/SelectionStore";
-import { createWallData } from "./engine/wall/createWall";
+import { createWallData, duplicateWallData } from "./engine/wall/createWall";
 
 const appRoot = document.getElementById("app");
 
@@ -26,6 +26,26 @@ function addWall(): void {
 
 addWall(); // default wall, visible on the grid at startup
 
+function deleteSelectedWall(): void {
+  const selectedId = selectionStore.get();
+  if (!selectedId) {
+    return; // the toolbar button is disabled in this state, but guard anyway
+  }
+  wallStore.remove(selectedId);
+  selectionStore.clear();
+}
+
+function duplicateSelectedWall(): void {
+  const selectedId = selectionStore.get();
+  const wall = selectedId ? wallStore.get(selectedId) : undefined;
+  if (!wall) {
+    return; // the toolbar button is disabled in this state, but guard anyway
+  }
+  const duplicate = duplicateWallData(wall);
+  wallStore.add(duplicate);
+  selectionStore.select(duplicate.id);
+}
+
 // Wrapped in a mutable ref: the header's view-control buttons need a
 // callback before SceneManager exists (it mounts into a container the
 // shell creates), so the callback reads this ref instead of a value.
@@ -35,6 +55,8 @@ const shell = createAppShell({
   projectName: "Untitled Project",
   onViewChange: (preset) => sceneManager.current?.setView(preset),
   onAddWall: addWall,
+  onDuplicateWall: duplicateSelectedWall,
+  onDeleteWall: deleteSelectedWall,
   wallStore,
   selectionStore
 });
