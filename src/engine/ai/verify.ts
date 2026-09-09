@@ -31,8 +31,11 @@ import { AICommandPipeline } from "./AICommandPipeline.ts";
 import type { CommandExecutorLike } from "./AICommandPipeline.ts";
 import { MockAIProvider } from "./MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "./types.ts";
-import type { AIProjectSnapshot, AIProviderResponse } from "./types.ts";
+import type { AIProjectSnapshot, AIProviderResponse, AIPipelineResult } from "./types.ts";
 import type { AIProvider } from "./AIProvider.ts";
+import { AIService } from "./AIService.ts";
+import { AiPromptController } from "./AiPromptController.ts";
+import type { AiPromptState } from "./AiPromptController.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
@@ -533,6 +536,254 @@ async function run(): Promise<void> {
     await pipeline.run("Add a slab, create a door, add a window", emptySnapshot);
 
     assertEqual(executor.calls.length, 6, "one executor call per recognized command across all three instructions");
+  });
+
+  // --- AIPipelineResult.notes propagation ---
+
+  await check("AICommandPipeline includes the provider's notes on a successful result", async () => {
+    const provider = fixedProvider({ commands: [{ type: "wall.add", wall: {} }], notes: "used default dimensions" });
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    const result = await pipeline.run("Create a wall", emptySnapshot);
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.notes, "used default dimensions", "result.notes");
+  });
+
+  await check("AICommandPipeline includes the provider's notes on a failing result", async () => {
+    const provider = fixedProvider({ commands: [{ type: "roof.add", roof: {} }], notes: "couldn't build a roof yet" });
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    const result = await pipeline.run("Create a roof", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(result.notes, "couldn't build a roof yet", "result.notes");
+  });
+
+  await check("AICommandPipeline includes the provider's notes when zero commands were produced", async () => {
+    const provider = fixedProvider({ commands: [], notes: "nothing matched" });
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    const result = await pipeline.run("Do a backflip", emptySnapshot);
+
+    assertEqual(result.notes, "nothing matched", "result.notes");
+  });
+
+  await check("AICommandPipeline omits notes when the provider didn't supply any", async () => {
+    const provider = fixedProvider({ commands: [{ type: "wall.add", wall: {} }] });
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    const result = await pipeline.run("Create a wall", emptySnapshot);
+
+    assertEqual(result.notes, undefined, "result.notes");
+  });
+
+  // --- AIService ---
+
+  function makeCountingSnapshotSource(counts: { wallCount: number }) {
+    return {
+      wallStore: { getAll: () => Array.from({ length: counts.wallCount }) },
+      pillarStore: { getAll: () => [] },
+      beamStore: { getAll: () => [] },
+      slabStore: { getAll: () => [] },
+      doorStore: { getAll: () => [] },
+      windowStore: { getAll: () => [] },
+      assemblyStore: { getAll: () => [] },
+      selectionStore: { get: (): string | null => null }
+    };
+  }
+
+  await check("AIService.submit builds a fresh snapshot on every call - not a cached one", async () => {
+    const requests: AIProjectSnapshot[] = [];
+    const provider: AIProvider = {
+      interpret: (request) => {
+        requests.push(request.projectContext);
+        return { commands: [] };
+      }
+    };
+    const counts = { wallCount: 0 };
+    const service = new AIService({
+      provider,
+      commandExecutor: makeExecutorSpy(),
+      snapshotSource: makeCountingSnapshotSource(counts)
+    });
+
+    await service.submit("Create a wall");
+    counts.wallCount = 1;
+    await service.submit("Create another wall");
+
+    assertEqual(requests[0].wallCount, 0, "first call should see the wall count at that time");
+    assertEqual(requests[1].wallCount, 1, "second call should see the updated wall count, not a cached snapshot");
+  });
+
+  await check("AIService.submit executes returned commands via the injected CommandExecutor", async () => {
+    const provider = fixedProvider({ commands: [{ type: "wall.add", wall: {} }] });
+    const executor = makeExecutorSpy();
+    const service = new AIService({ provider, commandExecutor: executor, snapshotSource: makeCountingSnapshotSource({ wallCount: 0 }) });
+
+    const result = await service.submit("Create a wall");
+
+    assertTrue(result.success, "result.success");
+    assertEqual(executor.calls.length, 1, "executor.calls.length");
+    assertDeepEqual(executor.calls[0], { type: "wall.add", wall: {} }, "the command passed to CommandExecutor");
+  });
+
+  await check("AIService holds no store reference - only a pipeline and a snapshot source", () => {
+    const service = new AIService({
+      provider: fixedProvider({ commands: [] }),
+      commandExecutor: makeExecutorSpy(),
+      snapshotSource: makeCountingSnapshotSource({ wallCount: 0 })
+    });
+
+    const ownProperties = Object.getOwnPropertyNames(service).sort();
+
+    assertDeepEqual(ownProperties, ["pipeline", "snapshotSource"], "AIService's own instance properties");
+  });
+
+  // --- AiPromptController ---
+
+  function makeDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: unknown) => void } {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  function makeResult(overrides: Partial<AIPipelineResult> = {}): AIPipelineResult {
+    return {
+      success: true,
+      instruction: "Create a wall",
+      outcomes: [{ command: { type: "wall.add", wall: {} }, result: { success: true } }],
+      errors: [],
+      ...overrides
+    };
+  }
+
+  await check("AiPromptController starts idle", () => {
+    const controller = new AiPromptController(async () => makeResult());
+    assertDeepEqual(controller.getState(), { status: "idle", message: null, notes: null }, "initial state");
+  });
+
+  await check("AiPromptController transitions submitting -> success and reports a summary message", async () => {
+    const states: AiPromptState[] = [];
+    const controller = new AiPromptController(async () => makeResult());
+    controller.subscribe((state) => states.push(state));
+
+    await controller.submit("Create a wall");
+
+    assertEqual(states[0].status, "idle", "initial notification");
+    assertEqual(states[1].status, "submitting", "should go through a submitting state");
+    assertEqual(states[2].status, "success", "final state");
+    assertEqual(controller.getState().message, "1 command executed.", "success message");
+  });
+
+  await check("AiPromptController transitions submitting -> error and reports the first error message", async () => {
+    const controller = new AiPromptController(async () =>
+      makeResult({
+        success: false,
+        outcomes: [],
+        errors: [{ stage: "input", message: "Instruction is empty." }]
+      })
+    );
+
+    await controller.submit("");
+
+    assertEqual(controller.getState().status, "error", "final state");
+    assertEqual(controller.getState().message, "Instruction is empty.", "error message");
+  });
+
+  await check("AiPromptController summarizes a partial success (some commands succeeded, some failed)", async () => {
+    const controller = new AiPromptController(async () =>
+      makeResult({
+        success: false,
+        outcomes: [
+          { command: { type: "wall.add", wall: {} }, result: { success: true } },
+          { command: { type: "roof.add", roof: {} }, result: { success: false } }
+        ],
+        errors: [{ stage: "validation", message: 'Unsupported object type: "roof".', commandIndex: 1 }]
+      })
+    );
+
+    await controller.submit("Create a wall and a roof");
+
+    assertEqual(controller.getState().status, "error", "final state");
+    assertTrue(controller.getState().message?.startsWith("1 command of 2 succeeded."), "should report the partial count");
+  });
+
+  await check("AiPromptController reports the provider's notes when the result includes them", async () => {
+    const controller = new AiPromptController(async () => makeResult({ notes: "assumed default dimensions" }));
+
+    await controller.submit("Create a wall");
+
+    assertEqual(controller.getState().notes, "assumed default dimensions", "notes");
+  });
+
+  await check("AiPromptController reports notes as null when the result has none", async () => {
+    const controller = new AiPromptController(async () => makeResult());
+
+    await controller.submit("Create a wall");
+
+    assertEqual(controller.getState().notes, null, "notes");
+  });
+
+  await check("AiPromptController prevents a duplicate submission while one is already in flight", async () => {
+    let callCount = 0;
+    const deferred = makeDeferred<AIPipelineResult>();
+    const controller = new AiPromptController(async () => {
+      callCount += 1;
+      return deferred.promise;
+    });
+
+    const first = controller.submit("Create a wall");
+    assertEqual(controller.getState().status, "submitting", "should already be submitting");
+
+    const second = controller.submit("Create a wall");
+    await second;
+    assertEqual(callCount, 1, "the second, concurrent submit() should not have called the submitter again");
+    assertEqual(controller.getState().status, "submitting", "still submitting - the first call hasn't resolved yet");
+
+    deferred.resolve(makeResult());
+    await first;
+    assertEqual(controller.getState().status, "success", "the first call's result should still land");
+  });
+
+  await check("AiPromptController allows a new submission once the previous one has finished", async () => {
+    let callCount = 0;
+    const controller = new AiPromptController(async () => {
+      callCount += 1;
+      return makeResult();
+    });
+
+    await controller.submit("Create a wall");
+    await controller.submit("Add a pillar");
+
+    assertEqual(callCount, 2, "a submission after the previous one resolved should not be blocked");
+  });
+
+  await check("AiPromptController catches a throwing submitter and reports an error state", async () => {
+    const controller = new AiPromptController(async () => {
+      throw new Error("network down");
+    });
+
+    await controller.submit("Create a wall");
+
+    assertEqual(controller.getState().status, "error", "final state");
+    assertEqual(controller.getState().message, "network down", "error message");
+  });
+
+  await check("AiPromptController holds no store, CommandExecutor, or AICommandPipeline reference", () => {
+    const controller = new AiPromptController(async () => makeResult());
+
+    const ownProperties = Object.getOwnPropertyNames(controller).sort();
+
+    assertDeepEqual(
+      ownProperties,
+      ["listeners", "state", "submitInstruction"],
+      "AiPromptController's own instance properties"
+    );
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

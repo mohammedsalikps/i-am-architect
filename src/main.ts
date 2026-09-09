@@ -2,6 +2,8 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectContext } from "./engine/project/ProjectContext";
+import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
+import { AIService } from "./engine/ai/AIService";
 import type {
   AddWallCommand,
   AddPillarCommand,
@@ -10,6 +12,7 @@ import type {
   AddDoorCommand,
   AddWindowCommand
 } from "./engine/commands/types";
+import type { AIPipelineResult } from "./engine/ai/types";
 
 const appRoot = document.getElementById("app");
 
@@ -34,6 +37,45 @@ const {
   history,
   commandExecutor
 } = createProjectContext();
+
+// The AI proxy backend's base URL (see backend/README.md) - a
+// non-secret value (just where to send requests, never a credential),
+// read via Vite's client-side env mechanism (only VITE_-prefixed vars
+// are ever inlined into the browser bundle - see .env.example and
+// src/engine/ai/README.md "Security boundary" for why OPENAI_API_KEY
+// itself never appears here or anywhere else client-side). Defaults to
+// the backend's own documented local-dev port when unset - not a
+// same-origin fallback (this app's Vite dev server has no proxy
+// configured for a different-origin backend), just an explicit,
+// documented absolute default.
+const AI_BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:8787";
+
+// BackendAIProvider never reads an environment variable or global
+// fetch itself (see its own docs) - both are supplied explicitly here,
+// the one place in the running app that constructs it. Wrapped in an
+// arrow function (not passed as a bare `fetch` reference) so it's
+// always invoked with the correct `this` - some environments throw on
+// a detached `fetch` reference.
+const aiProvider = new BackendAIProvider({
+  baseUrl: AI_BACKEND_URL,
+  fetch: (url, init) => fetch(url, init)
+});
+
+// Constructed once, here, from the SAME shared commandExecutor every
+// manual UI action already uses - see ai/README.md "Where
+// AICommandPipeline can be constructed safely". AIService holds no
+// store reference itself (see its own docs); `snapshotSource` is only
+// ever read via getAll()/get(), never written to.
+const aiService = new AIService({
+  provider: aiProvider,
+  commandExecutor,
+  snapshotSource: { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, assemblyStore, selectionStore }
+});
+
+/** Wired into the command bar's "AI Prompt" tab (see ui/commandBar.ts) - the only path from a typed instruction to AICommandPipeline. */
+function submitAiInstruction(instruction: string): Promise<AIPipelineResult> {
+  return aiService.submit(instruction);
+}
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -216,6 +258,7 @@ const shell = createAppShell({
   onDeleteSelected: deleteSelected,
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
+  onSubmitAiInstruction: submitAiInstruction,
   wallStore,
   pillarStore,
   beamStore,

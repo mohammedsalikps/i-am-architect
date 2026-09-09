@@ -168,7 +168,8 @@ export class AICommandPipeline {
             stage: "provider",
             message: response.notes ?? "Provider produced no recognizable commands for this instruction."
           }
-        ]
+        ],
+        notes: response.notes
       };
     }
 
@@ -194,6 +195,6 @@ export class AICommandPipeline {
       }
     });
 
-    return { success: errors.length === 0, instruction, outcomes, errors };
+    return { success: errors.length === 0, instruction, outcomes, errors, notes: response.notes };
   }
 }

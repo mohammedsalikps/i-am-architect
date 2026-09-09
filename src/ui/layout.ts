@@ -5,6 +5,7 @@ import { createConstructionRibbon } from "./constructionRibbon";
 import { createLeftSidebar } from "./leftSidebar";
 import { createRightSidebar } from "./rightSidebar";
 import { createCommandBar } from "./commandBar";
+import type { AiInstructionSubmitter } from "../engine/ai/AiPromptController";
 import { createStatusBar } from "./statusBar";
 import { createViewControls, type ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
@@ -31,6 +32,8 @@ export type AppShellOptions = {
   onDeleteSelected: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  /** Sends one command-bar AI instruction through AICommandPipeline - see main.ts (constructed from AIService.submit) and commandBar.ts's "AI Prompt" tab. */
+  onSubmitAiInstruction: AiInstructionSubmitter;
   wallStore: WallStore;
   pillarStore: PillarStore;
   beamStore: BeamStore;
@@ -114,7 +117,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const body = el("div", { className: "app-body" }, [leftSidebar, viewportArea, rightSidebar]);
 
-  const commandBar = createCommandBar(options.onAddWall);
+  const commandBar = createCommandBar(options.onAddWall, options.onSubmitAiInstruction);
 
   const statusBar = createStatusBar({ projectName: options.projectName, selectionStore: options.selectionStore });
 

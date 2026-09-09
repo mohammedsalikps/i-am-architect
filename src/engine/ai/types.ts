@@ -121,4 +121,12 @@ export interface AIPipelineResult {
   instruction: string;
   outcomes: AICommandOutcome[];
   errors: AIPipelineError[];
+  /**
+   * The provider's free-text notes (see AIProviderResponse.notes), when
+   * it supplied any - present regardless of whether the overall result
+   * was a success (a provider can partially map an instruction and
+   * still explain what it couldn't). Undefined, not an empty string,
+   * when the provider gave none.
+   */
+  notes?: string;
 }

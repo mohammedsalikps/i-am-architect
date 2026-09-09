@@ -784,6 +784,15 @@ button {
   min-width: 0;
 }
 
+/* AI Prompt tab result states - same danger/success colors already used elsewhere (toolbar-button--danger, --color-success). */
+.command-bar__note--error {
+  color: #ff8a80;
+}
+
+.command-bar__note--success {
+  color: var(--color-success);
+}
+
 /* ---------- Status bar ---------- */
 
 .status-bar {
