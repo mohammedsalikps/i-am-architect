@@ -1,25 +1,26 @@
 /**
  * Lightweight in-memory verification for CommandExecutor - wall
- * commands, pillar commands, beam commands, and assembly commands.
- * Same approach as the other verify.ts scripts in this project: no
- * test framework, plain assertion helpers, run directly by Node. Run
- * with:
+ * commands, pillar commands, beam commands, slab commands, and
+ * assembly commands. Same approach as the other verify.ts scripts in
+ * this project: no test framework, plain assertion helpers, run
+ * directly by Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/commands/verify.ts
  *
- * Neither WallHistoryController, PillarHistoryController, nor
- * BeamHistoryController is instantiated here - all three constructors
- * use TypeScript parameter-property shorthand, which Node's native
- * TypeScript support cannot run directly (only erasable syntax is
- * supported). Instead this uses small stand-ins that satisfy the
- * WallHistoryLike/PillarHistoryLike/BeamHistoryLike interfaces
- * (add/update/remove) and mirror each controller's one real rule for
- * testing purposes: an update/add only "records history" when the
- * underlying store write actually succeeds. That's enough to verify
- * CommandExecutor's own routing logic (this file's actual unit under
- * test). Full integration with the real WallHistoryController/
- * PillarHistoryController/BeamHistoryController (real undo/redo) is
+ * None of WallHistoryController, PillarHistoryController,
+ * BeamHistoryController, or SlabHistoryController is instantiated
+ * here - all four constructors use TypeScript parameter-property
+ * shorthand, which Node's native TypeScript support cannot run
+ * directly (only erasable syntax is supported). Instead this uses
+ * small stand-ins that satisfy the WallHistoryLike/PillarHistoryLike/
+ * BeamHistoryLike/SlabHistoryLike interfaces (add/update/remove) and
+ * mirror each controller's one real rule for testing purposes: an
+ * update/add only "records history" when the underlying store write
+ * actually succeeds. That's enough to verify CommandExecutor's own
+ * routing logic (this file's actual unit under test). Full integration
+ * with the real WallHistoryController/PillarHistoryController/
+ * BeamHistoryController/SlabHistoryController (real undo/redo) is
  * verified separately in the browser, against the real compiled
  * module - see the implementation report.
  *
@@ -37,6 +38,7 @@ import { CommandExecutor } from "./CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
 import { PillarStore } from "../pillar/PillarStore.ts";
 import { BeamStore } from "../beam/BeamStore.ts";
+import { SlabStore } from "../slab/SlabStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
@@ -44,7 +46,9 @@ import type { PillarData, PillarId } from "../pillar/types.ts";
 import type { PillarValidationResult } from "../pillar/validatePillar.ts";
 import type { BeamData, BeamId } from "../beam/types.ts";
 import type { BeamValidationResult } from "../beam/validateBeam.ts";
-import type { WallHistoryLike, PillarHistoryLike, BeamHistoryLike } from "./types.ts";
+import type { SlabData, SlabId } from "../slab/types.ts";
+import type { SlabValidationResult } from "../slab/validateSlab.ts";
+import type { WallHistoryLike, PillarHistoryLike, BeamHistoryLike, SlabHistoryLike } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -142,6 +146,33 @@ function makeBeamHistoryStub(store: BeamStore): BeamHistoryLike & { recordedCoun
       return result;
     },
     remove(id: BeamId): void {
+      store.remove(id);
+    }
+  };
+}
+
+/** A SlabHistoryLike stand-in backed by a real SlabStore - mirrors makeWallHistoryStub/makePillarHistoryStub/makeBeamHistoryStub above. */
+function makeSlabHistoryStub(store: SlabStore): SlabHistoryLike & { recordedCount: number } {
+  let recordedCount = 0;
+  return {
+    get recordedCount(): number {
+      return recordedCount;
+    },
+    add(slab: SlabData): SlabValidationResult {
+      const result = store.add(slab);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    update(id: SlabId, changes: Parameters<SlabHistoryLike["update"]>[1]): SlabValidationResult {
+      const result = store.update(id, changes);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    remove(id: SlabId): void {
       store.remove(id);
     }
   };
@@ -684,13 +715,15 @@ function run(): void {
     assertEqual(beamHistory.recordedCount, 1, "an update() for a missing id should not record history");
   });
 
-  check("wall, pillar, and beam commands do not interfere with each other's stores", () => {
+  check("wall, pillar, beam, and slab commands do not interfere with each other's stores", () => {
     const wallStoreStub = new WallStore();
     const wallHistory = makeWallHistoryStub(wallStoreStub);
     const pillars = new PillarStore();
     const pillarHistory = makePillarHistoryStub(pillars);
     const beams = new BeamStore();
     const beamHistory = makeBeamHistoryStub(beams);
+    const slabs = new SlabStore();
+    const slabHistory = makeSlabHistoryStub(slabs);
     const executor = new CommandExecutor(
       wallStoreStub,
       wallHistory,
@@ -698,24 +731,219 @@ function run(): void {
       pillars,
       pillarHistory,
       beams,
-      beamHistory
+      beamHistory,
+      slabs,
+      slabHistory
     );
 
     const wallResult = executor.execute({ type: "wall.add", wall: {} });
     const pillarResult = executor.execute({ type: "pillar.add", pillar: {} });
     const beamResult = executor.execute({ type: "beam.add", beam: {} });
+    const slabResult = executor.execute({ type: "slab.add", slab: {} });
 
     assertTrue(wallStoreStub.get(wallResult.objectId as WallId) !== undefined, "wall should be in wallStore");
     assertEqual(pillars.get(wallResult.objectId as PillarId), undefined, "wall id should not leak into pillarStore");
     assertEqual(beams.get(wallResult.objectId as BeamId), undefined, "wall id should not leak into beamStore");
+    assertEqual(slabs.get(wallResult.objectId as SlabId), undefined, "wall id should not leak into slabStore");
 
     assertTrue(pillars.get(pillarResult.objectId as PillarId) !== undefined, "pillar should be in pillarStore");
     assertEqual(wallStoreStub.get(pillarResult.objectId as WallId), undefined, "pillar id should not leak into wallStore");
     assertEqual(beams.get(pillarResult.objectId as BeamId), undefined, "pillar id should not leak into beamStore");
+    assertEqual(slabs.get(pillarResult.objectId as SlabId), undefined, "pillar id should not leak into slabStore");
 
     assertTrue(beams.get(beamResult.objectId as BeamId) !== undefined, "beam should be in beamStore");
     assertEqual(wallStoreStub.get(beamResult.objectId as WallId), undefined, "beam id should not leak into wallStore");
     assertEqual(pillars.get(beamResult.objectId as PillarId), undefined, "beam id should not leak into pillarStore");
+    assertEqual(slabs.get(beamResult.objectId as SlabId), undefined, "beam id should not leak into slabStore");
+
+    assertTrue(slabs.get(slabResult.objectId as SlabId) !== undefined, "slab should be in slabStore");
+    assertEqual(wallStoreStub.get(slabResult.objectId as WallId), undefined, "slab id should not leak into wallStore");
+    assertEqual(pillars.get(slabResult.objectId as PillarId), undefined, "slab id should not leak into pillarStore");
+    assertEqual(beams.get(slabResult.objectId as BeamId), undefined, "slab id should not leak into beamStore");
+  });
+
+  // --- Slab commands ---
+
+  function makeSlabExecutor(): { executor: CommandExecutor; slabs: SlabStore } {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const slabs = new SlabStore();
+    const slabHistory = makeSlabHistoryStub(slabs);
+    return {
+      executor: new CommandExecutor(
+        wallStoreStub,
+        wallHistory,
+        new AssemblyStore(),
+        new PillarStore(),
+        undefined,
+        new BeamStore(),
+        undefined,
+        slabs,
+        slabHistory
+      ),
+      slabs
+    };
+  }
+
+  check("a valid slab.add command succeeds and stores a slab", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const result = executor.execute({ type: "slab.add", slab: { length: 6, color: "#ff0000" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    const stored = slabs.get(result.objectId as SlabId);
+    assertTrue(stored, "slab should be stored");
+    assertEqual(stored.dimensions.length, 6, "stored length");
+    assertEqual(stored.color, "#ff0000", "stored color");
+  });
+
+  check("a valid slab.update command succeeds and applies the change", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const added = executor.execute({ type: "slab.add", slab: {} });
+    const id = added.objectId as SlabId;
+
+    const result = executor.execute({
+      type: "slab.update",
+      id,
+      changes: { color: "#00ff00" }
+    });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.objectId, id, "result.objectId");
+    assertEqual(slabs.get(id)?.color, "#00ff00", "stored color after update");
+  });
+
+  check("a valid slab.delete command succeeds and removes the slab", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const added = executor.execute({ type: "slab.add", slab: {} });
+    const id = added.objectId as SlabId;
+
+    const result = executor.execute({ type: "slab.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(slabs.get(id), undefined, "slab should be gone");
+  });
+
+  check("a valid slab.duplicate command succeeds and creates an independent slab", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const added = executor.execute({ type: "slab.add", slab: { length: 7, color: "#123456" } });
+    const originalId = added.objectId as SlabId;
+
+    const result = executor.execute({ type: "slab.duplicate", id: originalId });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertTrue(result.objectId !== originalId, "duplicate should have a different id");
+    const duplicate = slabs.get(result.objectId as SlabId);
+    assertTrue(duplicate, "duplicate should be stored");
+    assertEqual(duplicate.dimensions.length, 7, "duplicate length matches source");
+    assertEqual(duplicate.color, "#123456", "duplicate color matches source");
+    assertTrue(slabs.get(originalId) !== undefined, "original slab should still exist");
+  });
+
+  check("slab.update with a missing id is rejected", () => {
+    const { executor } = makeSlabExecutor();
+    const result = executor.execute({ type: "slab.update", changes: { color: "#000000" } });
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("slab.delete with a missing id is rejected", () => {
+    const { executor } = makeSlabExecutor();
+    assertEqual(executor.execute({ type: "slab.delete" }).success, false, "result.success");
+  });
+
+  check("slab.add with invalid dimensions is rejected and reports field errors", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const result = executor.execute({ type: "slab.add", slab: { length: 0 } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(
+      result.errors && result.errors.some((e) => e.field === "dimensions.length"),
+      "expected a dimensions.length error"
+    );
+    assertEqual(slabs.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("an invalid slab.update preserves the existing slab", () => {
+    const { executor, slabs } = makeSlabExecutor();
+
+    const added = executor.execute({ type: "slab.add", slab: {} });
+    const id = added.objectId as SlabId;
+    const before = slabs.get(id);
+
+    const result = executor.execute({
+      type: "slab.update",
+      id,
+      changes: { dimensions: { ...before!.dimensions, width: -1 } }
+    });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(slabs.get(id), before, "slab should be byte-for-byte unchanged");
+  });
+
+  check("successful slab commands are recorded as history (via the SlabHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const slabs = new SlabStore();
+    const slabHistory = makeSlabHistoryStub(slabs);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      slabs,
+      slabHistory
+    );
+
+    assertEqual(slabHistory.recordedCount, 0, "no history yet");
+
+    const added = executor.execute({ type: "slab.add", slab: {} });
+    assertEqual(slabHistory.recordedCount, 1, "a valid add() should record history");
+
+    executor.execute({ type: "slab.update", id: added.objectId as SlabId, changes: { color: "#abcdef" } });
+    assertEqual(slabHistory.recordedCount, 2, "a valid update() should record history");
+  });
+
+  check("failed slab commands create no history entry (via the SlabHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const slabs = new SlabStore();
+    const slabHistory = makeSlabHistoryStub(slabs);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      slabs,
+      slabHistory
+    );
+
+    executor.execute({ type: "slab.add", slab: { length: -1 } });
+    assertEqual(slabHistory.recordedCount, 0, "an invalid add() should not record history");
+
+    const added = executor.execute({ type: "slab.add", slab: {} });
+    assertEqual(slabHistory.recordedCount, 1, "sanity: the valid add() above should have recorded");
+
+    executor.execute({
+      type: "slab.update",
+      id: added.objectId as SlabId,
+      changes: { rotation: Infinity }
+    });
+    assertEqual(slabHistory.recordedCount, 1, "an invalid update() should not record additional history");
+
+    executor.execute({ type: "slab.update", id: "does-not-exist", changes: { color: "#000000" } });
+    assertEqual(slabHistory.recordedCount, 1, "an update() for a missing id should not record history");
   });
 
   // --- Assembly commands ---

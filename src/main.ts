@@ -2,7 +2,7 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectContext } from "./engine/project/ProjectContext";
-import type { AddWallCommand, AddPillarCommand, AddBeamCommand } from "./engine/commands/types";
+import type { AddWallCommand, AddPillarCommand, AddBeamCommand, AddSlabCommand } from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
 
@@ -11,11 +11,11 @@ if (!appRoot) {
 }
 
 // One shared composition root - see src/engine/project/ProjectContext.ts.
-// assemblyStore/pillarStore/beamStore are the same instances
+// assemblyStore/pillarStore/beamStore/slabStore are the same instances
 // commandExecutor uses internally (not invisible defaults of their
 // own) - the UI reads/writes them through commandExecutor, same as
 // wallStore.
-const { wallStore, pillarStore, beamStore, assemblyStore, selectionStore, history, commandExecutor } =
+const { wallStore, pillarStore, beamStore, slabStore, assemblyStore, selectionStore, history, commandExecutor } =
   createProjectContext();
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
@@ -62,18 +62,34 @@ function addBeam(): void {
   commandExecutor.execute(command);
 }
 
+// Successive slabs are spaced along X on the negative side, away from
+// the wall stack (negative Z), the pillar stack (positive X), and the
+// beam stack (positive Z), so a freshly-added slab is never buried
+// under any of them.
+const SLAB_X_START = -4;
+const SLAB_X_SPACING = 5;
+
+function addSlab(): void {
+  const index = slabStore.getAll().length;
+  const command: AddSlabCommand = {
+    type: "slab.add",
+    slab: { position: { x: SLAB_X_START - index * SLAB_X_SPACING } }
+  };
+  commandExecutor.execute(command);
+}
+
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 /**
  * Duplicate/Delete now act on "whichever construction object is
  * currently selected" rather than "the selected wall" - selectionStore
- * is shared between walls, pillars, and beams (see ProjectContext), so
- * the selected id could belong to any of the three stores. Checking
- * wallStore, then pillarStore, then beamStore, mirrors the same "try
- * each store in turn" shape rightSidebar.ts and assemblyPanel.ts
- * already use to resolve a selected/member id without assuming its
- * type.
+ * is shared between walls, pillars, beams, and slabs (see
+ * ProjectContext), so the selected id could belong to any of the four
+ * stores. Checking wallStore, then pillarStore, then beamStore, then
+ * slabStore, mirrors the same "try each store in turn" shape
+ * rightSidebar.ts and assemblyPanel.ts already use to resolve a
+ * selected/member id without assuming its type.
  */
 function deleteSelected(): void {
   const selectedId = selectionStore.get();
@@ -89,6 +105,8 @@ function deleteSelected(): void {
     commandExecutor.execute({ type: "pillar.delete", id: selectedId });
   } else if (beamStore.get(selectedId)) {
     commandExecutor.execute({ type: "beam.delete", id: selectedId });
+  } else if (slabStore.get(selectedId)) {
+    commandExecutor.execute({ type: "slab.delete", id: selectedId });
   }
 }
 
@@ -112,6 +130,11 @@ function duplicateSelected(): void {
     if (result.success && result.objectId) {
       selectionStore.select(result.objectId);
     }
+  } else if (slabStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "slab.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
   }
 }
 
@@ -126,6 +149,7 @@ const shell = createAppShell({
   onAddWall: addWall,
   onAddPillar: addPillar,
   onAddBeam: addBeam,
+  onAddSlab: addSlab,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
   onUndo: () => history.undo(),
@@ -133,6 +157,7 @@ const shell = createAppShell({
   wallStore,
   pillarStore,
   beamStore,
+  slabStore,
   assemblyStore,
   selectionStore,
   history,
@@ -141,5 +166,12 @@ const shell = createAppShell({
 
 appRoot.append(shell.root);
 
-sceneManager.current = new SceneManager(shell.viewportContainer, wallStore, pillarStore, beamStore, selectionStore);
+sceneManager.current = new SceneManager(
+  shell.viewportContainer,
+  wallStore,
+  pillarStore,
+  beamStore,
+  slabStore,
+  selectionStore
+);
 sceneManager.current.start();

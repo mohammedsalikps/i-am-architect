@@ -10,6 +10,7 @@ import { createViewControls, type ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
+import type { SlabStore } from "../engine/slab/SlabStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -21,6 +22,7 @@ export type AppShellOptions = {
   onAddWall: () => void;
   onAddPillar: () => void;
   onAddBeam: () => void;
+  onAddSlab: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
   onUndo: () => void;
@@ -28,6 +30,7 @@ export type AppShellOptions = {
   wallStore: WallStore;
   pillarStore: PillarStore;
   beamStore: BeamStore;
+  slabStore: SlabStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -62,7 +65,12 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const mainNav = createMainNav();
 
-  const ribbon = createConstructionRibbon(options.onAddWall, options.onAddPillar, options.onAddBeam);
+  const ribbon = createConstructionRibbon(
+    options.onAddWall,
+    options.onAddPillar,
+    options.onAddBeam,
+    options.onAddSlab
+  );
 
   const leftSidebar = createLeftSidebar(
     options.assemblyStore,
@@ -70,12 +78,14 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.selectionStore,
     options.wallStore,
     options.pillarStore,
-    options.beamStore
+    options.beamStore,
+    options.slabStore
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
     pillarStore: options.pillarStore,
     beamStore: options.beamStore,
+    slabStore: options.slabStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,

@@ -7,6 +7,7 @@ import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
+import type { SlabStore } from "../engine/slab/SlabStore";
 import type { ObjectId, ObjectType } from "../engine/objects/types";
 
 /** Truncates a long id for display; today's ids (e.g. "wall-1") are already short, so this is usually a no-op. */
@@ -14,30 +15,32 @@ function shortId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
-// Only wall/pillar/beam are resolvable today (see
+// Only wall/pillar/beam/slab are resolvable today (see
 // resolveConstructionObject.ts) - this map only needs an entry for each
 // type that resolver can actually return. A new object type's store
 // joining the resolver adds one line here.
 const TYPE_LABELS: Partial<Record<ObjectType, string>> = {
   wall: "Wall",
   pillar: "Pillar",
-  beam: "Beam"
+  beam: "Beam",
+  slab: "Slab"
 };
 
 /**
  * Resolves a member object id to a readable label, using
  * resolveConstructionObject() to check every implemented object-type
- * store (today: wall, pillar, beam) rather than assuming everything is
- * a wall. Never removes anything; an id that matches no known store
- * just reads as "Unknown object."
+ * store (today: wall, pillar, beam, slab) rather than assuming
+ * everything is a wall. Never removes anything; an id that matches no
+ * known store just reads as "Unknown object."
  */
 function resolveMemberLabel(
   objectId: ObjectId,
   wallStore: WallStore,
   pillarStore: PillarStore,
-  beamStore: BeamStore
+  beamStore: BeamStore,
+  slabStore: SlabStore
 ): { label: string; selectableId: ObjectId | null } {
-  const resolved = resolveConstructionObject(objectId, { wallStore, pillarStore, beamStore });
+  const resolved = resolveConstructionObject(objectId, { wallStore, pillarStore, beamStore, slabStore });
   if (resolved) {
     const typeLabel = TYPE_LABELS[resolved.type] ?? resolved.type;
     return { label: `${typeLabel} — ${shortId(objectId)}`, selectableId: objectId };
@@ -49,7 +52,7 @@ function resolveMemberLabel(
  * Minimal assembly-management panel: list existing assemblies (name +
  * object count), create/select/delete an assembly, show the selected
  * assembly's member objects, and add/remove the currently-selected
- * construction object (a wall, pillar, or beam) to/from the
+ * construction object (a wall, pillar, beam, or slab) to/from the
  * currently-selected assembly. Lives in the left sidebar.
  *
  * Uses its own SelectionStore instance for "which assembly is selected
@@ -66,7 +69,7 @@ function resolveMemberLabel(
  * affected by clicking a member, and construction-object selection is
  * never affected by anything else assembly-related.
  *
- * `wallStore`/`pillarStore`/`beamStore` are read-only here
+ * `wallStore`/`pillarStore`/`beamStore`/`slabStore` are read-only here
  * (`.get()`/`.subscribe()`), used only (via resolveConstructionObject)
  * to resolve a member id into a readable label - this panel never
  * writes to any of them.
@@ -83,7 +86,8 @@ export function createAssemblyPanel(
   selectionStore: SelectionStore,
   wallStore: WallStore,
   pillarStore: PillarStore,
-  beamStore: BeamStore
+  beamStore: BeamStore,
+  slabStore: SlabStore
 ): HTMLElement {
   const assemblySelection = new SelectionStore();
 
@@ -240,7 +244,13 @@ export function createAssemblyPanel(
             "ul",
             { className: "assembly-members" },
             assembly.objectIds.map((objectId) => {
-              const { label, selectableId } = resolveMemberLabel(objectId, wallStore, pillarStore, beamStore);
+              const { label, selectableId } = resolveMemberLabel(
+                objectId,
+                wallStore,
+                pillarStore,
+                beamStore,
+                slabStore
+              );
               const item = el("li", { className: "assembly-members__item" });
 
               if (selectableId) {
@@ -267,6 +277,7 @@ export function createAssemblyPanel(
   wallStore.subscribe(renderSelectedAssemblyDetail);
   pillarStore.subscribe(renderSelectedAssemblyDetail);
   beamStore.subscribe(renderSelectedAssemblyDetail);
+  slabStore.subscribe(renderSelectedAssemblyDetail);
 
   return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Assemblies" }),

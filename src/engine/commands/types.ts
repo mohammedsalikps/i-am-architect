@@ -7,6 +7,9 @@ import type { PillarValidationResult } from "../pillar/validatePillar";
 import type { CreateBeamOptions } from "../beam/createBeam";
 import type { BeamData, BeamId } from "../beam/types";
 import type { BeamValidationResult } from "../beam/validateBeam";
+import type { CreateSlabOptions } from "../slab/createSlab";
+import type { SlabData, SlabId } from "../slab/types";
+import type { SlabValidationResult } from "../slab/validateSlab";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
 
@@ -17,13 +20,15 @@ import type { ObjectId } from "../objects/types";
  * commands, a macro/scripting feature, or - today - a thin UI action)
  * request a mutation without calling WallStore/WallHistoryController/
  * PillarStore/PillarHistoryController/BeamStore/BeamHistoryController/
- * AssemblyStore directly. See commands/README.md.
+ * SlabStore/SlabHistoryController/AssemblyStore directly. See
+ * commands/README.md.
  *
- * The "pillar.*" and "beam.*" commands below are the second and third
- * object types to follow this pattern (after "wall.*") - a future
- * object type adds its own namespaced command interfaces here and
- * joins the Command union below the same way, giving CommandExecutor
- * one new switch case per command without changing any existing shape.
+ * The "pillar.*", "beam.*", and "slab.*" commands below are the
+ * second, third, and fourth object types to follow this pattern (after
+ * "wall.*") - a future object type adds its own namespaced command
+ * interfaces here and joins the Command union below the same way,
+ * giving CommandExecutor one new switch case per command without
+ * changing any existing shape.
  */
 
 export interface AddWallCommand {
@@ -95,6 +100,29 @@ export interface DuplicateBeamCommand {
   id: BeamId;
 }
 
+export interface AddSlabCommand {
+  type: "slab.add";
+  /** Same shape as createSlabData()'s options - flat, all optional, sensible defaults fill the rest. */
+  slab: CreateSlabOptions;
+}
+
+export interface UpdateSlabCommand {
+  type: "slab.update";
+  id: SlabId;
+  /** Same shape SlabStore.update() takes - see its docs for the "complete replacement object" convention on nested fields. */
+  changes: Partial<Omit<SlabData, "id" | "type">>;
+}
+
+export interface DeleteSlabCommand {
+  type: "slab.delete";
+  id: SlabId;
+}
+
+export interface DuplicateSlabCommand {
+  type: "slab.duplicate";
+  id: SlabId;
+}
+
 export interface CreateAssemblyCommand {
   type: "assembly.create";
   /** Same shape as createAssemblyData()'s options - id/createdAt/updatedAt are always generated, never caller-supplied. */
@@ -138,6 +166,10 @@ export type Command =
   | UpdateBeamCommand
   | DeleteBeamCommand
   | DuplicateBeamCommand
+  | AddSlabCommand
+  | UpdateSlabCommand
+  | DeleteSlabCommand
+  | DuplicateSlabCommand
   | CreateAssemblyCommand
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
@@ -182,4 +214,11 @@ export interface BeamHistoryLike {
   add(beam: BeamData): BeamValidationResult;
   update(id: BeamId, changes: Partial<Omit<BeamData, "id" | "type">>): BeamValidationResult;
   remove(id: BeamId): void;
+}
+
+/** The slab equivalent of WallHistoryLike/PillarHistoryLike/BeamHistoryLike - same reasoning, same shape. */
+export interface SlabHistoryLike {
+  add(slab: SlabData): SlabValidationResult;
+  update(id: SlabId, changes: Partial<Omit<SlabData, "id" | "type">>): SlabValidationResult;
+  remove(id: SlabId): void;
 }

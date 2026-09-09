@@ -8,6 +8,8 @@ import { createPillarData, duplicatePillarData } from "../pillar/createPillar.ts
 import { PillarStore } from "../pillar/PillarStore.ts";
 import { createBeamData, duplicateBeamData } from "../beam/createBeam.ts";
 import { BeamStore } from "../beam/BeamStore.ts";
+import { createSlabData, duplicateSlabData } from "../slab/createSlab.ts";
+import { SlabStore } from "../slab/SlabStore.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import type {
   Command,
@@ -24,6 +26,10 @@ import type {
   UpdateBeamCommand,
   DeleteBeamCommand,
   DuplicateBeamCommand,
+  AddSlabCommand,
+  UpdateSlabCommand,
+  DeleteSlabCommand,
+  DuplicateSlabCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
@@ -31,7 +37,8 @@ import type {
   RemoveObjectFromAssemblyCommand,
   WallHistoryLike,
   PillarHistoryLike,
-  BeamHistoryLike
+  BeamHistoryLike,
+  SlabHistoryLike
 } from "./types";
 
 const KNOWN_COMMAND_TYPES = [
@@ -47,6 +54,10 @@ const KNOWN_COMMAND_TYPES = [
   "beam.update",
   "beam.delete",
   "beam.duplicate",
+  "slab.add",
+  "slab.update",
+  "slab.delete",
+  "slab.duplicate",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -91,8 +102,9 @@ function isCommand(value: unknown): value is Command {
  * default only exists so wall-only/assembly-only call sites (e.g. the
  * existing tests in commands/verify.ts) keep compiling unchanged.
  *
- * beamStore/beamHistory follow the exact same defaulting idea as
- * pillarStore/pillarHistory - see the paragraph above.
+ * beamStore/beamHistory, and slabStore/slabHistory, follow the exact
+ * same defaulting idea as pillarStore/pillarHistory - see the
+ * paragraph above.
  */
 export class CommandExecutor {
   private readonly wallStore: WallStore;
@@ -101,6 +113,8 @@ export class CommandExecutor {
   private readonly pillarHistory: PillarHistoryLike;
   private readonly beamStore: BeamStore;
   private readonly beamHistory: BeamHistoryLike;
+  private readonly slabStore: SlabStore;
+  private readonly slabHistory: SlabHistoryLike;
   private readonly assemblyStore: AssemblyStore;
 
   constructor(
@@ -118,6 +132,12 @@ export class CommandExecutor {
       add: (beam) => beamStore.add(beam),
       update: (id, changes) => beamStore.update(id, changes),
       remove: (id) => beamStore.remove(id)
+    },
+    slabStore: SlabStore = new SlabStore(),
+    slabHistory: SlabHistoryLike = {
+      add: (slab) => slabStore.add(slab),
+      update: (id, changes) => slabStore.update(id, changes),
+      remove: (id) => slabStore.remove(id)
     }
   ) {
     this.wallStore = wallStore;
@@ -127,6 +147,8 @@ export class CommandExecutor {
     this.pillarHistory = pillarHistory;
     this.beamStore = beamStore;
     this.beamHistory = beamHistory;
+    this.slabStore = slabStore;
+    this.slabHistory = slabHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -160,6 +182,14 @@ export class CommandExecutor {
         return this.executeDeleteBeam(input);
       case "beam.duplicate":
         return this.executeDuplicateBeam(input);
+      case "slab.add":
+        return this.executeAddSlab(input);
+      case "slab.update":
+        return this.executeUpdateSlab(input);
+      case "slab.delete":
+        return this.executeDeleteSlab(input);
+      case "slab.duplicate":
+        return this.executeDuplicateSlab(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -371,6 +401,72 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Beam duplicated." };
+  }
+
+  private executeAddSlab(command: AddSlabCommand): CommandResult {
+    const slab = createSlabData(command.slab ?? {});
+    const result = this.slabHistory.add(slab);
+
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: "Could not add slab: validation failed." };
+    }
+    return { success: true, objectId: slab.id, message: "Slab added." };
+  }
+
+  private executeUpdateSlab(command: UpdateSlabCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "slab.update command is missing an id." };
+    }
+
+    const result = this.slabHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update slab: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Slab updated." };
+  }
+
+  private executeDeleteSlab(command: DeleteSlabCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "slab.delete command is missing an id." };
+    }
+
+    const existing = this.slabStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No slab found with id "${command.id}".` };
+    }
+
+    this.slabHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Slab deleted." };
+  }
+
+  private executeDuplicateSlab(command: DuplicateSlabCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "slab.duplicate command is missing an id." };
+    }
+
+    const source = this.slabStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No slab found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateSlabData(source);
+    const result = this.slabHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateSlabData() always produces valid data from an already-valid
+      // source slab, so this shouldn't happen in practice - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate slab: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Slab duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {
