@@ -4,6 +4,16 @@ import { addLights } from "./lights";
 import { addGround } from "./ground";
 import { addTestCube } from "./testCube";
 
+/** Camera view presets the UI's view-control buttons can request. */
+export type ViewPreset = "perspective" | "top" | "front" | "side";
+
+const VIEW_CAMERA_POSITIONS: Record<ViewPreset, THREE.Vector3Tuple> = {
+  perspective: [8, 8, 8],
+  top: [0, 14, 0.01], // tiny Z offset avoids OrbitControls gimbal lock looking straight down
+  front: [0, 4, 14],
+  side: [14, 4, 0]
+};
+
 /**
  * Owns the Three.js scene, camera, renderer and controls for the
  * 3D workspace. Purely a rendering/viewport concern - construction
@@ -55,6 +65,15 @@ export class SceneManager {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   };
+
+  /** Moves the camera to a named preset view, keeping the origin as the look-at target. */
+  setView(preset: ViewPreset): void {
+    const [x, y, z] = VIEW_CAMERA_POSITIONS[preset];
+    this.camera.position.set(x, y, z);
+    this.controls.target.set(0, 0, 0);
+    this.camera.lookAt(0, 0, 0);
+    this.controls.update();
+  }
 
   start(): void {
     const animate = (): void => {
