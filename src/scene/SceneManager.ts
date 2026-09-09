@@ -2,7 +2,6 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
-import { addTestCube } from "./testCube";
 import { WallLayer } from "./wall/WallLayer";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
@@ -57,7 +56,6 @@ export class SceneManager {
 
     addLights(this.scene);
     addGround(this.scene);
-    addTestCube(this.scene);
 
     // Not stored on `this`: WallLayer stays alive via the subscriptions it
     // registers with wallStore/selectionStore, which outlive this constructor.

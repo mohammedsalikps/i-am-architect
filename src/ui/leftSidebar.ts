@@ -1,22 +1,60 @@
 import { el } from "./dom";
+import { createAssemblyPanel } from "./assemblyPanel";
+import { createTabStrip, comingSoon } from "./tabStrip";
+import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
+import type { CommandExecutor } from "../engine/commands/CommandExecutor";
+import type { SelectionStore } from "../engine/selection/SelectionStore";
+import type { WallStore } from "../engine/wall/WallStore";
 
-const NAV_SECTIONS = ["Project", "Building", "Floors", "Rooms", "Objects"];
+const HIERARCHY_SECTIONS = ["Building", "Floors", "Rooms", "Objects"];
 
-/**
- * Left sidebar: project navigation plus a placeholder scene hierarchy.
- * No construction data yet - this is structural scaffolding only.
- */
-export function createLeftSidebar(): HTMLElement {
-  const nav = el(
-    "nav",
-    { className: "sidebar__nav" },
-    NAV_SECTIONS.map((label) => el("button", { className: "sidebar__nav-item", text: label, attrs: { type: "button" } }))
-  );
-
-  const hierarchy = el("div", { className: "sidebar__section" }, [
+function buildProjectHierarchy(): HTMLElement {
+  return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Hierarchy" }),
+    el(
+      "ul",
+      { className: "hierarchy-list" },
+      HIERARCHY_SECTIONS.map((label) => el("li", { className: "hierarchy-list__item", text: label }))
+    ),
     el("p", { className: "sidebar__placeholder", text: "No objects in the scene yet." })
   ]);
+}
 
-  return el("aside", { className: "sidebar sidebar--left" }, [nav, hierarchy]);
+/**
+ * Left workspace: a narrow icon rail (Project/Assets/Assemblies/Layers/
+ * Views/Measurements/Documents) that switches a single panel below it.
+ * "Project" shows the project hierarchy scaffold; "Assemblies" shows
+ * the existing, unmodified assembly panel (assemblyPanel.ts); the rest
+ * are "Coming soon" placeholders - this milestone doesn't add real
+ * asset/layer/view/measurement/document management, only somewhere for
+ * it to eventually live.
+ *
+ * `wallSelectionStore` and `wallStore` are threaded straight through to
+ * the assembly panel, unchanged from the previous milestone.
+ */
+export function createLeftSidebar(
+  assemblyStore: AssemblyStore,
+  commandExecutor: CommandExecutor,
+  wallSelectionStore: SelectionStore,
+  wallStore: WallStore
+): HTMLElement {
+  const { strip, panel } = createTabStrip(
+    [
+      { id: "project", label: "Project", build: buildProjectHierarchy },
+      {
+        id: "assemblies",
+        label: "Assemblies",
+        build: () => createAssemblyPanel(assemblyStore, commandExecutor, wallSelectionStore, wallStore)
+      },
+      { id: "assets", label: "Assets", build: () => comingSoon("Asset management"), disabled: true },
+      { id: "layers", label: "Layers", build: () => comingSoon("Layer management"), disabled: true },
+      { id: "views", label: "Views", build: () => comingSoon("Saved views"), disabled: true },
+      { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },
+      { id: "documents", label: "Documents", build: () => comingSoon("Document management"), disabled: true }
+    ],
+    "sidebar-rail",
+    "sidebar-rail__item"
+  );
+
+  return el("aside", { className: "sidebar sidebar--left" }, [strip, panel]);
 }

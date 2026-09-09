@@ -1,11 +1,7 @@
 import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
-import { WallStore } from "./engine/wall/WallStore";
-import { SelectionStore } from "./engine/selection/SelectionStore";
-import { HistoryManager } from "./engine/history/HistoryManager";
-import { WallHistoryController } from "./engine/history/wallHistory";
-import { CommandExecutor } from "./engine/commands/CommandExecutor";
+import { createProjectContext } from "./engine/project/ProjectContext";
 import type { AddWallCommand } from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
@@ -14,14 +10,11 @@ if (!appRoot) {
   throw new Error("Missing #app element in index.html");
 }
 
-const wallStore = new WallStore();
-const selectionStore = new SelectionStore();
-const history = new HistoryManager();
-const wallHistory = new WallHistoryController(wallStore, selectionStore, history);
-// CommandExecutor is the single boundary every wall UI action routes
-// through (Add/Update/Delete/Duplicate) - see src/engine/commands/README.md.
-// wallHistory itself is only used here, to construct the executor.
-const commandExecutor = new CommandExecutor(wallStore, wallHistory);
+// One shared composition root - see src/engine/project/ProjectContext.ts.
+// assemblyStore is the same instance commandExecutor uses internally
+// (not an invisible default of its own) - the left sidebar's assembly
+// panel reads/writes it through commandExecutor, same as wallStore.
+const { wallStore, assemblyStore, selectionStore, history, commandExecutor } = createProjectContext();
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -76,6 +69,7 @@ const shell = createAppShell({
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   wallStore,
+  assemblyStore,
   selectionStore,
   history,
   commandExecutor

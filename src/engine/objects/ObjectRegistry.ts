@@ -1,4 +1,4 @@
-import type { ConstructionObjectBase, ObjectId, ObjectType } from "./types";
+import type { ObjectId } from "./types";
 
 export type RegistryListener<T> = (objects: T[]) => void;
 
@@ -24,15 +24,22 @@ function deepClone<T>(value: T): T {
 }
 
 /**
- * Generic, object-type-agnostic store for any ConstructionObjectBase.
+ * Generic, object-type-agnostic store for anything with an `id`.
  * Mirrors WallStore's method shape (add/update/set/remove/get/getAll/
- * subscribe, plus has()) so a type-specific store can migrate onto this
- * later as a near drop-in. See objects/README.md for why WallStore
- * hasn't migrated onto this yet, and what that migration would look
- * like for wall, pillar, beam, slab, and other future object stores.
+ * subscribe, plus has()) so a type-specific store can compose this
+ * directly - WallStore already does (see WallStore.ts). See
+ * objects/README.md for that pattern and how future object-type
+ * stores (pillar, beam, slab, ...) follow it.
+ *
+ * The constraint is deliberately just `{ id: ObjectId }` rather than
+ * the full ConstructionObjectBase shape: the implementation below only
+ * ever keys on `.id`, so requiring more than that would have made this
+ * unusable for non-construction-object data that still deserves the
+ * same storage pattern - e.g. AssemblyStore (src/engine/assemblies/),
+ * which groups object ids but isn't itself a construction object.
  *
  * Independent from Three.js, rendering, UI, history, AI, and quotation
- * logic - it only knows about plain ConstructionObjectBase data.
+ * logic - it only knows about plain, identifiable data.
  *
  * Immutability at the boundary: objects are deep-cloned on the way in
  * (add/update/set) and on the way out (get/getAll), so callers can never
@@ -40,13 +47,7 @@ function deepClone<T>(value: T): T {
  * and mutating an object after passing it to add()/set() has no effect
  * on what's stored. The internal Map itself is never exposed.
  */
-// `any` for the dimensions parameter is deliberate: ConstructionObjectBase's
-// own default (Record<string, number>) requires an index signature, which
-// concrete dimension shapes like { length: number; height: number } don't
-// structurally have. This constraint only cares about the shared envelope
-// fields (id/type/position/rotation/material/color/assemblyId) - dimensions
-// can be anything, by design.
-export class ObjectRegistry<T extends ConstructionObjectBase<ObjectType, any>> {
+export class ObjectRegistry<T extends { id: ObjectId }> {
   private readonly objects: Map<ObjectId, T>;
   private readonly listeners: Set<RegistryListener<T>>;
 

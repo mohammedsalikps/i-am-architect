@@ -1,8 +1,8 @@
 /**
- * Lightweight in-memory verification for CommandExecutor. Same
- * approach as src/engine/objects/verify.ts and src/engine/wall/verify.ts:
- * no test framework, plain assertion helpers, run directly by Node.
- * Run with:
+ * Lightweight in-memory verification for CommandExecutor - both wall
+ * commands and assembly commands. Same approach as the other verify.ts
+ * scripts in this project: no test framework, plain assertion helpers,
+ * run directly by Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/commands/verify.ts
@@ -20,6 +20,11 @@
  * verified separately in the browser, against the real compiled
  * module - see the implementation report.
  *
+ * Assembly commands need no such stand-in - AssemblyStore has no
+ * parameter-property constructor, so the real class is used directly.
+ * Assembly commands don't touch history at all (see commands/README.md
+ * and assemblies/README.md), so there's nothing to stand in for there.
+ *
  * Explicit .ts extensions below are required for Node's native
  * TypeScript support to resolve these relative imports (see
  * allowImportingTsExtensions in tsconfig.json) - this file is run
@@ -27,6 +32,7 @@
  */
 import { CommandExecutor } from "./CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
+import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
 import type { WallHistoryLike } from "./types.ts";
@@ -265,6 +271,142 @@ function run(): void {
 
     executor.execute({ type: "wall.update", id: "does-not-exist", changes: { color: "#000000" } });
     assertEqual(history.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  // --- Assembly commands ---
+
+  function makeAssemblyExecutor(): { executor: CommandExecutor; assemblies: AssemblyStore } {
+    const wallStoreStub = new WallStore();
+    const history = makeWallHistoryStub(wallStoreStub);
+    const assemblies = new AssemblyStore();
+    return { executor: new CommandExecutor(wallStoreStub, history, assemblies), assemblies };
+  }
+
+  check("a valid assembly.create command succeeds and stores an assembly", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+
+    const result = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertEqual(assemblies.get(result.objectId as string)?.name, "Ground Floor", "stored name");
+  });
+
+  check("assembly.create with no name is rejected", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+
+    const result = executor.execute({ type: "assembly.create", assembly: {} });
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(assemblies.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("a valid assembly.update command succeeds and applies the change", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.update", id, changes: { name: "Renamed" } });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(assemblies.get(id)?.name, "Renamed", "stored name after update");
+  });
+
+  check("assembly.update always sets updatedAt to the current time, ignoring a caller-supplied value", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+    const id = created.objectId as string;
+    const originalUpdatedAt = assemblies.get(id)!.updatedAt;
+
+    executor.execute({ type: "assembly.update", id, changes: { name: "Renamed", updatedAt: 1 } });
+
+    assertTrue((assemblies.get(id)?.updatedAt ?? 0) >= originalUpdatedAt, "updatedAt should not go backwards");
+  });
+
+  check("an invalid assembly.update preserves the existing assembly", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({
+      type: "assembly.create",
+      assembly: { name: "Ground Floor", objectIds: ["wall-1"] }
+    });
+    const id = created.objectId as string;
+    const before = assemblies.get(id);
+
+    const result = executor.execute({ type: "assembly.update", id, changes: { objectIds: ["wall-1", "wall-1"] } });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(assemblies.get(id), before, "assembly should be byte-for-byte unchanged");
+  });
+
+  check("a valid assembly.delete command succeeds and removes the assembly", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(assemblies.get(id), undefined, "assembly should be gone");
+  });
+
+  check("assembly.delete with a missing id is rejected", () => {
+    const { executor } = makeAssemblyExecutor();
+    assertEqual(executor.execute({ type: "assembly.delete", id: "does-not-exist" }).success, false, "result.success");
+  });
+
+  check("assembly.addObject adds an object id", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.addObject", assemblyId: id, objectId: "wall-1" });
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(assemblies.get(id)?.objectIds, ["wall-1"], "objectIds after addObject");
+  });
+
+  check("assembly.addObject rejects adding a duplicate object id", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({
+      type: "assembly.create",
+      assembly: { name: "Ground Floor", objectIds: ["wall-1"] }
+    });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.addObject", assemblyId: id, objectId: "wall-1" });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(assemblies.get(id)?.objectIds, ["wall-1"], "objectIds should be unchanged");
+  });
+
+  check("assembly.removeObject removes an object id", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({
+      type: "assembly.create",
+      assembly: { name: "Ground Floor", objectIds: ["wall-1", "wall-2"] }
+    });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.removeObject", assemblyId: id, objectId: "wall-1" });
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(assemblies.get(id)?.objectIds, ["wall-2"], "objectIds after removeObject");
+  });
+
+  check("assembly.removeObject rejects removing an object id that isn't present", () => {
+    const { executor, assemblies } = makeAssemblyExecutor();
+    const created = executor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } });
+    const id = created.objectId as string;
+
+    const result = executor.execute({ type: "assembly.removeObject", assemblyId: id, objectId: "wall-1" });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(assemblies.get(id)?.objectIds, [], "objectIds should be unchanged");
+  });
+
+  check("an unknown command type is still rejected the same way with assemblyStore present", () => {
+    const { executor } = makeAssemblyExecutor();
+    assertEqual(executor.execute({ type: "assembly.frobnicate" }).success, false, "result.success");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

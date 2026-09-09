@@ -5,20 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>i am Architect</title>
     <style>
-      /* Full-window, minimal, distraction-free viewport for the 3D workspace. */
+      /* Full-window, minimal, distraction-free viewport for the 3D workspace.
+         overflow-y is auto (not hidden): the app shell targets 100vh, but at
+         narrow widths its stacked chrome can exceed that - scrolling the page
+         is preferable to clipping content. overflow-x stays hidden so nothing
+         can ever force page-level horizontal scroll. */
       html,
       body {
         margin: 0;
         padding: 0;
         width: 100%;
-        height: 100%;
-        overflow: hidden;
+        min-height: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
         background: #1a1a1a;
       }
 
       #app {
         width: 100vw;
-        height: 100vh;
+        min-height: 100vh;
       }
 
       canvas {

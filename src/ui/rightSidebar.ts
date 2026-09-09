@@ -1,4 +1,5 @@
 import { el } from "./dom";
+import { createTabStrip, comingSoon } from "./tabStrip";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
@@ -85,7 +86,28 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
-function buildWallPanels(wall: WallData, commandExecutor: CommandExecutor): HTMLElement[] {
+function buildWallPanels(
+  wall: WallData,
+  commandExecutor: CommandExecutor,
+  onDuplicateWall: () => void,
+  onDeleteWall: () => void
+): HTMLElement[] {
+  const duplicateButton = el("button", {
+    className: "toolbar-button",
+    text: "Duplicate",
+    attrs: { type: "button" }
+  });
+  duplicateButton.addEventListener("click", onDuplicateWall);
+
+  const deleteButton = el("button", {
+    className: "toolbar-button toolbar-button--danger",
+    text: "Delete",
+    attrs: { type: "button" }
+  });
+  deleteButton.addEventListener("click", onDeleteWall);
+
+  const actions = el("div", { className: "property-panel__actions" }, [duplicateButton, deleteButton]);
+
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
   // Rounded for display only - onChange still converts the raw typed value,
@@ -140,7 +162,7 @@ function buildWallPanels(wall: WallData, commandExecutor: CommandExecutor): HTML
 
   const color = section("Color", [colorInputRow("Color", wall.color, (value) => updateWall({ color: value }))]);
 
-  return [properties, transform, dimensions, material, color];
+  return [actions, properties, transform, dimensions, material, color];
 }
 
 function buildEmptyState(): HTMLElement {
@@ -149,30 +171,54 @@ function buildEmptyState(): HTMLElement {
   ]);
 }
 
+export type RightSidebarOptions = {
+  wallStore: WallStore;
+  selectionStore: SelectionStore;
+  commandExecutor: CommandExecutor;
+  onDuplicateWall: () => void;
+  onDeleteWall: () => void;
+};
+
 /**
- * Right sidebar / inspector. Reactive: subscribes to both stores and
- * re-renders whenever the selection or the selected wall's data
- * changes. Reads come straight from wallStore; edits go through
+ * Right sidebar / inspector. Tabbed: Properties/Materials/Blocks/
+ * Colors. Properties is the existing wall editor - reactive, subscribes
+ * to both stores and re-renders whenever the selection or the selected
+ * wall's data changes, plus Duplicate/Delete (moved in from the old
+ * header, same callbacks). Materials/Blocks/Colors are "Coming soon" -
+ * this milestone doesn't add material libraries or block catalogs.
+ *
+ * Reads come straight from wallStore; edits go through
  * commandExecutor.execute() (a "wall.update" command) rather than
  * touching wallStore or WallHistoryController directly - this module
  * never touches Three.js directly either.
  */
-export function createRightSidebar(
-  wallStore: WallStore,
-  selectionStore: SelectionStore,
-  commandExecutor: CommandExecutor
-): HTMLElement {
-  const panel = el("aside", { className: "sidebar sidebar--right" });
+export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
+  const properties = el("div", { className: "property-panel" });
 
   const render = (): void => {
-    const selectedId = selectionStore.get();
-    const wall = selectedId ? wallStore.get(selectedId) : undefined;
+    const selectedId = options.selectionStore.get();
+    const wall = selectedId ? options.wallStore.get(selectedId) : undefined;
 
-    panel.replaceChildren(...(wall ? buildWallPanels(wall, commandExecutor) : [buildEmptyState()]));
+    properties.replaceChildren(
+      ...(wall
+        ? buildWallPanels(wall, options.commandExecutor, options.onDuplicateWall, options.onDeleteWall)
+        : [buildEmptyState()])
+    );
   };
 
-  wallStore.subscribe(render);
-  selectionStore.subscribe(render);
+  options.wallStore.subscribe(render);
+  options.selectionStore.subscribe(render);
 
-  return panel;
+  const { strip, panel } = createTabStrip(
+    [
+      { id: "properties", label: "Properties", build: () => properties },
+      { id: "materials", label: "Materials", build: () => comingSoon("The material library"), disabled: true },
+      { id: "blocks", label: "Blocks", build: () => comingSoon("Reusable blocks"), disabled: true },
+      { id: "colors", label: "Colors", build: () => comingSoon("Saved color palettes"), disabled: true }
+    ],
+    "sidebar-tabs",
+    "sidebar-tabs__item"
+  );
+
+  return el("aside", { className: "sidebar sidebar--right" }, [strip, panel]);
 }

@@ -4,16 +4,22 @@
   --color-bg: #1a1a1a;
   --color-surface: #212121;
   --color-surface-raised: #262626;
+  --color-surface-sunken: #191919;
   --color-border: #333333;
   --color-text: #e6e6e6;
   --color-text-muted: #8a8a8a;
   --color-accent: #4f8ef7;
   --color-accent-text: #ffffff;
+  --color-success: #4caf7d;
 
-  --header-height: 52px;
-  --command-bar-height: 56px;
+  --topbar-height: 52px;
+  --mainnav-height: 38px;
+  --ribbon-height: 64px;
+  --rail-width: 64px;
   --sidebar-left-width: 220px;
   --sidebar-right-width: 260px;
+  --bottomworkspace-height: 118px;
+  --statusbar-height: 26px;
 
   font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
   font-size: 13px;
@@ -26,18 +32,31 @@ button {
 }
 
 /* ---------- Shell layout ---------- */
-
+/*
+ * min-height (not height): 100vh. The grid's body row uses
+ * minmax(360px, 1fr) so at >=1024px (where the fixed chrome rows
+ * comfortably fit within any tested viewport height) it behaves like a
+ * normal fill-the-screen app; if the stacked narrow layout below ever
+ * needs more room than 100vh, the row - and the page - simply grow and
+ * the page scrolls, instead of anything being clipped.
+ */
 .app-shell {
   width: 100%;
-  height: 100%;
+  min-height: 100vh;
   display: grid;
-  grid-template-rows: var(--header-height) 1fr var(--command-bar-height);
+  grid-template-rows:
+    var(--topbar-height)
+    var(--mainnav-height)
+    var(--ribbon-height)
+    minmax(360px, 1fr)
+    var(--bottomworkspace-height)
+    var(--statusbar-height);
   background: var(--color-bg);
 }
 
 .app-body {
   display: grid;
-  grid-template-columns: var(--sidebar-left-width) 1fr var(--sidebar-right-width);
+  grid-template-columns: calc(var(--rail-width) + var(--sidebar-left-width)) 1fr var(--sidebar-right-width);
   min-height: 0; /* allow children to shrink instead of overflowing */
 }
 
@@ -52,15 +71,23 @@ button {
   height: 100%;
 }
 
-/* ---------- Header ---------- */
+.viewport-area__controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1;
+}
+
+/* ---------- Top bar ---------- */
 
 .app-header {
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 20px;
   padding: 0 16px;
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
 }
 
 .app-header__brand {
@@ -81,6 +108,7 @@ button {
   color: var(--color-accent-text);
   font-weight: 600;
   font-size: 12px;
+  flex-shrink: 0;
 }
 
 .app-header__brand-name {
@@ -95,12 +123,62 @@ button {
   flex-shrink: 0;
 }
 
+.app-header__project {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.app-header__project-label {
+  color: var(--color-text-muted);
+}
+
+.app-header__project-name {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.app-header__search {
+  flex: 1 1 auto;
+  min-width: 120px;
+  max-width: 360px;
+  margin-left: auto;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 6px 12px;
+  color: var(--color-text);
+}
+
+.app-header__search::placeholder {
+  color: var(--color-text-muted);
+}
+
+.app-header__search:disabled {
+  cursor: not-allowed;
+}
+
+.app-header__icons {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.app-header__profile {
+  font-weight: 600;
+  font-size: 11px;
+}
+
+/* ---------- Shared toolbar buttons ---------- */
+
 .toolbar-button {
   background: transparent;
   border: 1px solid var(--color-border);
   border-radius: 4px;
   padding: 6px 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .toolbar-button:hover:not(:disabled) {
@@ -137,31 +215,116 @@ button {
   background: rgba(216, 76, 68, 0.15);
 }
 
-.app-header__project {
-  margin-left: auto;
+/* ---------- Main nav ---------- */
+
+.app-mainnav {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  flex-shrink: 0;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 12px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
 }
 
-.app-header__project-label {
+.app-mainnav__item {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0 12px;
+  cursor: pointer;
   color: var(--color-text-muted);
-}
-
-.app-header__project-name {
+  white-space: nowrap;
   font-weight: 500;
 }
 
-/* ---------- View controls (shared by header) ---------- */
+.app-mainnav__item:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.app-mainnav__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.app-mainnav__item--active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+/* ---------- Construction ribbon ---------- */
+
+.app-ribbon {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 6px 12px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.app-ribbon__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 64px;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 2px;
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.app-ribbon__item:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.app-ribbon__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.app-ribbon__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.app-ribbon__item:not(:disabled) .app-ribbon__icon {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.app-ribbon__label {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* ---------- View controls (viewport overlay) ---------- */
 
 .view-controls {
   display: flex;
   gap: 2px;
   padding: 2px;
-  background: var(--color-bg);
+  background: rgba(26, 26, 26, 0.85);
   border: 1px solid var(--color-border);
   border-radius: 4px;
+  backdrop-filter: blur(2px);
 }
 
 .view-controls__button {
@@ -182,41 +345,34 @@ button {
   color: var(--color-accent-text);
 }
 
-/* ---------- Sidebars ---------- */
+/* ---------- Sidebars (shared) ---------- */
 
 .sidebar {
   background: var(--color-surface);
-  overflow-y: auto;
   min-height: 0;
 }
 
 .sidebar--left {
+  display: flex;
+  flex-direction: row;
   border-right: 1px solid var(--color-border);
+  min-height: 0;
 }
 
 .sidebar--right {
-  border-left: 1px solid var(--color-border);
-}
-
-.sidebar__nav {
   display: flex;
   flex-direction: column;
-  padding: 8px;
-  border-bottom: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border);
+  min-height: 0;
 }
 
-.sidebar__nav-item {
-  text-align: left;
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  padding: 8px 10px;
-  cursor: pointer;
-  color: var(--color-text);
-}
-
-.sidebar__nav-item:hover {
-  background: var(--color-surface-raised);
+/* Generic tab-strip panel (used by the left rail, right sidebar tabs,
+   and bottom workspace tabs - see tabStrip.ts). */
+.tab-strip__panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .sidebar__section {
@@ -237,6 +393,249 @@ button {
   margin: 0;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* ---------- Left rail + hierarchy ---------- */
+
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: var(--rail-width);
+  flex-shrink: 0;
+  padding: 8px 4px;
+  gap: 2px;
+  border-right: 1px solid var(--color-border);
+  overflow-y: auto;
+}
+
+.sidebar-rail__item {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 2px;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  line-height: 1.3;
+  text-align: center;
+}
+
+.sidebar-rail__item:hover:not(:disabled) {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}
+
+.sidebar-rail__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sidebar-rail__item--active {
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.hierarchy-list {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hierarchy-list__item {
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--color-text);
+}
+
+/* ---------- Right sidebar tabs ---------- */
+
+.sidebar-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.sidebar-tabs__item {
+  flex: 1;
+  min-width: 64px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 6px;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.sidebar-tabs__item:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.sidebar-tabs__item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sidebar-tabs__item--active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+/* ---------- Property panel (right sidebar, Properties tab) ---------- */
+
+.property-panel__actions {
+  display: flex;
+  gap: 6px;
+  padding: 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.property-panel__actions .toolbar-button {
+  flex: 1;
+}
+
+/* ---------- Assembly panel (left sidebar) ---------- */
+
+.assembly-panel__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.assembly-panel__actions--membership {
+  margin-top: 10px;
+  margin-bottom: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.assembly-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assembly-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--color-text);
+  text-align: left;
+}
+
+.assembly-list__item:hover {
+  background: var(--color-surface-raised);
+}
+
+.assembly-list__item--selected {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.assembly-list__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assembly-list__count {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.assembly-list__item--selected .assembly-list__count {
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* ---------- Assembly detail (selected assembly's member objects) ---------- */
+
+.assembly-detail {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.assembly-detail__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.assembly-detail__name {
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assembly-detail__count {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.assembly-members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assembly-members__item {
+  min-width: 0;
+}
+
+.assembly-members__link {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--color-text);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assembly-members__link:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.assembly-members__unknown {
+  display: block;
+  padding: 4px 8px;
+  color: var(--color-text-muted);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---------- Property rows (right sidebar) ---------- */
@@ -300,15 +699,52 @@ button {
   cursor: pointer;
 }
 
-/* ---------- Command bar ---------- */
+/* ---------- Bottom workspace ---------- */
 
 .command-bar {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 16px;
+  flex-direction: column;
   background: var(--color-surface);
   border-top: 1px solid var(--color-border);
+  min-height: 0;
+}
+
+.command-bar__tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border);
+  overflow-x: auto;
+}
+
+.command-bar__tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.command-bar__tab:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.command-bar__tab:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.command-bar__tab--active {
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
+}
+
+.command-bar__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
 }
 
 .command-bar__input {
@@ -344,6 +780,78 @@ button {
 .command-bar__note {
   color: var(--color-text-muted);
   font-size: 12px;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+/* ---------- Status bar ---------- */
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  overflow-x: auto;
+}
+
+.status-bar__item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.status-bar__item-label {
+  color: var(--color-text-muted);
+}
+
+.status-bar__item-value {
+  color: var(--color-text);
+}
+
+.status-bar__item--state {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.status-bar__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  flex-shrink: 0;
+}
+
+/* ---------- Responsive: collapse the 3-column body below 1024px ---------- */
+
+@media (max-width: 1023px) {
+  .app-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .sidebar--left,
+  .sidebar--right {
+    flex-shrink: 0;
+  }
+
+  .sidebar-rail {
+    overflow-y: visible;
+  }
+
+  .tab-strip__panel {
+    overflow-y: visible;
+  }
+
+  .viewport-area {
+    height: 50vh;
+    min-height: 320px;
+    flex-shrink: 0;
+  }
 }
