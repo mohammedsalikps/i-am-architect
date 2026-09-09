@@ -1,5 +1,6 @@
 import type { WallData, WallId } from "../wall/types";
 import type { WallStore } from "../wall/WallStore";
+import type { WallValidationResult } from "../wall/validateWall";
 import type { SelectionStore } from "../selection/SelectionStore";
 import { HistoryManager } from "./HistoryManager";
 
@@ -15,7 +16,10 @@ import { HistoryManager } from "./HistoryManager";
  * that result: a rejected write is left exactly as WallStore left it
  * (nothing stored/changed, no subscriber notification) and, to match,
  * no undo/redo Command is recorded for it either - there would be
- * nothing meaningful to undo.
+ * nothing meaningful to undo. add() and update() pass the same
+ * WallValidationResult back to their own caller too, so a caller like
+ * CommandExecutor (src/engine/commands/) can report success/failure
+ * without duplicating WallStore's validation logic.
  */
 export class WallHistoryController {
   constructor(
@@ -25,10 +29,10 @@ export class WallHistoryController {
   ) {}
 
   /** Adds a brand-new wall (covers both "Add Wall" and "Duplicate Wall" - a duplicate is just a new wall). */
-  add(wall: WallData): void {
+  add(wall: WallData): WallValidationResult {
     const result = this.wallStore.add(wall);
     if (!result.valid) {
-      return; // rejected by validation - nothing was stored, don't record undo history
+      return result; // rejected by validation - nothing was stored, don't record undo history
     }
 
     this.history.record({
@@ -41,6 +45,8 @@ export class WallHistoryController {
         this.selectionStore.select(wall.id);
       }
     });
+
+    return result;
   }
 
   /** Removes a wall, snapshotting it first so undo can restore it exactly. */
@@ -66,20 +72,18 @@ export class WallHistoryController {
   }
 
   /** Applies a property edit, snapshotting before/after so undo/redo restore exactly. */
-  update(id: WallId, changes: Partial<Omit<WallData, "id" | "type">>): void {
+  update(id: WallId, changes: Partial<Omit<WallData, "id" | "type">>): WallValidationResult {
     const before = this.wallStore.get(id);
-    if (!before) {
-      return;
-    }
 
     const result = this.wallStore.update(id, changes);
     if (!result.valid) {
-      return; // rejected by validation - the wall is unchanged, don't record undo history
+      return result; // missing id, or rejected by validation - the wall is unchanged either way
     }
 
+    // result.valid implies `before` was found (WallStore.update() only succeeds when the id exists).
     const after = this.wallStore.get(id);
-    if (!after) {
-      return; // shouldn't happen - stay defensive
+    if (!before || !after) {
+      return result; // shouldn't happen - stay defensive
     }
 
     this.history.record({
@@ -92,5 +96,7 @@ export class WallHistoryController {
         this.selectionStore.select(id);
       }
     });
+
+    return result;
   }
 }

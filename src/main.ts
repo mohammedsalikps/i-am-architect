@@ -3,9 +3,11 @@ import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { WallStore } from "./engine/wall/WallStore";
 import { SelectionStore } from "./engine/selection/SelectionStore";
-import { createWallData, duplicateWallData } from "./engine/wall/createWall";
+import { duplicateWallData } from "./engine/wall/createWall";
 import { HistoryManager } from "./engine/history/HistoryManager";
 import { WallHistoryController } from "./engine/history/wallHistory";
+import { CommandExecutor } from "./engine/commands/CommandExecutor";
+import type { AddWallCommand } from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
 
@@ -17,6 +19,10 @@ const wallStore = new WallStore();
 const selectionStore = new SelectionStore();
 const history = new HistoryManager();
 const wallHistory = new WallHistoryController(wallStore, selectionStore, history);
+// Minimal proof CommandExecutor works end-to-end: "Add Wall" routes through
+// it instead of calling wallHistory directly. Duplicate/Delete/Update still
+// call wallHistory/wallStore directly - see src/engine/commands/README.md.
+const commandExecutor = new CommandExecutor(wallStore, wallHistory);
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -25,7 +31,11 @@ const WALL_Z_SPACING = 2.5;
 
 function addWall(): void {
   const index = wallStore.getAll().length;
-  wallHistory.add(createWallData({ position: { z: WALL_Z_START + index * WALL_Z_SPACING } }));
+  const command: AddWallCommand = {
+    type: "wall.add",
+    wall: { position: { z: WALL_Z_START + index * WALL_Z_SPACING } }
+  };
+  commandExecutor.execute(command);
 }
 
 addWall(); // default wall, visible on the grid at startup
