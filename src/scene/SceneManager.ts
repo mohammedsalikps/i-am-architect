@@ -6,11 +6,15 @@ import { WallLayer } from "./wall/WallLayer";
 import { PillarLayer } from "./pillar/PillarLayer";
 import { BeamLayer } from "./beam/BeamLayer";
 import { SlabLayer } from "./slab/SlabLayer";
+import { DoorLayer } from "./door/DoorLayer";
+import { WindowLayer } from "./window/WindowLayer";
 import { SelectionRaycaster } from "./SelectionRaycaster";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
+import type { DoorStore } from "../engine/door/DoorStore";
+import type { WindowStore } from "../engine/window/WindowStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 /** Camera view presets the UI's view-control buttons can request. */
@@ -28,10 +32,10 @@ const VIEW_CAMERA_POSITIONS: Record<ViewPreset, THREE.Vector3Tuple> = {
  * 3D workspace. Purely a rendering/viewport concern - construction
  * *data* logic (walls, bricks, dimensions, etc.) belongs in src/engine.
  * Rendering of construction objects is delegated to dedicated layers
- * (WallLayer, PillarLayer, BeamLayer, SlabLayer, ...) rather than
- * inlined here, so this class stays a general-purpose scene host.
- * Click-to-select is likewise delegated to one shared
- * SelectionRaycaster spanning every layer.
+ * (WallLayer, PillarLayer, BeamLayer, SlabLayer, DoorLayer,
+ * WindowLayer, ...) rather than inlined here, so this class stays a
+ * general-purpose scene host. Click-to-select is likewise delegated to
+ * one shared SelectionRaycaster spanning every layer.
  */
 export class SceneManager {
   private readonly scene: THREE.Scene;
@@ -46,6 +50,8 @@ export class SceneManager {
     pillarStore: PillarStore,
     beamStore: BeamStore,
     slabStore: SlabStore,
+    doorStore: DoorStore,
+    windowStore: WindowStore,
     selectionStore: SelectionStore
   ) {
     this.container = container;
@@ -73,13 +79,15 @@ export class SceneManager {
     addLights(this.scene);
     addGround(this.scene);
 
-    // Not stored on `this`: WallLayer/PillarLayer/BeamLayer/SlabLayer
-    // stay alive via the subscriptions they register with their
-    // stores/selectionStore, which outlive this constructor.
+    // Not stored on `this`: every *Layer stays alive via the
+    // subscriptions it registers with its store/selectionStore, which
+    // outlive this constructor.
     const wallLayer = new WallLayer(this.scene, wallStore, selectionStore);
     const pillarLayer = new PillarLayer(this.scene, pillarStore, selectionStore);
     const beamLayer = new BeamLayer(this.scene, beamStore, selectionStore);
     const slabLayer = new SlabLayer(this.scene, slabStore, selectionStore);
+    const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore);
+    const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore);
 
     // One shared raycaster combines every layer's meshes into a single
     // click handler - see SelectionRaycaster.ts for why independent
@@ -89,6 +97,8 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => pillarLayer.getMeshes());
     selectionRaycaster.registerLayer(() => beamLayer.getMeshes());
     selectionRaycaster.registerLayer(() => slabLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
 
     window.addEventListener("resize", this.handleResize);
   }

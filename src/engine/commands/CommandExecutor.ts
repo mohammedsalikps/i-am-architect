@@ -10,6 +10,10 @@ import { createBeamData, duplicateBeamData } from "../beam/createBeam.ts";
 import { BeamStore } from "../beam/BeamStore.ts";
 import { createSlabData, duplicateSlabData } from "../slab/createSlab.ts";
 import { SlabStore } from "../slab/SlabStore.ts";
+import { createDoorData, duplicateDoorData } from "../door/createDoor.ts";
+import { DoorStore } from "../door/DoorStore.ts";
+import { createWindowData, duplicateWindowData } from "../window/createWindow.ts";
+import { WindowStore } from "../window/WindowStore.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import type {
   Command,
@@ -30,6 +34,14 @@ import type {
   UpdateSlabCommand,
   DeleteSlabCommand,
   DuplicateSlabCommand,
+  AddDoorCommand,
+  UpdateDoorCommand,
+  DeleteDoorCommand,
+  DuplicateDoorCommand,
+  AddWindowCommand,
+  UpdateWindowCommand,
+  DeleteWindowCommand,
+  DuplicateWindowCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
@@ -38,7 +50,9 @@ import type {
   WallHistoryLike,
   PillarHistoryLike,
   BeamHistoryLike,
-  SlabHistoryLike
+  SlabHistoryLike,
+  DoorHistoryLike,
+  WindowHistoryLike
 } from "./types";
 
 const KNOWN_COMMAND_TYPES = [
@@ -58,6 +72,14 @@ const KNOWN_COMMAND_TYPES = [
   "slab.update",
   "slab.delete",
   "slab.duplicate",
+  "door.add",
+  "door.update",
+  "door.delete",
+  "door.duplicate",
+  "window.add",
+  "window.update",
+  "window.delete",
+  "window.duplicate",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -102,9 +124,9 @@ function isCommand(value: unknown): value is Command {
  * default only exists so wall-only/assembly-only call sites (e.g. the
  * existing tests in commands/verify.ts) keep compiling unchanged.
  *
- * beamStore/beamHistory, and slabStore/slabHistory, follow the exact
- * same defaulting idea as pillarStore/pillarHistory - see the
- * paragraph above.
+ * beamStore/beamHistory, slabStore/slabHistory, doorStore/doorHistory,
+ * and windowStore/windowHistory, all follow the exact same defaulting
+ * idea as pillarStore/pillarHistory - see the paragraph above.
  */
 export class CommandExecutor {
   private readonly wallStore: WallStore;
@@ -115,6 +137,10 @@ export class CommandExecutor {
   private readonly beamHistory: BeamHistoryLike;
   private readonly slabStore: SlabStore;
   private readonly slabHistory: SlabHistoryLike;
+  private readonly doorStore: DoorStore;
+  private readonly doorHistory: DoorHistoryLike;
+  private readonly windowStore: WindowStore;
+  private readonly windowHistory: WindowHistoryLike;
   private readonly assemblyStore: AssemblyStore;
 
   constructor(
@@ -138,6 +164,18 @@ export class CommandExecutor {
       add: (slab) => slabStore.add(slab),
       update: (id, changes) => slabStore.update(id, changes),
       remove: (id) => slabStore.remove(id)
+    },
+    doorStore: DoorStore = new DoorStore(),
+    doorHistory: DoorHistoryLike = {
+      add: (door) => doorStore.add(door),
+      update: (id, changes) => doorStore.update(id, changes),
+      remove: (id) => doorStore.remove(id)
+    },
+    windowStore: WindowStore = new WindowStore(),
+    windowHistory: WindowHistoryLike = {
+      add: (windowData) => windowStore.add(windowData),
+      update: (id, changes) => windowStore.update(id, changes),
+      remove: (id) => windowStore.remove(id)
     }
   ) {
     this.wallStore = wallStore;
@@ -149,6 +187,10 @@ export class CommandExecutor {
     this.beamHistory = beamHistory;
     this.slabStore = slabStore;
     this.slabHistory = slabHistory;
+    this.doorStore = doorStore;
+    this.doorHistory = doorHistory;
+    this.windowStore = windowStore;
+    this.windowHistory = windowHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -190,6 +232,22 @@ export class CommandExecutor {
         return this.executeDeleteSlab(input);
       case "slab.duplicate":
         return this.executeDuplicateSlab(input);
+      case "door.add":
+        return this.executeAddDoor(input);
+      case "door.update":
+        return this.executeUpdateDoor(input);
+      case "door.delete":
+        return this.executeDeleteDoor(input);
+      case "door.duplicate":
+        return this.executeDuplicateDoor(input);
+      case "window.add":
+        return this.executeAddWindow(input);
+      case "window.update":
+        return this.executeUpdateWindow(input);
+      case "window.delete":
+        return this.executeDeleteWindow(input);
+      case "window.duplicate":
+        return this.executeDuplicateWindow(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -467,6 +525,138 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Slab duplicated." };
+  }
+
+  private executeAddDoor(command: AddDoorCommand): CommandResult {
+    const door = createDoorData(command.door ?? {});
+    const result = this.doorHistory.add(door);
+
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: "Could not add door: validation failed." };
+    }
+    return { success: true, objectId: door.id, message: "Door added." };
+  }
+
+  private executeUpdateDoor(command: UpdateDoorCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "door.update command is missing an id." };
+    }
+
+    const result = this.doorHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update door: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Door updated." };
+  }
+
+  private executeDeleteDoor(command: DeleteDoorCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "door.delete command is missing an id." };
+    }
+
+    const existing = this.doorStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No door found with id "${command.id}".` };
+    }
+
+    this.doorHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Door deleted." };
+  }
+
+  private executeDuplicateDoor(command: DuplicateDoorCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "door.duplicate command is missing an id." };
+    }
+
+    const source = this.doorStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No door found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateDoorData(source);
+    const result = this.doorHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateDoorData() always produces valid data from an already-valid
+      // source door, so this shouldn't happen in practice - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate door: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Door duplicated." };
+  }
+
+  private executeAddWindow(command: AddWindowCommand): CommandResult {
+    const windowData = createWindowData(command.window ?? {});
+    const result = this.windowHistory.add(windowData);
+
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: "Could not add window: validation failed." };
+    }
+    return { success: true, objectId: windowData.id, message: "Window added." };
+  }
+
+  private executeUpdateWindow(command: UpdateWindowCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "window.update command is missing an id." };
+    }
+
+    const result = this.windowHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update window: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Window updated." };
+  }
+
+  private executeDeleteWindow(command: DeleteWindowCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "window.delete command is missing an id." };
+    }
+
+    const existing = this.windowStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No window found with id "${command.id}".` };
+    }
+
+    this.windowHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Window deleted." };
+  }
+
+  private executeDuplicateWindow(command: DuplicateWindowCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "window.duplicate command is missing an id." };
+    }
+
+    const source = this.windowStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No window found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateWindowData(source);
+    const result = this.windowHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateWindowData() always produces valid data from an already-valid
+      // source window, so this shouldn't happen in practice - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate window: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Window duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {

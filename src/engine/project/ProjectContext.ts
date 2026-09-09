@@ -2,6 +2,8 @@ import { WallStore } from "../wall/WallStore";
 import { PillarStore } from "../pillar/PillarStore";
 import { BeamStore } from "../beam/BeamStore";
 import { SlabStore } from "../slab/SlabStore";
+import { DoorStore } from "../door/DoorStore";
+import { WindowStore } from "../window/WindowStore";
 import { AssemblyStore } from "../assemblies/AssemblyStore";
 import { SelectionStore } from "../selection/SelectionStore";
 import { HistoryManager } from "../history/HistoryManager";
@@ -9,6 +11,8 @@ import { WallHistoryController } from "../history/wallHistory";
 import { PillarHistoryController } from "../history/pillarHistory";
 import { BeamHistoryController } from "../history/beamHistory";
 import { SlabHistoryController } from "../history/slabHistory";
+import { DoorHistoryController } from "../history/doorHistory";
+import { WindowHistoryController } from "../history/windowHistory";
 import { CommandExecutor } from "../commands/CommandExecutor";
 
 /**
@@ -19,18 +23,19 @@ import { CommandExecutor } from "../commands/CommandExecutor";
  * individually - that's what guarantees exactly one AssemblyStore (and
  * one of everything else) exists for the whole running app, and that
  * CommandExecutor holds the SAME AssemblyStore/PillarStore/BeamStore/
- * SlabStore instance every other consumer sees, not a private default
- * of its own (CommandExecutor's constructor still has defaults for
- * those - see its own docs - but nothing in the running app should end
- * up relying on them; this module is what prevents that).
+ * SlabStore/DoorStore/WindowStore instance every other consumer sees,
+ * not a private default of its own (CommandExecutor's constructor
+ * still has defaults for those - see its own docs - but nothing in the
+ * running app should end up relying on them; this module is what
+ * prevents that).
  *
- * wallHistory, pillarHistory, beamHistory, and slabHistory share the
- * SAME HistoryManager instance, so wall, pillar, beam, and slab
- * undo/redo interleave into one global undo stack - not four
- * independent ones. selectionStore is likewise shared across all four
- * object types (it was already generic, not wall-specific), which is
- * what gives "one selected construction object at a time" across all
- * of them with no extra code.
+ * wallHistory, pillarHistory, beamHistory, slabHistory, doorHistory,
+ * and windowHistory all share the SAME HistoryManager instance, so
+ * every object type's undo/redo interleaves into one global undo
+ * stack - not six independent ones. selectionStore is likewise shared
+ * across every object type (it was already generic, not wall-specific),
+ * which is what gives "one selected construction object at a time"
+ * across all of them with no extra code.
  *
  * Deliberately excludes app-bootstrapping decisions (e.g. "create a
  * default wall on startup") - this module only wires infrastructure
@@ -48,6 +53,8 @@ export interface ProjectContext {
   pillarStore: PillarStore;
   beamStore: BeamStore;
   slabStore: SlabStore;
+  doorStore: DoorStore;
+  windowStore: WindowStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -55,6 +62,8 @@ export interface ProjectContext {
   pillarHistory: PillarHistoryController;
   beamHistory: BeamHistoryController;
   slabHistory: SlabHistoryController;
+  doorHistory: DoorHistoryController;
+  windowHistory: WindowHistoryController;
   commandExecutor: CommandExecutor;
 }
 
@@ -64,6 +73,8 @@ export function createProjectContext(): ProjectContext {
   const pillarStore = new PillarStore();
   const beamStore = new BeamStore();
   const slabStore = new SlabStore();
+  const doorStore = new DoorStore();
+  const windowStore = new WindowStore();
   const assemblyStore = new AssemblyStore();
   const selectionStore = new SelectionStore();
   const history = new HistoryManager();
@@ -71,6 +82,8 @@ export function createProjectContext(): ProjectContext {
   const pillarHistory = new PillarHistoryController(pillarStore, selectionStore, history);
   const beamHistory = new BeamHistoryController(beamStore, selectionStore, history);
   const slabHistory = new SlabHistoryController(slabStore, selectionStore, history);
+  const doorHistory = new DoorHistoryController(doorStore, selectionStore, history);
+  const windowHistory = new WindowHistoryController(windowStore, selectionStore, history);
   const commandExecutor = new CommandExecutor(
     wallStore,
     wallHistory,
@@ -80,7 +93,11 @@ export function createProjectContext(): ProjectContext {
     beamStore,
     beamHistory,
     slabStore,
-    slabHistory
+    slabHistory,
+    doorStore,
+    doorHistory,
+    windowStore,
+    windowHistory
   );
 
   return {
@@ -88,6 +105,8 @@ export function createProjectContext(): ProjectContext {
     pillarStore,
     beamStore,
     slabStore,
+    doorStore,
+    windowStore,
     assemblyStore,
     selectionStore,
     history,
@@ -95,6 +114,8 @@ export function createProjectContext(): ProjectContext {
     pillarHistory,
     beamHistory,
     slabHistory,
+    doorHistory,
+    windowHistory,
     commandExecutor
   };
 }

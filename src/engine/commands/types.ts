@@ -10,6 +10,12 @@ import type { BeamValidationResult } from "../beam/validateBeam";
 import type { CreateSlabOptions } from "../slab/createSlab";
 import type { SlabData, SlabId } from "../slab/types";
 import type { SlabValidationResult } from "../slab/validateSlab";
+import type { CreateDoorOptions } from "../door/createDoor";
+import type { DoorData, DoorId } from "../door/types";
+import type { DoorValidationResult } from "../door/validateDoor";
+import type { CreateWindowOptions } from "../window/createWindow";
+import type { WindowData, WindowId } from "../window/types";
+import type { WindowValidationResult } from "../window/validateWindow";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
 
@@ -20,15 +26,16 @@ import type { ObjectId } from "../objects/types";
  * commands, a macro/scripting feature, or - today - a thin UI action)
  * request a mutation without calling WallStore/WallHistoryController/
  * PillarStore/PillarHistoryController/BeamStore/BeamHistoryController/
- * SlabStore/SlabHistoryController/AssemblyStore directly. See
+ * SlabStore/SlabHistoryController/DoorStore/DoorHistoryController/
+ * WindowStore/WindowHistoryController/AssemblyStore directly. See
  * commands/README.md.
  *
- * The "pillar.*", "beam.*", and "slab.*" commands below are the
- * second, third, and fourth object types to follow this pattern (after
- * "wall.*") - a future object type adds its own namespaced command
- * interfaces here and joins the Command union below the same way,
- * giving CommandExecutor one new switch case per command without
- * changing any existing shape.
+ * The "pillar.*", "beam.*", "slab.*", "door.*", and "window.*"
+ * commands below are the second through sixth object types to follow
+ * this pattern (after "wall.*") - a future object type adds its own
+ * namespaced command interfaces here and joins the Command union below
+ * the same way, giving CommandExecutor one new switch case per command
+ * without changing any existing shape.
  */
 
 export interface AddWallCommand {
@@ -123,6 +130,52 @@ export interface DuplicateSlabCommand {
   id: SlabId;
 }
 
+export interface AddDoorCommand {
+  type: "door.add";
+  /** Same shape as createDoorData()'s options - flat, all optional, sensible defaults fill the rest. */
+  door: CreateDoorOptions;
+}
+
+export interface UpdateDoorCommand {
+  type: "door.update";
+  id: DoorId;
+  /** Same shape DoorStore.update() takes - see its docs for the "complete replacement object" convention on nested fields. */
+  changes: Partial<Omit<DoorData, "id" | "type">>;
+}
+
+export interface DeleteDoorCommand {
+  type: "door.delete";
+  id: DoorId;
+}
+
+export interface DuplicateDoorCommand {
+  type: "door.duplicate";
+  id: DoorId;
+}
+
+export interface AddWindowCommand {
+  type: "window.add";
+  /** Same shape as createWindowData()'s options - flat, all optional, sensible defaults fill the rest. */
+  window: CreateWindowOptions;
+}
+
+export interface UpdateWindowCommand {
+  type: "window.update";
+  id: WindowId;
+  /** Same shape WindowStore.update() takes - see its docs for the "complete replacement object" convention on nested fields. */
+  changes: Partial<Omit<WindowData, "id" | "type">>;
+}
+
+export interface DeleteWindowCommand {
+  type: "window.delete";
+  id: WindowId;
+}
+
+export interface DuplicateWindowCommand {
+  type: "window.duplicate";
+  id: WindowId;
+}
+
 export interface CreateAssemblyCommand {
   type: "assembly.create";
   /** Same shape as createAssemblyData()'s options - id/createdAt/updatedAt are always generated, never caller-supplied. */
@@ -170,6 +223,14 @@ export type Command =
   | UpdateSlabCommand
   | DeleteSlabCommand
   | DuplicateSlabCommand
+  | AddDoorCommand
+  | UpdateDoorCommand
+  | DeleteDoorCommand
+  | DuplicateDoorCommand
+  | AddWindowCommand
+  | UpdateWindowCommand
+  | DeleteWindowCommand
+  | DuplicateWindowCommand
   | CreateAssemblyCommand
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
@@ -221,4 +282,18 @@ export interface SlabHistoryLike {
   add(slab: SlabData): SlabValidationResult;
   update(id: SlabId, changes: Partial<Omit<SlabData, "id" | "type">>): SlabValidationResult;
   remove(id: SlabId): void;
+}
+
+/** The door equivalent of WallHistoryLike and every sibling *HistoryLike - same reasoning, same shape. */
+export interface DoorHistoryLike {
+  add(door: DoorData): DoorValidationResult;
+  update(id: DoorId, changes: Partial<Omit<DoorData, "id" | "type">>): DoorValidationResult;
+  remove(id: DoorId): void;
+}
+
+/** The window equivalent of WallHistoryLike and every sibling *HistoryLike - same reasoning, same shape. */
+export interface WindowHistoryLike {
+  add(windowData: WindowData): WindowValidationResult;
+  update(id: WindowId, changes: Partial<Omit<WindowData, "id" | "type">>): WindowValidationResult;
+  remove(id: WindowId): void;
 }

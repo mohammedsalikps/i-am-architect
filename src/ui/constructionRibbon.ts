@@ -2,8 +2,8 @@ import { el } from "./dom";
 
 // Mirrors ObjectType (src/engine/objects/types.ts) plus a few not yet
 // modeled at all (Brick, Concrete, Stairs, Flooring, Plumbing,
-// Electrical). Only "Wall", "Pillar", "Beam", and "Slab" have an
-// engine behind them today.
+// Electrical). "Wall", "Pillar", "Beam", "Slab", "Door", and "Window"
+// have an engine behind them today.
 const RIBBON_ITEMS = [
   "Wall",
   "Brick",
@@ -25,24 +25,28 @@ const RIBBON_ITEMS = [
 
 /**
  * Construction ribbon: one button per buildable element type. "Wall",
- * "Pillar", "Beam", and "Slab" are wired up (to the onAddWall/
- * onAddPillar/onAddBeam/onAddSlab callbacks - the same ones the Manual
- * Build tab uses) since those are the only four object types the
- * engine implements - every other item is a disabled placeholder
- * rather than a click that does nothing, per the "disabled states for
- * unavailable actions" requirement.
+ * "Pillar", "Beam", "Slab", "Door", and "Window" are wired up (to the
+ * onAddWall/onAddPillar/onAddBeam/onAddSlab/onAddDoor/onAddWindow
+ * callbacks - the same ones the Manual Build tab uses) since those are
+ * the only object types the engine implements - every other item is a
+ * disabled placeholder rather than a click that does nothing, per the
+ * "disabled states for unavailable actions" requirement.
  */
 export function createConstructionRibbon(
   onAddWall: () => void,
   onAddPillar: () => void,
   onAddBeam: () => void,
-  onAddSlab: () => void
+  onAddSlab: () => void,
+  onAddDoor: () => void,
+  onAddWindow: () => void
 ): HTMLElement {
   const handlers: Partial<Record<string, () => void>> = {
     Wall: onAddWall,
     Pillar: onAddPillar,
     Beam: onAddBeam,
-    Slab: onAddSlab
+    Slab: onAddSlab,
+    Door: onAddDoor,
+    Window: onAddWindow
   };
 
   return el(

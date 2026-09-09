@@ -1,26 +1,26 @@
 /**
- * Lightweight in-memory verification for CommandExecutor - wall
- * commands, pillar commands, beam commands, slab commands, and
- * assembly commands. Same approach as the other verify.ts scripts in
- * this project: no test framework, plain assertion helpers, run
- * directly by Node. Run with:
+ * Lightweight in-memory verification for CommandExecutor - wall,
+ * pillar, beam, slab, door, and window commands, plus assembly
+ * commands. Same approach as the other verify.ts scripts in this
+ * project: no test framework, plain assertion helpers, run directly by
+ * Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/commands/verify.ts
  *
  * None of WallHistoryController, PillarHistoryController,
- * BeamHistoryController, or SlabHistoryController is instantiated
- * here - all four constructors use TypeScript parameter-property
- * shorthand, which Node's native TypeScript support cannot run
- * directly (only erasable syntax is supported). Instead this uses
- * small stand-ins that satisfy the WallHistoryLike/PillarHistoryLike/
- * BeamHistoryLike/SlabHistoryLike interfaces (add/update/remove) and
+ * BeamHistoryController, SlabHistoryController, DoorHistoryController,
+ * or WindowHistoryController is instantiated here - all six
+ * constructors use TypeScript parameter-property shorthand, which
+ * Node's native TypeScript support cannot run directly (only erasable
+ * syntax is supported). Instead this uses small stand-ins that satisfy
+ * the WallHistoryLike/PillarHistoryLike/BeamHistoryLike/SlabHistoryLike/
+ * DoorHistoryLike/WindowHistoryLike interfaces (add/update/remove) and
  * mirror each controller's one real rule for testing purposes: an
  * update/add only "records history" when the underlying store write
  * actually succeeds. That's enough to verify CommandExecutor's own
  * routing logic (this file's actual unit under test). Full integration
- * with the real WallHistoryController/PillarHistoryController/
- * BeamHistoryController/SlabHistoryController (real undo/redo) is
+ * with the real *HistoryController classes (real undo/redo) is
  * verified separately in the browser, against the real compiled
  * module - see the implementation report.
  *
@@ -39,6 +39,8 @@ import { WallStore } from "../wall/WallStore.ts";
 import { PillarStore } from "../pillar/PillarStore.ts";
 import { BeamStore } from "../beam/BeamStore.ts";
 import { SlabStore } from "../slab/SlabStore.ts";
+import { DoorStore } from "../door/DoorStore.ts";
+import { WindowStore } from "../window/WindowStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
@@ -48,7 +50,18 @@ import type { BeamData, BeamId } from "../beam/types.ts";
 import type { BeamValidationResult } from "../beam/validateBeam.ts";
 import type { SlabData, SlabId } from "../slab/types.ts";
 import type { SlabValidationResult } from "../slab/validateSlab.ts";
-import type { WallHistoryLike, PillarHistoryLike, BeamHistoryLike, SlabHistoryLike } from "./types.ts";
+import type { DoorData, DoorId } from "../door/types.ts";
+import type { DoorValidationResult } from "../door/validateDoor.ts";
+import type { WindowData, WindowId } from "../window/types.ts";
+import type { WindowValidationResult } from "../window/validateWindow.ts";
+import type {
+  WallHistoryLike,
+  PillarHistoryLike,
+  BeamHistoryLike,
+  SlabHistoryLike,
+  DoorHistoryLike,
+  WindowHistoryLike
+} from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -173,6 +186,60 @@ function makeSlabHistoryStub(store: SlabStore): SlabHistoryLike & { recordedCoun
       return result;
     },
     remove(id: SlabId): void {
+      store.remove(id);
+    }
+  };
+}
+
+/** A DoorHistoryLike stand-in backed by a real DoorStore - mirrors makeWallHistoryStub and every sibling stub above. */
+function makeDoorHistoryStub(store: DoorStore): DoorHistoryLike & { recordedCount: number } {
+  let recordedCount = 0;
+  return {
+    get recordedCount(): number {
+      return recordedCount;
+    },
+    add(door: DoorData): DoorValidationResult {
+      const result = store.add(door);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    update(id: DoorId, changes: Parameters<DoorHistoryLike["update"]>[1]): DoorValidationResult {
+      const result = store.update(id, changes);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    remove(id: DoorId): void {
+      store.remove(id);
+    }
+  };
+}
+
+/** A WindowHistoryLike stand-in backed by a real WindowStore - mirrors makeWallHistoryStub and every sibling stub above. */
+function makeWindowHistoryStub(store: WindowStore): WindowHistoryLike & { recordedCount: number } {
+  let recordedCount = 0;
+  return {
+    get recordedCount(): number {
+      return recordedCount;
+    },
+    add(windowData: WindowData): WindowValidationResult {
+      const result = store.add(windowData);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    update(id: WindowId, changes: Parameters<WindowHistoryLike["update"]>[1]): WindowValidationResult {
+      const result = store.update(id, changes);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    remove(id: WindowId): void {
       store.remove(id);
     }
   };
@@ -715,7 +782,7 @@ function run(): void {
     assertEqual(beamHistory.recordedCount, 1, "an update() for a missing id should not record history");
   });
 
-  check("wall, pillar, beam, and slab commands do not interfere with each other's stores", () => {
+  check("wall, pillar, beam, slab, door, and window commands do not interfere with each other's stores", () => {
     const wallStoreStub = new WallStore();
     const wallHistory = makeWallHistoryStub(wallStoreStub);
     const pillars = new PillarStore();
@@ -724,6 +791,10 @@ function run(): void {
     const beamHistory = makeBeamHistoryStub(beams);
     const slabs = new SlabStore();
     const slabHistory = makeSlabHistoryStub(slabs);
+    const doors = new DoorStore();
+    const doorHistory = makeDoorHistoryStub(doors);
+    const windows = new WindowStore();
+    const windowHistory = makeWindowHistoryStub(windows);
     const executor = new CommandExecutor(
       wallStoreStub,
       wallHistory,
@@ -733,33 +804,42 @@ function run(): void {
       beams,
       beamHistory,
       slabs,
-      slabHistory
+      slabHistory,
+      doors,
+      doorHistory,
+      windows,
+      windowHistory
     );
 
-    const wallResult = executor.execute({ type: "wall.add", wall: {} });
-    const pillarResult = executor.execute({ type: "pillar.add", pillar: {} });
-    const beamResult = executor.execute({ type: "beam.add", beam: {} });
-    const slabResult = executor.execute({ type: "slab.add", slab: {} });
+    const results: Record<string, ReturnType<CommandExecutor["execute"]>> = {
+      wall: executor.execute({ type: "wall.add", wall: {} }),
+      pillar: executor.execute({ type: "pillar.add", pillar: {} }),
+      beam: executor.execute({ type: "beam.add", beam: {} }),
+      slab: executor.execute({ type: "slab.add", slab: {} }),
+      door: executor.execute({ type: "door.add", door: {} }),
+      window: executor.execute({ type: "window.add", window: {} })
+    };
 
-    assertTrue(wallStoreStub.get(wallResult.objectId as WallId) !== undefined, "wall should be in wallStore");
-    assertEqual(pillars.get(wallResult.objectId as PillarId), undefined, "wall id should not leak into pillarStore");
-    assertEqual(beams.get(wallResult.objectId as BeamId), undefined, "wall id should not leak into beamStore");
-    assertEqual(slabs.get(wallResult.objectId as SlabId), undefined, "wall id should not leak into slabStore");
+    const stores: Record<string, { get(id: string): unknown }> = {
+      wall: wallStoreStub,
+      pillar: pillars,
+      beam: beams,
+      slab: slabs,
+      door: doors,
+      window: windows
+    };
 
-    assertTrue(pillars.get(pillarResult.objectId as PillarId) !== undefined, "pillar should be in pillarStore");
-    assertEqual(wallStoreStub.get(pillarResult.objectId as WallId), undefined, "pillar id should not leak into wallStore");
-    assertEqual(beams.get(pillarResult.objectId as BeamId), undefined, "pillar id should not leak into beamStore");
-    assertEqual(slabs.get(pillarResult.objectId as SlabId), undefined, "pillar id should not leak into slabStore");
-
-    assertTrue(beams.get(beamResult.objectId as BeamId) !== undefined, "beam should be in beamStore");
-    assertEqual(wallStoreStub.get(beamResult.objectId as WallId), undefined, "beam id should not leak into wallStore");
-    assertEqual(pillars.get(beamResult.objectId as PillarId), undefined, "beam id should not leak into pillarStore");
-    assertEqual(slabs.get(beamResult.objectId as SlabId), undefined, "beam id should not leak into slabStore");
-
-    assertTrue(slabs.get(slabResult.objectId as SlabId) !== undefined, "slab should be in slabStore");
-    assertEqual(wallStoreStub.get(slabResult.objectId as WallId), undefined, "slab id should not leak into wallStore");
-    assertEqual(pillars.get(slabResult.objectId as PillarId), undefined, "slab id should not leak into pillarStore");
-    assertEqual(beams.get(slabResult.objectId as BeamId), undefined, "slab id should not leak into beamStore");
+    for (const ownerType of Object.keys(results)) {
+      const id = results[ownerType].objectId as string;
+      for (const storeType of Object.keys(stores)) {
+        const found = stores[storeType].get(id) !== undefined;
+        if (storeType === ownerType) {
+          assertTrue(found, `${ownerType} should be in ${storeType}Store`);
+        } else {
+          assertEqual(found, false, `${ownerType} id should not leak into ${storeType}Store`);
+        }
+      }
+    }
   });
 
   // --- Slab commands ---
@@ -944,6 +1024,392 @@ function run(): void {
 
     executor.execute({ type: "slab.update", id: "does-not-exist", changes: { color: "#000000" } });
     assertEqual(slabHistory.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  // --- Door commands ---
+
+  function makeDoorExecutor(): { executor: CommandExecutor; doors: DoorStore } {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const doors = new DoorStore();
+    const doorHistory = makeDoorHistoryStub(doors);
+    return {
+      executor: new CommandExecutor(
+        wallStoreStub,
+        wallHistory,
+        new AssemblyStore(),
+        new PillarStore(),
+        undefined,
+        new BeamStore(),
+        undefined,
+        new SlabStore(),
+        undefined,
+        doors,
+        doorHistory
+      ),
+      doors
+    };
+  }
+
+  check("a valid door.add command succeeds and stores a door", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const result = executor.execute({ type: "door.add", door: { width: 1, color: "#ff0000" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    const stored = doors.get(result.objectId as DoorId);
+    assertTrue(stored, "door should be stored");
+    assertEqual(stored.dimensions.width, 1, "stored width");
+    assertEqual(stored.color, "#ff0000", "stored color");
+  });
+
+  check("a valid door.update command succeeds and applies the change", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const added = executor.execute({ type: "door.add", door: {} });
+    const id = added.objectId as DoorId;
+
+    const result = executor.execute({
+      type: "door.update",
+      id,
+      changes: { color: "#00ff00" }
+    });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.objectId, id, "result.objectId");
+    assertEqual(doors.get(id)?.color, "#00ff00", "stored color after update");
+  });
+
+  check("a valid door.delete command succeeds and removes the door", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const added = executor.execute({ type: "door.add", door: {} });
+    const id = added.objectId as DoorId;
+
+    const result = executor.execute({ type: "door.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(doors.get(id), undefined, "door should be gone");
+  });
+
+  check("a valid door.duplicate command succeeds and creates an independent door", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const added = executor.execute({ type: "door.add", door: { width: 1.1, color: "#123456" } });
+    const originalId = added.objectId as DoorId;
+
+    const result = executor.execute({ type: "door.duplicate", id: originalId });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertTrue(result.objectId !== originalId, "duplicate should have a different id");
+    const duplicate = doors.get(result.objectId as DoorId);
+    assertTrue(duplicate, "duplicate should be stored");
+    assertEqual(duplicate.dimensions.width, 1.1, "duplicate width matches source");
+    assertEqual(duplicate.color, "#123456", "duplicate color matches source");
+    assertTrue(doors.get(originalId) !== undefined, "original door should still exist");
+  });
+
+  check("door.update with a missing id is rejected", () => {
+    const { executor } = makeDoorExecutor();
+    const result = executor.execute({ type: "door.update", changes: { color: "#000000" } });
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("door.delete with a missing id is rejected", () => {
+    const { executor } = makeDoorExecutor();
+    assertEqual(executor.execute({ type: "door.delete" }).success, false, "result.success");
+  });
+
+  check("door.add with invalid dimensions is rejected and reports field errors", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const result = executor.execute({ type: "door.add", door: { width: 0 } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(
+      result.errors && result.errors.some((e) => e.field === "dimensions.width"),
+      "expected a dimensions.width error"
+    );
+    assertEqual(doors.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("an invalid door.update preserves the existing door", () => {
+    const { executor, doors } = makeDoorExecutor();
+
+    const added = executor.execute({ type: "door.add", door: {} });
+    const id = added.objectId as DoorId;
+    const before = doors.get(id);
+
+    const result = executor.execute({
+      type: "door.update",
+      id,
+      changes: { dimensions: { ...before!.dimensions, thickness: -1 } }
+    });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(doors.get(id), before, "door should be byte-for-byte unchanged");
+  });
+
+  check("successful door commands are recorded as history (via the DoorHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const doors = new DoorStore();
+    const doorHistory = makeDoorHistoryStub(doors);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      new SlabStore(),
+      undefined,
+      doors,
+      doorHistory
+    );
+
+    assertEqual(doorHistory.recordedCount, 0, "no history yet");
+
+    const added = executor.execute({ type: "door.add", door: {} });
+    assertEqual(doorHistory.recordedCount, 1, "a valid add() should record history");
+
+    executor.execute({ type: "door.update", id: added.objectId as DoorId, changes: { color: "#abcdef" } });
+    assertEqual(doorHistory.recordedCount, 2, "a valid update() should record history");
+  });
+
+  check("failed door commands create no history entry (via the DoorHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const doors = new DoorStore();
+    const doorHistory = makeDoorHistoryStub(doors);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      new SlabStore(),
+      undefined,
+      doors,
+      doorHistory
+    );
+
+    executor.execute({ type: "door.add", door: { width: -1 } });
+    assertEqual(doorHistory.recordedCount, 0, "an invalid add() should not record history");
+
+    const added = executor.execute({ type: "door.add", door: {} });
+    assertEqual(doorHistory.recordedCount, 1, "sanity: the valid add() above should have recorded");
+
+    executor.execute({
+      type: "door.update",
+      id: added.objectId as DoorId,
+      changes: { rotation: Infinity }
+    });
+    assertEqual(doorHistory.recordedCount, 1, "an invalid update() should not record additional history");
+
+    executor.execute({ type: "door.update", id: "does-not-exist", changes: { color: "#000000" } });
+    assertEqual(doorHistory.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  // --- Window commands ---
+
+  function makeWindowExecutor(): { executor: CommandExecutor; windows: WindowStore } {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const windows = new WindowStore();
+    const windowHistory = makeWindowHistoryStub(windows);
+    return {
+      executor: new CommandExecutor(
+        wallStoreStub,
+        wallHistory,
+        new AssemblyStore(),
+        new PillarStore(),
+        undefined,
+        new BeamStore(),
+        undefined,
+        new SlabStore(),
+        undefined,
+        new DoorStore(),
+        undefined,
+        windows,
+        windowHistory
+      ),
+      windows
+    };
+  }
+
+  check("a valid window.add command succeeds and stores a window", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const result = executor.execute({ type: "window.add", window: { width: 1.5, color: "#ff0000" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    const stored = windows.get(result.objectId as WindowId);
+    assertTrue(stored, "window should be stored");
+    assertEqual(stored.dimensions.width, 1.5, "stored width");
+    assertEqual(stored.color, "#ff0000", "stored color");
+  });
+
+  check("a valid window.update command succeeds and applies the change", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const added = executor.execute({ type: "window.add", window: {} });
+    const id = added.objectId as WindowId;
+
+    const result = executor.execute({
+      type: "window.update",
+      id,
+      changes: { color: "#00ff00" }
+    });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.objectId, id, "result.objectId");
+    assertEqual(windows.get(id)?.color, "#00ff00", "stored color after update");
+  });
+
+  check("a valid window.delete command succeeds and removes the window", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const added = executor.execute({ type: "window.add", window: {} });
+    const id = added.objectId as WindowId;
+
+    const result = executor.execute({ type: "window.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(windows.get(id), undefined, "window should be gone");
+  });
+
+  check("a valid window.duplicate command succeeds and creates an independent window", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const added = executor.execute({ type: "window.add", window: { width: 1.3, color: "#123456" } });
+    const originalId = added.objectId as WindowId;
+
+    const result = executor.execute({ type: "window.duplicate", id: originalId });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertTrue(result.objectId !== originalId, "duplicate should have a different id");
+    const duplicate = windows.get(result.objectId as WindowId);
+    assertTrue(duplicate, "duplicate should be stored");
+    assertEqual(duplicate.dimensions.width, 1.3, "duplicate width matches source");
+    assertEqual(duplicate.color, "#123456", "duplicate color matches source");
+    assertTrue(windows.get(originalId) !== undefined, "original window should still exist");
+  });
+
+  check("window.update with a missing id is rejected", () => {
+    const { executor } = makeWindowExecutor();
+    const result = executor.execute({ type: "window.update", changes: { color: "#000000" } });
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("window.delete with a missing id is rejected", () => {
+    const { executor } = makeWindowExecutor();
+    assertEqual(executor.execute({ type: "window.delete" }).success, false, "result.success");
+  });
+
+  check("window.add with invalid dimensions is rejected and reports field errors", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const result = executor.execute({ type: "window.add", window: { width: 0 } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(
+      result.errors && result.errors.some((e) => e.field === "dimensions.width"),
+      "expected a dimensions.width error"
+    );
+    assertEqual(windows.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("an invalid window.update preserves the existing window", () => {
+    const { executor, windows } = makeWindowExecutor();
+
+    const added = executor.execute({ type: "window.add", window: {} });
+    const id = added.objectId as WindowId;
+    const before = windows.get(id);
+
+    const result = executor.execute({
+      type: "window.update",
+      id,
+      changes: { dimensions: { ...before!.dimensions, thickness: -1 } }
+    });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(windows.get(id), before, "window should be byte-for-byte unchanged");
+  });
+
+  check("successful window commands are recorded as history (via the WindowHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const windows = new WindowStore();
+    const windowHistory = makeWindowHistoryStub(windows);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      new SlabStore(),
+      undefined,
+      new DoorStore(),
+      undefined,
+      windows,
+      windowHistory
+    );
+
+    assertEqual(windowHistory.recordedCount, 0, "no history yet");
+
+    const added = executor.execute({ type: "window.add", window: {} });
+    assertEqual(windowHistory.recordedCount, 1, "a valid add() should record history");
+
+    executor.execute({ type: "window.update", id: added.objectId as WindowId, changes: { color: "#abcdef" } });
+    assertEqual(windowHistory.recordedCount, 2, "a valid update() should record history");
+  });
+
+  check("failed window commands create no history entry (via the WindowHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const windows = new WindowStore();
+    const windowHistory = makeWindowHistoryStub(windows);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      new BeamStore(),
+      undefined,
+      new SlabStore(),
+      undefined,
+      new DoorStore(),
+      undefined,
+      windows,
+      windowHistory
+    );
+
+    executor.execute({ type: "window.add", window: { width: -1 } });
+    assertEqual(windowHistory.recordedCount, 0, "an invalid add() should not record history");
+
+    const added = executor.execute({ type: "window.add", window: {} });
+    assertEqual(windowHistory.recordedCount, 1, "sanity: the valid add() above should have recorded");
+
+    executor.execute({
+      type: "window.update",
+      id: added.objectId as WindowId,
+      changes: { rotation: Infinity }
+    });
+    assertEqual(windowHistory.recordedCount, 1, "an invalid update() should not record additional history");
+
+    executor.execute({ type: "window.update", id: "does-not-exist", changes: { color: "#000000" } });
+    assertEqual(windowHistory.recordedCount, 1, "an update() for a missing id should not record history");
   });
 
   // --- Assembly commands ---

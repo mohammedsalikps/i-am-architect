@@ -8,13 +8,19 @@ import type { BeamData } from "../engine/beam/types";
 import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabData } from "../engine/slab/types";
 import type { SlabStore } from "../engine/slab/SlabStore";
+import type { DoorData } from "../engine/door/types";
+import type { DoorStore } from "../engine/door/DoorStore";
+import type { WindowData } from "../engine/window/types";
+import type { WindowStore } from "../engine/window/WindowStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type {
   UpdateWallCommand,
   UpdatePillarCommand,
   UpdateBeamCommand,
-  UpdateSlabCommand
+  UpdateSlabCommand,
+  UpdateDoorCommand,
+  UpdateWindowCommand
 } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
@@ -411,11 +417,165 @@ function buildSlabPanels(
   return [actions, properties, transform, dimensions, material, color];
 }
 
+/**
+ * Door's own panel builder - deliberately separate from every sibling
+ * for the same reason each of theirs is: a door's fields (width/
+ * height/thickness) aren't interchangeable with any sibling's, and a
+ * concrete, type-safe function means it never has to guess which
+ * fields another type actually has. (Door and window happen to share
+ * the same dimensions shape, but stay two separate functions anyway -
+ * see rightSidebar's module doc.)
+ */
+function buildDoorPanels(
+  door: DoorData,
+  commandExecutor: CommandExecutor,
+  onDuplicateSelected: () => void,
+  onDeleteSelected: () => void
+): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
+
+  const properties = section("Properties", [readOnlyRow("Name", "Door"), readOnlyRow("Type", door.type)]);
+
+  const rotationDegrees = Math.round(radiansToDegrees(door.rotation) * 100) / 100;
+
+  const updateDoor = (changes: UpdateDoorCommand["changes"]): void => {
+    commandExecutor.execute({ type: "door.update", id: door.id, changes });
+  };
+
+  const transform = section("Transform", [
+    numberInputRow(
+      "Position X",
+      door.position.x,
+      (value) => updateDoor({ position: { ...door.position, x: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Y",
+      door.position.y,
+      (value) => updateDoor({ position: { ...door.position, y: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Z",
+      door.position.z,
+      (value) => updateDoor({ position: { ...door.position, z: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow("Rotation Y", rotationDegrees, (value) => updateDoor({ rotation: degreesToRadians(value) }), {
+      step: 1
+    })
+  ]);
+
+  const dimensions = section("Dimensions", [
+    numberInputRow(
+      "Width",
+      door.dimensions.width,
+      (value) => updateDoor({ dimensions: { ...door.dimensions, width: value } }),
+      { min: 0.1, step: 0.05 }
+    ),
+    numberInputRow(
+      "Height",
+      door.dimensions.height,
+      (value) => updateDoor({ dimensions: { ...door.dimensions, height: value } }),
+      { min: 0.1, step: 0.05 }
+    ),
+    numberInputRow(
+      "Thickness",
+      door.dimensions.thickness,
+      (value) => updateDoor({ dimensions: { ...door.dimensions, thickness: value } }),
+      { min: 0.01, step: 0.01 }
+    )
+  ]);
+
+  const material = section("Material", [readOnlyRow("Material", door.material)]);
+
+  const color = section("Color", [colorInputRow("Color", door.color, (value) => updateDoor({ color: value }))]);
+
+  return [actions, properties, transform, dimensions, material, color];
+}
+
+/**
+ * Window's own panel builder - see buildDoorPanels' doc for why this
+ * stays separate from it despite the identical dimensions shape.
+ */
+function buildWindowPanels(
+  windowData: WindowData,
+  commandExecutor: CommandExecutor,
+  onDuplicateSelected: () => void,
+  onDeleteSelected: () => void
+): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
+
+  const properties = section("Properties", [readOnlyRow("Name", "Window"), readOnlyRow("Type", windowData.type)]);
+
+  const rotationDegrees = Math.round(radiansToDegrees(windowData.rotation) * 100) / 100;
+
+  const updateWindow = (changes: UpdateWindowCommand["changes"]): void => {
+    commandExecutor.execute({ type: "window.update", id: windowData.id, changes });
+  };
+
+  const transform = section("Transform", [
+    numberInputRow(
+      "Position X",
+      windowData.position.x,
+      (value) => updateWindow({ position: { ...windowData.position, x: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Y",
+      windowData.position.y,
+      (value) => updateWindow({ position: { ...windowData.position, y: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Z",
+      windowData.position.z,
+      (value) => updateWindow({ position: { ...windowData.position, z: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Rotation Y",
+      rotationDegrees,
+      (value) => updateWindow({ rotation: degreesToRadians(value) }),
+      { step: 1 }
+    )
+  ]);
+
+  const dimensions = section("Dimensions", [
+    numberInputRow(
+      "Width",
+      windowData.dimensions.width,
+      (value) => updateWindow({ dimensions: { ...windowData.dimensions, width: value } }),
+      { min: 0.1, step: 0.05 }
+    ),
+    numberInputRow(
+      "Height",
+      windowData.dimensions.height,
+      (value) => updateWindow({ dimensions: { ...windowData.dimensions, height: value } }),
+      { min: 0.1, step: 0.05 }
+    ),
+    numberInputRow(
+      "Thickness",
+      windowData.dimensions.thickness,
+      (value) => updateWindow({ dimensions: { ...windowData.dimensions, thickness: value } }),
+      { min: 0.01, step: 0.01 }
+    )
+  ]);
+
+  const material = section("Material", [readOnlyRow("Material", windowData.material)]);
+
+  const color = section("Color", [
+    colorInputRow("Color", windowData.color, (value) => updateWindow({ color: value }))
+  ]);
+
+  return [actions, properties, transform, dimensions, material, color];
+}
+
 function buildEmptyState(): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
     el("p", {
       className: "sidebar__placeholder",
-      text: "Select a wall, pillar, beam, or slab to view and edit its properties."
+      text: "Select a wall, pillar, beam, slab, door, or window to view and edit its properties."
     })
   ]);
 }
@@ -425,6 +585,8 @@ export type RightSidebarOptions = {
   pillarStore: PillarStore;
   beamStore: BeamStore;
   slabStore: SlabStore;
+  doorStore: DoorStore;
+  windowStore: WindowStore;
   selectionStore: SelectionStore;
   commandExecutor: CommandExecutor;
   onDuplicateSelected: () => void;
@@ -434,22 +596,23 @@ export type RightSidebarOptions = {
 /**
  * Right sidebar / inspector. Tabbed: Properties/Materials/Blocks/
  * Colors. Properties resolves the current selection against wallStore,
- * then pillarStore, then beamStore, then slabStore - the same "try
- * each store in turn" shape assemblyPanel.ts's resolveMemberLabel
- * already uses (both could use the shared resolveConstructionObject()
- * helper instead; they don't need to, since neither is broken - see
- * that file's docs) - and renders the matching type-specific panel
- * (buildWallPanels / buildPillarPanels / buildBeamPanels /
- * buildSlabPanels), or the empty state if the selected id belongs to
- * none of them (or nothing is selected). Each object type's rendering
- * stays a fully separate, type-safe function - this module never
- * merges their shapes into one generic form.
+ * then pillarStore, then beamStore, then slabStore, then doorStore,
+ * then windowStore - the same "try each store in turn" shape
+ * assemblyPanel.ts's resolveMemberLabel already uses (both could use
+ * the shared resolveConstructionObject() helper instead; they don't
+ * need to, since neither is broken - see that file's docs) - and
+ * renders the matching type-specific panel (buildWallPanels /
+ * buildPillarPanels / buildBeamPanels / buildSlabPanels /
+ * buildDoorPanels / buildWindowPanels), or the empty state if the
+ * selected id belongs to none of them (or nothing is selected). Each
+ * object type's rendering stays a fully separate, type-safe function -
+ * this module never merges their shapes into one generic form.
  *
  * Reads come straight from the stores; edits go through
  * commandExecutor.execute() ("wall.update"/"pillar.update"/
- * "beam.update"/"slab.update" commands) rather than touching the
- * stores or history controllers directly - this module never touches
- * Three.js directly either.
+ * "beam.update"/"slab.update"/"door.update"/"window.update" commands)
+ * rather than touching the stores or history controllers directly -
+ * this module never touches Three.js directly either.
  */
 export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const properties = el("div", { className: "property-panel" });
@@ -460,6 +623,9 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     const pillar = !wall && selectedId ? options.pillarStore.get(selectedId) : undefined;
     const beam = !wall && !pillar && selectedId ? options.beamStore.get(selectedId) : undefined;
     const slab = !wall && !pillar && !beam && selectedId ? options.slabStore.get(selectedId) : undefined;
+    const door = !wall && !pillar && !beam && !slab && selectedId ? options.doorStore.get(selectedId) : undefined;
+    const windowData =
+      !wall && !pillar && !beam && !slab && !door && selectedId ? options.windowStore.get(selectedId) : undefined;
 
     let content: HTMLElement[];
     if (wall) {
@@ -475,6 +641,15 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
       content = buildBeamPanels(beam, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
     } else if (slab) {
       content = buildSlabPanels(slab, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
+    } else if (door) {
+      content = buildDoorPanels(door, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
+    } else if (windowData) {
+      content = buildWindowPanels(
+        windowData,
+        options.commandExecutor,
+        options.onDuplicateSelected,
+        options.onDeleteSelected
+      );
     } else {
       content = [buildEmptyState()];
     }
@@ -486,6 +661,8 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   options.pillarStore.subscribe(render);
   options.beamStore.subscribe(render);
   options.slabStore.subscribe(render);
+  options.doorStore.subscribe(render);
+  options.windowStore.subscribe(render);
   options.selectionStore.subscribe(render);
 
   const { strip, panel } = createTabStrip(

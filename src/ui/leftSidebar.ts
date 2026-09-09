@@ -8,6 +8,8 @@ import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
+import type { DoorStore } from "../engine/door/DoorStore";
+import type { WindowStore } from "../engine/window/WindowStore";
 
 const HIERARCHY_SECTIONS = ["Building", "Floors", "Rooms", "Objects"];
 
@@ -32,11 +34,11 @@ function buildProjectHierarchy(): HTMLElement {
  * asset/layer/view/measurement/document management, only somewhere for
  * it to eventually live.
  *
- * `selectionStore`, `wallStore`, `pillarStore`, `beamStore`, and
- * `slabStore` are threaded straight through to the assembly panel,
- * which resolves a member id against all four stores (see
- * resolveConstructionObject.ts) rather than assuming every member is a
- * wall.
+ * `selectionStore`, `wallStore`, `pillarStore`, `beamStore`,
+ * `slabStore`, `doorStore`, and `windowStore` are threaded straight
+ * through to the assembly panel, which resolves a member id against
+ * all six stores (see resolveConstructionObject.ts) rather than
+ * assuming every member is a wall.
  */
 export function createLeftSidebar(
   assemblyStore: AssemblyStore,
@@ -45,7 +47,9 @@ export function createLeftSidebar(
   wallStore: WallStore,
   pillarStore: PillarStore,
   beamStore: BeamStore,
-  slabStore: SlabStore
+  slabStore: SlabStore,
+  doorStore: DoorStore,
+  windowStore: WindowStore
 ): HTMLElement {
   const { strip, panel } = createTabStrip(
     [
@@ -61,7 +65,9 @@ export function createLeftSidebar(
             wallStore,
             pillarStore,
             beamStore,
-            slabStore
+            slabStore,
+            doorStore,
+            windowStore
           )
       },
       { id: "assets", label: "Assets", build: () => comingSoon("Asset management"), disabled: true },

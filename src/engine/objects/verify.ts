@@ -23,6 +23,10 @@ import { BeamStore } from "../beam/BeamStore.ts";
 import { createBeamData } from "../beam/createBeam.ts";
 import { SlabStore } from "../slab/SlabStore.ts";
 import { createSlabData } from "../slab/createSlab.ts";
+import { DoorStore } from "../door/DoorStore.ts";
+import { createDoorData } from "../door/createDoor.ts";
+import { WindowStore } from "../window/WindowStore.ts";
+import { createWindowData } from "../window/createWindow.ts";
 import type { ConstructionObjectBase } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
@@ -178,12 +182,16 @@ function run(): void {
     pillarStore: PillarStore;
     beamStore: BeamStore;
     slabStore: SlabStore;
+    doorStore: DoorStore;
+    windowStore: WindowStore;
   } {
     return {
       wallStore: new WallStore(),
       pillarStore: new PillarStore(),
       beamStore: new BeamStore(),
-      slabStore: new SlabStore()
+      slabStore: new SlabStore(),
+      doorStore: new DoorStore(),
+      windowStore: new WindowStore()
     };
   }
 
@@ -223,6 +231,24 @@ function run(): void {
     assertDeepEqual(resolved, { type: "slab", id: slab.id }, "resolved slab ref");
   });
 
+  check("resolves a door id to type 'door'", () => {
+    const stores = makeEmptyStores();
+    const door = createDoorData();
+    stores.doorStore.add(door);
+
+    const resolved = resolveConstructionObject(door.id, stores);
+    assertDeepEqual(resolved, { type: "door", id: door.id }, "resolved door ref");
+  });
+
+  check("resolves a window id to type 'window'", () => {
+    const stores = makeEmptyStores();
+    const windowData = createWindowData();
+    stores.windowStore.add(windowData);
+
+    const resolved = resolveConstructionObject(windowData.id, stores);
+    assertDeepEqual(resolved, { type: "window", id: windowData.id }, "resolved window ref");
+  });
+
   check("resolves an id in no store to undefined", () => {
     const stores = makeEmptyStores();
 
@@ -230,22 +256,31 @@ function run(): void {
     assertEqual(resolved, undefined, "unresolved id");
   });
 
-  check("a wall id, a pillar id, a beam id, and a slab id never collide - each resolves to its own store only", () => {
-    const stores = makeEmptyStores();
-    const wall = createWallData();
-    const pillar = createPillarData();
-    const beam = createBeamData();
-    const slab = createSlabData();
-    stores.wallStore.add(wall);
-    stores.pillarStore.add(pillar);
-    stores.beamStore.add(beam);
-    stores.slabStore.add(slab);
+  check(
+    "a wall id, a pillar id, a beam id, a slab id, a door id, and a window id never collide - each resolves to its own store only",
+    () => {
+      const stores = makeEmptyStores();
+      const wall = createWallData();
+      const pillar = createPillarData();
+      const beam = createBeamData();
+      const slab = createSlabData();
+      const door = createDoorData();
+      const windowData = createWindowData();
+      stores.wallStore.add(wall);
+      stores.pillarStore.add(pillar);
+      stores.beamStore.add(beam);
+      stores.slabStore.add(slab);
+      stores.doorStore.add(door);
+      stores.windowStore.add(windowData);
 
-    assertEqual(resolveConstructionObject(wall.id, stores)?.type, "wall", "wall id resolves as wall");
-    assertEqual(resolveConstructionObject(pillar.id, stores)?.type, "pillar", "pillar id resolves as pillar");
-    assertEqual(resolveConstructionObject(beam.id, stores)?.type, "beam", "beam id resolves as beam");
-    assertEqual(resolveConstructionObject(slab.id, stores)?.type, "slab", "slab id resolves as slab");
-  });
+      assertEqual(resolveConstructionObject(wall.id, stores)?.type, "wall", "wall id resolves as wall");
+      assertEqual(resolveConstructionObject(pillar.id, stores)?.type, "pillar", "pillar id resolves as pillar");
+      assertEqual(resolveConstructionObject(beam.id, stores)?.type, "beam", "beam id resolves as beam");
+      assertEqual(resolveConstructionObject(slab.id, stores)?.type, "slab", "slab id resolves as slab");
+      assertEqual(resolveConstructionObject(door.id, stores)?.type, "door", "door id resolves as door");
+      assertEqual(resolveConstructionObject(windowData.id, stores)?.type, "window", "window id resolves as window");
+    }
+  );
 
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {

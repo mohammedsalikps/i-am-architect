@@ -2,7 +2,14 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectContext } from "./engine/project/ProjectContext";
-import type { AddWallCommand, AddPillarCommand, AddBeamCommand, AddSlabCommand } from "./engine/commands/types";
+import type {
+  AddWallCommand,
+  AddPillarCommand,
+  AddBeamCommand,
+  AddSlabCommand,
+  AddDoorCommand,
+  AddWindowCommand
+} from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
 
@@ -11,12 +18,22 @@ if (!appRoot) {
 }
 
 // One shared composition root - see src/engine/project/ProjectContext.ts.
-// assemblyStore/pillarStore/beamStore/slabStore are the same instances
-// commandExecutor uses internally (not invisible defaults of their
-// own) - the UI reads/writes them through commandExecutor, same as
-// wallStore.
-const { wallStore, pillarStore, beamStore, slabStore, assemblyStore, selectionStore, history, commandExecutor } =
-  createProjectContext();
+// assemblyStore/pillarStore/beamStore/slabStore/doorStore/windowStore
+// are the same instances commandExecutor uses internally (not
+// invisible defaults of their own) - the UI reads/writes them through
+// commandExecutor, same as wallStore.
+const {
+  wallStore,
+  pillarStore,
+  beamStore,
+  slabStore,
+  doorStore,
+  windowStore,
+  assemblyStore,
+  selectionStore,
+  history,
+  commandExecutor
+} = createProjectContext();
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -78,16 +95,45 @@ function addSlab(): void {
   commandExecutor.execute(command);
 }
 
+// Successive doors are spaced along Z on the negative side, further out
+// than the wall stack, so a freshly-added door is never buried inside
+// a wall.
+const DOOR_Z_START = -8;
+const DOOR_Z_SPACING = 1.5;
+
+function addDoor(): void {
+  const index = doorStore.getAll().length;
+  const command: AddDoorCommand = {
+    type: "door.add",
+    door: { position: { z: DOOR_Z_START - index * DOOR_Z_SPACING } }
+  };
+  commandExecutor.execute(command);
+}
+
+// Successive windows are spaced along X on the positive side, further
+// out than the pillar stack, so a freshly-added window is never buried
+// inside a pillar.
+const WINDOW_X_START = 8;
+const WINDOW_X_SPACING = 1.5;
+
+function addWindow(): void {
+  const index = windowStore.getAll().length;
+  const command: AddWindowCommand = {
+    type: "window.add",
+    window: { position: { x: WINDOW_X_START + index * WINDOW_X_SPACING } }
+  };
+  commandExecutor.execute(command);
+}
+
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 /**
  * Duplicate/Delete now act on "whichever construction object is
  * currently selected" rather than "the selected wall" - selectionStore
- * is shared between walls, pillars, beams, and slabs (see
- * ProjectContext), so the selected id could belong to any of the four
- * stores. Checking wallStore, then pillarStore, then beamStore, then
- * slabStore, mirrors the same "try each store in turn" shape
+ * is shared across every object type (see ProjectContext), so the
+ * selected id could belong to any of the six stores. Checking each
+ * store in turn mirrors the same "try each store in turn" shape
  * rightSidebar.ts and assemblyPanel.ts already use to resolve a
  * selected/member id without assuming its type.
  */
@@ -107,6 +153,10 @@ function deleteSelected(): void {
     commandExecutor.execute({ type: "beam.delete", id: selectedId });
   } else if (slabStore.get(selectedId)) {
     commandExecutor.execute({ type: "slab.delete", id: selectedId });
+  } else if (doorStore.get(selectedId)) {
+    commandExecutor.execute({ type: "door.delete", id: selectedId });
+  } else if (windowStore.get(selectedId)) {
+    commandExecutor.execute({ type: "window.delete", id: selectedId });
   }
 }
 
@@ -135,6 +185,16 @@ function duplicateSelected(): void {
     if (result.success && result.objectId) {
       selectionStore.select(result.objectId);
     }
+  } else if (doorStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "door.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
+  } else if (windowStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "window.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
   }
 }
 
@@ -150,6 +210,8 @@ const shell = createAppShell({
   onAddPillar: addPillar,
   onAddBeam: addBeam,
   onAddSlab: addSlab,
+  onAddDoor: addDoor,
+  onAddWindow: addWindow,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
   onUndo: () => history.undo(),
@@ -158,6 +220,8 @@ const shell = createAppShell({
   pillarStore,
   beamStore,
   slabStore,
+  doorStore,
+  windowStore,
   assemblyStore,
   selectionStore,
   history,
@@ -172,6 +236,8 @@ sceneManager.current = new SceneManager(
   pillarStore,
   beamStore,
   slabStore,
+  doorStore,
+  windowStore,
   selectionStore
 );
 sceneManager.current.start();

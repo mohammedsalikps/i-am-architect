@@ -11,6 +11,8 @@ import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
+import type { DoorStore } from "../engine/door/DoorStore";
+import type { WindowStore } from "../engine/window/WindowStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -23,6 +25,8 @@ export type AppShellOptions = {
   onAddPillar: () => void;
   onAddBeam: () => void;
   onAddSlab: () => void;
+  onAddDoor: () => void;
+  onAddWindow: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
   onUndo: () => void;
@@ -31,6 +35,8 @@ export type AppShellOptions = {
   pillarStore: PillarStore;
   beamStore: BeamStore;
   slabStore: SlabStore;
+  doorStore: DoorStore;
+  windowStore: WindowStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -69,7 +75,9 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.onAddWall,
     options.onAddPillar,
     options.onAddBeam,
-    options.onAddSlab
+    options.onAddSlab,
+    options.onAddDoor,
+    options.onAddWindow
   );
 
   const leftSidebar = createLeftSidebar(
@@ -79,13 +87,17 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.wallStore,
     options.pillarStore,
     options.beamStore,
-    options.slabStore
+    options.slabStore,
+    options.doorStore,
+    options.windowStore
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
     pillarStore: options.pillarStore,
     beamStore: options.beamStore,
     slabStore: options.slabStore,
+    doorStore: options.doorStore,
+    windowStore: options.windowStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,
