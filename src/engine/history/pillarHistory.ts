@@ -2,7 +2,11 @@ import type { PillarData, PillarId } from "../pillar/types";
 import type { PillarStore } from "../pillar/PillarStore";
 import type { PillarValidationResult } from "../pillar/validatePillar";
 import type { SelectionStore } from "../selection/SelectionStore";
-import { HistoryManager } from "./HistoryManager";
+// Explicit .ts extension on this value import lets Node run this file
+// directly (see allowImportingTsExtensions in tsconfig.json) - needed by
+// the end-to-end suite, which drives the real ProjectContext. Harmless
+// for Vite.
+import { HistoryManager } from "./HistoryManager.ts";
 
 /**
  * The only place that knows how to turn a pillar mutation into an

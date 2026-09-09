@@ -20,5 +20,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "verify.ts"]
+  "include": ["src", "verify.ts", "mockBackend.ts"]
 }

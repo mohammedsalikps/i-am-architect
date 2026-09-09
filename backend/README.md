@@ -99,6 +99,27 @@ npm start        # or: npm run dev (restarts on file changes)
 dependency needed, consistent with the root project's own
 zero-unnecessary-dependency approach.
 
+## Running it without an OpenAI key (mock mode)
+
+```bash
+cd backend
+npm install
+npm run mock     # no .env, no API key needed
+```
+
+`mockBackend.ts` starts the **same** `createServer()` this server's real
+entry point uses - same routing, CORS, validation, and status codes -
+with the deterministic keyword-matching `MockAIProvider` in place of
+`OpenAIProvider`. No OpenAI request is ever made. This is what the
+frontend's browser smoke testing runs against: the app already defaults
+to `http://localhost:8787` (see the root `.env.example`'s
+`VITE_AI_BACKEND_URL`), so `npm run mock` plus `npm run dev` at the root
+gives a fully working AI command bar with zero API cost.
+
+Instructions naming a wall, pillar, beam, slab, door, or window build
+real objects; anything else returns the provider's "could not map"
+notes, which exercises the command bar's notes and error states.
+
 ## Endpoint
 
 ### `POST /api/ai/interpret`

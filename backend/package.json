@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node --env-file=.env src/server.ts",
     "dev": "node --env-file=.env --watch src/server.ts",
+    "mock": "node mockBackend.ts",
     "verify": "node verify.ts"
   },
   "devDependencies": {

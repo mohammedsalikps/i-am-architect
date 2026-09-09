@@ -2,7 +2,11 @@ import type { BeamData, BeamId } from "../beam/types";
 import type { BeamStore } from "../beam/BeamStore";
 import type { BeamValidationResult } from "../beam/validateBeam";
 import type { SelectionStore } from "../selection/SelectionStore";
-import { HistoryManager } from "./HistoryManager";
+// Explicit .ts extension on this value import lets Node run this file
+// directly (see allowImportingTsExtensions in tsconfig.json) - needed by
+// the end-to-end suite, which drives the real ProjectContext. Harmless
+// for Vite.
+import { HistoryManager } from "./HistoryManager.ts";
 
 /**
  * The only place that knows how to turn a beam mutation into an

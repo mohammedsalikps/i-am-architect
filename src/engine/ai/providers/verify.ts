@@ -23,9 +23,9 @@
  * allowImportingTsExtensions in tsconfig.json) - this file is run
  * directly by Node, not bundled by Vite.
  */
-// "node:fs"/"node:url" below are typed by ./node-fs-url.d.ts, a minimal
-// local ambient shim - see that file's own header comment for why it
-// exists instead of an @types/node dependency.
+// "node:fs"/"node:url" below are typed by src/node-builtins.d.ts, a
+// minimal shared ambient shim - see that file's own header comment for
+// why it exists instead of an @types/node dependency.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OpenAIProvider } from "./OpenAIProvider.ts";

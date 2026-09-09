@@ -1,19 +1,25 @@
-import { WallStore } from "../wall/WallStore";
-import { PillarStore } from "../pillar/PillarStore";
-import { BeamStore } from "../beam/BeamStore";
-import { SlabStore } from "../slab/SlabStore";
-import { DoorStore } from "../door/DoorStore";
-import { WindowStore } from "../window/WindowStore";
-import { AssemblyStore } from "../assemblies/AssemblyStore";
-import { SelectionStore } from "../selection/SelectionStore";
-import { HistoryManager } from "../history/HistoryManager";
-import { WallHistoryController } from "../history/wallHistory";
-import { PillarHistoryController } from "../history/pillarHistory";
-import { BeamHistoryController } from "../history/beamHistory";
-import { SlabHistoryController } from "../history/slabHistory";
-import { DoorHistoryController } from "../history/doorHistory";
-import { WindowHistoryController } from "../history/windowHistory";
-import { CommandExecutor } from "../commands/CommandExecutor";
+// Explicit .ts extensions on every value import below let Node run this
+// module directly (see allowImportingTsExtensions in tsconfig.json),
+// which is what lets src/engine/ai/e2e/verify.ts drive the REAL
+// composition root - real stores, real *HistoryController classes, real
+// shared HistoryManager - instead of stand-ins. Harmless for Vite,
+// which resolves these identically either way.
+import { WallStore } from "../wall/WallStore.ts";
+import { PillarStore } from "../pillar/PillarStore.ts";
+import { BeamStore } from "../beam/BeamStore.ts";
+import { SlabStore } from "../slab/SlabStore.ts";
+import { DoorStore } from "../door/DoorStore.ts";
+import { WindowStore } from "../window/WindowStore.ts";
+import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
+import { SelectionStore } from "../selection/SelectionStore.ts";
+import { HistoryManager } from "../history/HistoryManager.ts";
+import { WallHistoryController } from "../history/wallHistory.ts";
+import { PillarHistoryController } from "../history/pillarHistory.ts";
+import { BeamHistoryController } from "../history/beamHistory.ts";
+import { SlabHistoryController } from "../history/slabHistory.ts";
+import { DoorHistoryController } from "../history/doorHistory.ts";
+import { WindowHistoryController } from "../history/windowHistory.ts";
+import { CommandExecutor } from "../commands/CommandExecutor.ts";
 
 /**
  * The application's shared composition-root state: one instance each

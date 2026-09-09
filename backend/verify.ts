@@ -39,6 +39,7 @@ import { createServer } from "./src/createServer.ts";
 import type { CreateServerOptions } from "./src/createServer.ts";
 import { OpenAIProvider } from "../src/engine/ai/providers/OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "../src/engine/ai/providers/OpenAIProvider.ts";
+import { BackendAIProvider } from "../src/engine/ai/providers/BackendAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../src/engine/ai/types.ts";
 import type { AIProvider } from "../src/engine/ai/AIProvider.ts";
 import type { AIProviderRequest, AIProviderResponse, AIProjectSnapshot } from "../src/engine/ai/types.ts";
@@ -411,6 +412,66 @@ async function run(): Promise<void> {
       });
     }
   );
+
+  // --- Contract check: the real frontend provider against this real server ---
+
+  await check(
+    "the real BackendAIProvider round-trips against the real server over HTTP, with a stub provider standing in for OpenAI",
+    async () => {
+      // The one gap the frontend's own end-to-end suite (which injects a
+      // mock transport - see src/engine/ai/e2e/) cannot close by itself:
+      // proving the request BackendAIProvider actually builds is a request
+      // THIS server accepts. Real provider, real HTTP, real routing and
+      // request validation - only the AI provider inside the server is a
+      // stub, exactly where OpenAI would otherwise sit.
+      const provider = makeFakeProvider(() => ({
+        commands: [{ type: "wall.add", wall: { length: 4 } }],
+        notes: "stubbed"
+      }));
+
+      await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+        const backendProvider = new BackendAIProvider({
+          baseUrl,
+          fetch: (url, init) => fetch(url, init)
+        });
+
+        const response = await backendProvider.interpret({
+          instruction: "Build a wall",
+          projectContext: validSnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        });
+
+        assertDeepEqual(response.commands, [{ type: "wall.add", wall: { length: 4 } }], "commands round-tripped");
+        assertEqual(response.notes, "stubbed", "notes round-tripped");
+
+        assertEqual(provider.calls.length, 1, "the server called its provider exactly once");
+        assertEqual(provider.calls[0].instruction, "Build a wall", "instruction survived the round trip");
+        assertDeepEqual(provider.calls[0].projectContext, validSnapshot, "snapshot survived the round trip");
+      });
+    }
+  );
+
+  await check("the real BackendAIProvider surfaces this real server's 400 for a rejected request", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const backendProvider = new BackendAIProvider({ baseUrl, fetch: (url, init) => fetch(url, init) });
+
+      let message = "";
+      try {
+        await backendProvider.interpret({
+          instruction: "   ",
+          projectContext: validSnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+
+      assertTrue(message.includes("400"), `expected a 400 to surface, got "${message}"`);
+      assertEqual(provider.calls.length, 0, "the server never reached its provider");
+    });
+  });
 
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {

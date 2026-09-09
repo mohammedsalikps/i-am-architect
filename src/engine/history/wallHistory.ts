@@ -2,7 +2,11 @@ import type { WallData, WallId } from "../wall/types";
 import type { WallStore } from "../wall/WallStore";
 import type { WallValidationResult } from "../wall/validateWall";
 import type { SelectionStore } from "../selection/SelectionStore";
-import { HistoryManager } from "./HistoryManager";
+// Explicit .ts extension on this value import lets Node run this file
+// directly (see allowImportingTsExtensions in tsconfig.json) - needed by
+// the end-to-end suite, which drives the real ProjectContext. Harmless
+// for Vite.
+import { HistoryManager } from "./HistoryManager.ts";
 
 /**
  * The only place that knows how to turn a wall mutation into an
