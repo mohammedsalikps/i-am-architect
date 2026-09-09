@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+
+# Local tool/harness configuration (e.g. dev-server launch config for
+# the Claude Code browser preview) - not part of the application.
+.claude/
+
+# Environment/secret files, in case any are added later.
+.env
+.env.*
+!.env.example
