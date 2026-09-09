@@ -1,19 +1,31 @@
 import type { WallData, WallId } from "./types";
+import { ObjectRegistry, type RegistryListener } from "../objects/ObjectRegistry";
 
-export type WallStoreListener = (walls: WallData[]) => void;
+export type WallStoreListener = RegistryListener<WallData>;
 
 /**
- * In-memory source of truth for wall data. Rendering (Three.js) and UI
- * both subscribe to this instead of talking to each other directly, so
- * either side can be swapped out without touching wall logic.
+ * Domain-specific facade over the generic ObjectRegistry: storage,
+ * CRUD, cloning at the boundary, and subscriptions are all delegated to
+ * a private ObjectRegistry<WallData>. WallStore adds exactly one thing
+ * that's actually wall-specific - keeping a wall's base resting on the
+ * ground when its height changes - because that rule requires knowing
+ * what "height" and "grounded" mean for a wall, which a generic
+ * registry deliberately does not.
+ *
+ * Rendering (Three.js) and UI both subscribe to this instead of
+ * talking to each other directly, so either side can be swapped out
+ * without touching wall logic.
+ *
+ * See src/engine/objects/README.md for the reasoning behind this
+ * "compose ObjectRegistry, add only your own derived-field rules"
+ * pattern - future object-type stores (PillarStore, BeamStore, ...)
+ * should follow the same shape.
  */
 export class WallStore {
-  private readonly walls = new Map<WallId, WallData>();
-  private readonly listeners = new Set<WallStoreListener>();
+  private readonly registry = new ObjectRegistry<WallData>();
 
   add(wall: WallData): void {
-    this.walls.set(wall.id, wall);
-    this.emit();
+    this.registry.add(wall);
   }
 
   /**
@@ -24,23 +36,24 @@ export class WallStore {
    *
    * If dimensions.height changes without an explicit `position`, the
    * wall's base is kept resting on the ground by recomputing
-   * position.y - this rule lives here so every caller (UI, future
-   * tools) gets consistent behavior for free.
+   * position.y before delegating to the registry - this is the one
+   * wall-specific rule that lives here rather than in ObjectRegistry.
    */
   update(id: WallId, changes: Partial<Omit<WallData, "id" | "type">>): void {
-    const existing = this.walls.get(id);
+    const existing = this.registry.get(id);
     if (!existing) {
       return;
     }
 
-    const next: WallData = { ...existing, ...changes };
-
+    let effectiveChanges = changes;
     if (changes.dimensions?.height !== undefined && changes.position === undefined) {
-      next.position = { ...next.position, y: changes.dimensions.height / 2 };
+      effectiveChanges = {
+        ...changes,
+        position: { ...existing.position, y: changes.dimensions.height / 2 }
+      };
     }
 
-    this.walls.set(id, next);
-    this.emit();
+    this.registry.update(id, effectiveChanges);
   }
 
   /**
@@ -50,35 +63,23 @@ export class WallStore {
    * position.y etc. was correct at that point in time.
    */
   set(id: WallId, wall: WallData): void {
-    this.walls.set(id, wall);
-    this.emit();
+    this.registry.set(id, wall);
   }
 
   remove(id: WallId): void {
-    if (this.walls.delete(id)) {
-      this.emit();
-    }
+    this.registry.remove(id);
   }
 
   get(id: WallId): WallData | undefined {
-    return this.walls.get(id);
+    return this.registry.get(id);
   }
 
   getAll(): WallData[] {
-    return Array.from(this.walls.values());
+    return this.registry.getAll();
   }
 
   /** Returns an unsubscribe function. Calls the listener once immediately with the current state. */
   subscribe(listener: WallStoreListener): () => void {
-    this.listeners.add(listener);
-    listener(this.getAll());
-    return () => this.listeners.delete(listener);
-  }
-
-  private emit(): void {
-    const walls = this.getAll();
-    for (const listener of this.listeners) {
-      listener(walls);
-    }
+    return this.registry.subscribe(listener);
   }
 }
