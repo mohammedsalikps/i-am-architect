@@ -1,0 +1,16 @@
+{
+  "name": "i-am-architect-ai-proxy",
+  "version": "0.1.0",
+  "description": "Lightweight backend that keeps OPENAI_API_KEY server-side and proxies AI command-interpretation requests from the i am Architect frontend to the existing OpenAIProvider logic.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env src/server.ts",
+    "dev": "node --env-file=.env --watch src/server.ts",
+    "verify": "node verify.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.6.3"
+  }
+}

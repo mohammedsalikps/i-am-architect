@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    // Lets this backend, and its verify.ts, run directly via Node's
+    // native TypeScript support (same reasoning as the root project's
+    // tsconfig.json - see its own comment) - both this file and files
+    // it imports across into ../src/engine/ai/... already follow that
+    // convention (explicit .ts extensions on value imports).
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "verify.ts"]
+}
