@@ -9,6 +9,13 @@ import { HistoryManager } from "./HistoryManager";
  * methods instead of calling WallStore directly, so every wall
  * mutation is automatically recorded. WallStore itself stays a plain
  * data store with no knowledge of history.
+ *
+ * WallStore validates every write (see validateWall.ts) and returns a
+ * WallValidationResult instead of throwing. add() and update() check
+ * that result: a rejected write is left exactly as WallStore left it
+ * (nothing stored/changed, no subscriber notification) and, to match,
+ * no undo/redo Command is recorded for it either - there would be
+ * nothing meaningful to undo.
  */
 export class WallHistoryController {
   constructor(
@@ -19,7 +26,10 @@ export class WallHistoryController {
 
   /** Adds a brand-new wall (covers both "Add Wall" and "Duplicate Wall" - a duplicate is just a new wall). */
   add(wall: WallData): void {
-    this.wallStore.add(wall);
+    const result = this.wallStore.add(wall);
+    if (!result.valid) {
+      return; // rejected by validation - nothing was stored, don't record undo history
+    }
 
     this.history.record({
       undo: () => {
@@ -62,7 +72,10 @@ export class WallHistoryController {
       return;
     }
 
-    this.wallStore.update(id, changes);
+    const result = this.wallStore.update(id, changes);
+    if (!result.valid) {
+      return; // rejected by validation - the wall is unchanged, don't record undo history
+    }
 
     const after = this.wallStore.get(id);
     if (!after) {

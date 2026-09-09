@@ -88,12 +88,15 @@ needs no such rule).
 2. Create `src/engine/<type>/types.ts` defining `<Type>Dimensions` and
    `<Type>Data = ConstructionObjectBase<"<type>", <Type>Dimensions>`.
 3. Create `src/engine/<type>/create<Type>.ts` (a factory, following
-   `wall/createWall.ts`) and a `<Type>Store` that composes
+   `wall/createWall.ts`), `src/engine/<type>/validate<Type>.ts` (a pure
+   function following `wall/validateWall.ts`, if the type has real
+   constraints to enforce), and a `<Type>Store` that composes
    `ObjectRegistry<<Type>Data>` internally, the same way `WallStore`
-   composes `ObjectRegistry<WallData>` (see "Generic registry" above).
-   Add only the type-specific rules your object actually needs on top;
-   use `ObjectRegistry` directly if it needs none. Then wire the store
-   into
+   composes `ObjectRegistry<WallData>` (see "Generic registry" above) -
+   validating before every write and rejecting invalid ones, the same
+   way `WallStore` does. Add only the type-specific rules your object
+   actually needs on top; use `ObjectRegistry` directly if it needs
+   none. Then wire the store into
    `src/engine/history/<type>History.ts` the same way `wallHistory.ts`
    wires `WallStore` into `HistoryManager`.
 4. Create `src/scene/<type>/` with a mesh-builder module and a
@@ -112,7 +115,8 @@ to support) and `SceneManager` composing one more `<Type>Layer`.
 | Concern | Owner | Knows about Three.js? |
 |---|---|---|
 | Generic CRUD + subscribe storage, reusable across all object types | `ObjectRegistry<T>` (generic) | No |
-| Object data + type-specific validation rules (e.g. a wall's base stays grounded) | `<Type>Store` (e.g. `WallStore`), composing `ObjectRegistry<T>` internally | No |
+| Object data + type-specific derived-field rules (e.g. a wall's base stays grounded) | `<Type>Store` (e.g. `WallStore`), composing `ObjectRegistry<T>` internally | No |
+| Field-level validation (e.g. a wall's dimensions must be positive finite numbers) | `validate<Type>.ts` (e.g. `validateWall.ts`), called by `<Type>Store` before every write | No |
 | Undo/redo | `HistoryManager` (generic) + `<type>History.ts` (e.g. `wallHistory.ts`) | No |
 | Selection | `SelectionStore` (generic, shared across all object types) | No |
 | Mesh creation/sync/disposal, click-to-select raycasting | `<Type>Layer` (e.g. `WallLayer`) + its mesh-builder module | Yes |
