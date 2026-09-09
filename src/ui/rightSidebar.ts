@@ -17,26 +17,32 @@ function readOnlyRow(label: string, value: string): HTMLElement {
   ]);
 }
 
-/** A numeric field that commits on blur/Enter and reverts on invalid input. */
+/**
+ * A numeric field that commits on blur/Enter and reverts on invalid
+ * input. `min` is optional: dimensions pass a positive floor, while
+ * position/rotation fields omit it (negative values are valid there) -
+ * either way NaN/non-finite input is always rejected.
+ */
 function numberInputRow(
   label: string,
   value: number,
   onChange: (value: number) => void,
-  options: { min: number; step: number }
+  options: { min?: number; step: number }
 ): HTMLElement {
   const input = el("input", {
     className: "property-row__input",
     attrs: {
       type: "number",
       value: String(value),
-      min: String(options.min),
-      step: String(options.step)
+      step: String(options.step),
+      ...(options.min !== undefined ? { min: String(options.min) } : {})
     }
   });
 
   input.addEventListener("change", () => {
     const parsed = Number(input.value);
-    if (Number.isFinite(parsed) && parsed >= options.min) {
+    const isValid = Number.isFinite(parsed) && (options.min === undefined || parsed >= options.min);
+    if (isValid) {
       onChange(parsed);
     } else {
       input.value = String(value); // revert invalid input
@@ -69,18 +75,38 @@ function formatMeters(value: number): string {
   return `${value.toFixed(2)} m`;
 }
 
-function formatDegrees(radians: number): string {
-  return `${((radians * 180) / Math.PI).toFixed(1)}°`;
+function radiansToDegrees(radians: number): number {
+  return (radians * 180) / Math.PI;
+}
+
+function degreesToRadians(degrees: number): number {
+  return (degrees * Math.PI) / 180;
 }
 
 function buildWallPanels(wall: WallData, wallStore: WallStore): HTMLElement[] {
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
+  // Rounded for display only - onChange still converts the raw typed value,
+  // this just avoids showing float noise like "44.99999999999999".
+  const rotationDegrees = Math.round(radiansToDegrees(wall.rotation) * 100) / 100;
+
   const transform = section("Transform", [
-    readOnlyRow("Position X", formatMeters(wall.position.x)),
+    numberInputRow(
+      "Position X",
+      wall.position.x,
+      (value) => wallStore.update(wall.id, { position: { ...wall.position, x: value } }),
+      { step: 0.1 }
+    ),
     readOnlyRow("Position Y", formatMeters(wall.position.y)),
-    readOnlyRow("Position Z", formatMeters(wall.position.z)),
-    readOnlyRow("Rotation", formatDegrees(wall.rotation))
+    numberInputRow(
+      "Position Z",
+      wall.position.z,
+      (value) => wallStore.update(wall.id, { position: { ...wall.position, z: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow("Rotation Y", rotationDegrees, (value) => wallStore.update(wall.id, { rotation: degreesToRadians(value) }), {
+      step: 1
+    })
   ]);
 
   const dimensions = section("Dimensions", [
