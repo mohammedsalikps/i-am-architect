@@ -8,6 +8,7 @@ import { createCommandBar } from "./commandBar";
 import { createStatusBar } from "./statusBar";
 import { createViewControls, type ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
+import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -17,11 +18,13 @@ export type AppShellOptions = {
   projectName: string;
   onViewChange: (preset: ViewPreset) => void;
   onAddWall: () => void;
-  onDuplicateWall: () => void;
-  onDeleteWall: () => void;
+  onAddPillar: () => void;
+  onDuplicateSelected: () => void;
+  onDeleteSelected: () => void;
   onUndo: () => void;
   onRedo: () => void;
   wallStore: WallStore;
+  pillarStore: PillarStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -56,20 +59,22 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const mainNav = createMainNav();
 
-  const ribbon = createConstructionRibbon(options.onAddWall);
+  const ribbon = createConstructionRibbon(options.onAddWall, options.onAddPillar);
 
   const leftSidebar = createLeftSidebar(
     options.assemblyStore,
     options.commandExecutor,
     options.selectionStore,
-    options.wallStore
+    options.wallStore,
+    options.pillarStore
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
+    pillarStore: options.pillarStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
-    onDuplicateWall: options.onDuplicateWall,
-    onDeleteWall: options.onDeleteWall
+    onDuplicateSelected: options.onDuplicateSelected,
+    onDeleteSelected: options.onDeleteSelected
   });
 
   const viewportContainer = el("div", { className: "viewport-container" });

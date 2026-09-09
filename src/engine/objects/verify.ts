@@ -14,6 +14,11 @@
  * directly by Node, not bundled by Vite.
  */
 import { ObjectRegistry } from "./ObjectRegistry.ts";
+import { resolveConstructionObject } from "./resolveConstructionObject.ts";
+import { WallStore } from "../wall/WallStore.ts";
+import { createWallData } from "../wall/createWall.ts";
+import { PillarStore } from "../pillar/PillarStore.ts";
+import { createPillarData } from "../pillar/createPillar.ts";
 import type { ConstructionObjectBase } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
@@ -160,6 +165,52 @@ function run(): void {
 
   check("remove() on a missing id does not throw", () => {
     registry.remove("does-not-exist");
+  });
+
+  // --- resolveConstructionObject() ---
+
+  check("resolves a wall id to type 'wall'", () => {
+    const wallStore = new WallStore();
+    const pillarStore = new PillarStore();
+    const wall = createWallData();
+    wallStore.add(wall);
+
+    const resolved = resolveConstructionObject(wall.id, { wallStore, pillarStore });
+    assertDeepEqual(resolved, { type: "wall", id: wall.id }, "resolved wall ref");
+  });
+
+  check("resolves a pillar id to type 'pillar'", () => {
+    const wallStore = new WallStore();
+    const pillarStore = new PillarStore();
+    const pillar = createPillarData();
+    pillarStore.add(pillar);
+
+    const resolved = resolveConstructionObject(pillar.id, { wallStore, pillarStore });
+    assertDeepEqual(resolved, { type: "pillar", id: pillar.id }, "resolved pillar ref");
+  });
+
+  check("resolves an id in neither store to undefined", () => {
+    const wallStore = new WallStore();
+    const pillarStore = new PillarStore();
+
+    const resolved = resolveConstructionObject("does-not-exist", { wallStore, pillarStore });
+    assertEqual(resolved, undefined, "unresolved id");
+  });
+
+  check("a wall id and a pillar id never collide - each resolves to its own store only", () => {
+    const wallStore = new WallStore();
+    const pillarStore = new PillarStore();
+    const wall = createWallData();
+    const pillar = createPillarData();
+    wallStore.add(wall);
+    pillarStore.add(pillar);
+
+    assertEqual(resolveConstructionObject(wall.id, { wallStore, pillarStore })?.type, "wall", "wall id resolves as wall");
+    assertEqual(
+      resolveConstructionObject(pillar.id, { wallStore, pillarStore })?.type,
+      "pillar",
+      "pillar id resolves as pillar"
+    );
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

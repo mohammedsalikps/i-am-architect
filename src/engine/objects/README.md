@@ -100,28 +100,37 @@ needs no such rule).
    `src/engine/history/<type>History.ts` the same way `wallHistory.ts`
    wires `WallStore` into `HistoryManager`.
 4. Create `src/scene/<type>/` with a mesh-builder module and a
-   `<Type>Layer` (copy `WallLayer`'s shape) that `SceneManager` composes
-   alongside `WallLayer`.
-5. Extend the right sidebar / toolbar UI to read and write through the
-   new store, the same way `rightSidebar.ts` and `header.ts` do for
-   walls.
+   `<Type>Layer` (copy `WallLayer`'s or `PillarLayer`'s shape - a
+   `getMeshes()` method, mesh sync/dispose, selection-outline sync; no
+   click handling) that `SceneManager` composes alongside the others,
+   registering `newLayer.getMeshes` with the shared `SelectionRaycaster`.
+5. Extend the right sidebar / construction ribbon UI to read and write
+   through the new store, the same way `rightSidebar.ts` and
+   `constructionRibbon.ts` do for walls and pillars.
 
 No existing file needs to change to support a new object type beyond
 the `ObjectType` union (already anticipates every type this app plans
-to support) and `SceneManager` composing one more `<Type>Layer`.
+to support), `SceneManager` composing one more `<Type>Layer`, and
+registering that layer's meshes with the shared `SelectionRaycaster`
+(see the row below) - both pillar's `PillarLayer` and wall's
+`WallLayer` were adjusted the moment a second selectable type appeared;
+a third type follows the same two-line registration, no further
+changes.
 
 ## Layer ownership
 
 | Concern | Owner | Knows about Three.js? |
 |---|---|---|
 | Generic CRUD + subscribe storage, reusable across all object types | `ObjectRegistry<T>` (generic) | No |
-| Object data + type-specific derived-field rules (e.g. a wall's base stays grounded) | `<Type>Store` (e.g. `WallStore`), composing `ObjectRegistry<T>` internally | No |
+| Object data + type-specific derived-field rules (e.g. a wall's or pillar's base stays grounded) | `<Type>Store` (e.g. `WallStore`, `PillarStore`), composing `ObjectRegistry<T>` internally | No |
 | Field-level validation (e.g. a wall's dimensions must be positive finite numbers) | `validate<Type>.ts` (e.g. `validateWall.ts`), called by `<Type>Store` before every write | No |
-| Undo/redo | `HistoryManager` (generic) + `<type>History.ts` (e.g. `wallHistory.ts`) | No |
-| Selection | `SelectionStore` (generic, shared across all object types) | No |
-| Mesh creation/sync/disposal, click-to-select raycasting | `<Type>Layer` (e.g. `WallLayer`) + its mesh-builder module | Yes |
+| Undo/redo | `HistoryManager` (generic) + `<type>History.ts` (e.g. `wallHistory.ts`, `pillarHistory.ts`) - all types share one `HistoryManager` instance, so undo/redo interleaves across types | No |
+| Selection | `SelectionStore` (generic, shared across all object types - one selected object at a time, regardless of type) | No |
+| Mesh creation/sync/disposal | `<Type>Layer` (e.g. `WallLayer`, `PillarLayer`) + its mesh-builder module | Yes |
+| Click-to-select raycasting | `SelectionRaycaster` (generic, shared across all layers) - each `<Type>Layer` only exposes `getMeshes()`; it does not listen for clicks itself. See `SelectionRaycaster.ts`'s docs for why this moved out of `WallLayer` once a second selectable type existed | Yes |
+| Selection-outline mesh | `selectionOutline.ts` (generic, shared across all layers) | Yes |
 | Scene/camera/renderer/controls lifecycle | `SceneManager` | Yes |
-| Reading/editing object data as UI | `rightSidebar.ts`, `header.ts` | No (goes through the store/history layer) |
+| Reading/editing object data as UI | `rightSidebar.ts`, `constructionRibbon.ts` | No (goes through the store/history layer) |
 
 `src/engine/` never imports from `src/scene/` or `src/ui/` - data flows
 one way: engine stores are the source of truth, `src/scene/*Layer`

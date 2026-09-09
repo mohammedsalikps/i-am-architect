@@ -13,7 +13,10 @@ export function buildWallMesh(wall: WallData): THREE.Mesh {
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(wall.position.x, wall.position.y, wall.position.z);
   mesh.rotation.y = wall.rotation;
-  mesh.userData.wallId = wall.id;
+  // objectId (not wallId): SelectionRaycaster reads this same field on
+  // every selectable mesh regardless of construction-object type, so it
+  // can raycast walls and pillars together without type-specific cases.
+  mesh.userData.objectId = wall.id;
 
   return mesh;
 }

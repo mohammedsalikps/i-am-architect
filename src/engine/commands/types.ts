@@ -1,6 +1,9 @@
 import type { CreateWallOptions } from "../wall/createWall";
 import type { WallData, WallId } from "../wall/types";
 import type { WallValidationResult } from "../wall/validateWall";
+import type { CreatePillarOptions } from "../pillar/createPillar";
+import type { PillarData, PillarId } from "../pillar/types";
+import type { PillarValidationResult } from "../pillar/validatePillar";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
 
@@ -10,12 +13,14 @@ import type { ObjectId } from "../objects/types";
  * lets a future caller (an AI feature translating a prompt into
  * commands, a macro/scripting feature, or - today - a thin UI action)
  * request a mutation without calling WallStore/WallHistoryController/
- * AssemblyStore directly. See commands/README.md.
+ * PillarStore/PillarHistoryController/AssemblyStore directly. See
+ * commands/README.md.
  *
- * A future object type adds its own namespaced command interfaces here
- * (e.g. "pillar.add") and joins the Command union below - CommandExecutor
- * gets one new switch case, nothing about the existing shapes needs to
- * change.
+ * The "pillar.*" commands below are the second object type to follow
+ * this pattern (after "wall.*") - a future object type adds its own
+ * namespaced command interfaces here and joins the Command union below
+ * the same way, giving CommandExecutor one new switch case per command
+ * without changing any existing shape.
  */
 
 export interface AddWallCommand {
@@ -39,6 +44,29 @@ export interface DeleteWallCommand {
 export interface DuplicateWallCommand {
   type: "wall.duplicate";
   id: WallId;
+}
+
+export interface AddPillarCommand {
+  type: "pillar.add";
+  /** Same shape as createPillarData()'s options - flat, all optional, sensible defaults fill the rest. */
+  pillar: CreatePillarOptions;
+}
+
+export interface UpdatePillarCommand {
+  type: "pillar.update";
+  id: PillarId;
+  /** Same shape PillarStore.update() takes - see its docs for the "complete replacement object" convention on nested fields. */
+  changes: Partial<Omit<PillarData, "id" | "type">>;
+}
+
+export interface DeletePillarCommand {
+  type: "pillar.delete";
+  id: PillarId;
+}
+
+export interface DuplicatePillarCommand {
+  type: "pillar.duplicate";
+  id: PillarId;
 }
 
 export interface CreateAssemblyCommand {
@@ -76,6 +104,10 @@ export type Command =
   | UpdateWallCommand
   | DeleteWallCommand
   | DuplicateWallCommand
+  | AddPillarCommand
+  | UpdatePillarCommand
+  | DeletePillarCommand
+  | DuplicatePillarCommand
   | CreateAssemblyCommand
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
@@ -106,4 +138,11 @@ export interface WallHistoryLike {
   add(wall: WallData): WallValidationResult;
   update(id: WallId, changes: Partial<Omit<WallData, "id" | "type">>): WallValidationResult;
   remove(id: WallId): void;
+}
+
+/** The pillar equivalent of WallHistoryLike - same reasoning, same shape. */
+export interface PillarHistoryLike {
+  add(pillar: PillarData): PillarValidationResult;
+  update(id: PillarId, changes: Partial<Omit<PillarData, "id" | "type">>): PillarValidationResult;
+  remove(id: PillarId): void;
 }

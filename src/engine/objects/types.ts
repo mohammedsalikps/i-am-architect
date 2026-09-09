@@ -19,9 +19,9 @@ export interface Vector3Data {
 }
 
 /**
- * Every construction object type this app plans to support. Only
- * "wall" is implemented right now - the rest are reserved extension
- * points so adding a new type only needs to touch this union once.
+ * Every construction object type this app plans to support. "wall" and
+ * "pillar" are implemented; the rest are reserved extension points so
+ * adding a new type only needs to touch this union once.
  */
 export type ObjectType =
   | "wall"

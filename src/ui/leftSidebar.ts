@@ -5,6 +5,7 @@ import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { WallStore } from "../engine/wall/WallStore";
+import type { PillarStore } from "../engine/pillar/PillarStore";
 
 const HIERARCHY_SECTIONS = ["Building", "Floors", "Rooms", "Objects"];
 
@@ -29,14 +30,17 @@ function buildProjectHierarchy(): HTMLElement {
  * asset/layer/view/measurement/document management, only somewhere for
  * it to eventually live.
  *
- * `wallSelectionStore` and `wallStore` are threaded straight through to
- * the assembly panel, unchanged from the previous milestone.
+ * `selectionStore`, `wallStore`, and `pillarStore` are threaded
+ * straight through to the assembly panel, which resolves a member id
+ * against both stores (see resolveConstructionObject.ts) rather than
+ * assuming every member is a wall.
  */
 export function createLeftSidebar(
   assemblyStore: AssemblyStore,
   commandExecutor: CommandExecutor,
-  wallSelectionStore: SelectionStore,
-  wallStore: WallStore
+  selectionStore: SelectionStore,
+  wallStore: WallStore,
+  pillarStore: PillarStore
 ): HTMLElement {
   const { strip, panel } = createTabStrip(
     [
@@ -44,7 +48,7 @@ export function createLeftSidebar(
       {
         id: "assemblies",
         label: "Assemblies",
-        build: () => createAssemblyPanel(assemblyStore, commandExecutor, wallSelectionStore, wallStore)
+        build: () => createAssemblyPanel(assemblyStore, commandExecutor, selectionStore, wallStore, pillarStore)
       },
       { id: "assets", label: "Assets", build: () => comingSoon("Asset management"), disabled: true },
       { id: "layers", label: "Layers", build: () => comingSoon("Layer management"), disabled: true },

@@ -1,62 +1,61 @@
 import * as THREE from "three";
-import type { WallData } from "../../engine/wall/types";
-import type { WallStore } from "../../engine/wall/WallStore";
+import type { PillarData } from "../../engine/pillar/types";
+import type { PillarStore } from "../../engine/pillar/PillarStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
-import { buildWallMesh, applyWallDataToMesh } from "./buildWallMesh";
+import { buildPillarMesh, applyPillarDataToMesh } from "./buildPillarMesh";
 import { buildSelectionOutline, refreshSelectionOutline } from "../selectionOutline";
 
-interface WallEntry {
+interface PillarEntry {
   mesh: THREE.Mesh;
   outline: THREE.LineSegments;
 }
 
 /**
- * Bridges wall/selection engine state to the Three.js scene: creates,
- * updates and removes wall meshes as WallStore changes, and shows/hides
- * a selection outline as SelectionStore changes. Contains no wall
- * *data* logic itself - that all lives in the engine stores.
+ * Bridges pillar/selection engine state to the Three.js scene - mirrors
+ * WallLayer.ts exactly (see its docs for the full reasoning). Creates,
+ * updates and removes pillar meshes as PillarStore changes, and shows/
+ * hides a selection outline as SelectionStore changes. Contains no
+ * pillar *data* logic itself.
  *
  * Does not raycast clicks itself - it exposes getMeshes() so the
- * shared SelectionRaycaster (src/scene/SelectionRaycaster.ts) can
- * combine wall meshes with every other selectable layer's meshes into
- * one click handler. See that file's docs for why click-handling moved
- * out of this class.
+ * shared SelectionRaycaster can combine pillar meshes with every other
+ * selectable layer's meshes into one click handler.
  */
-export class WallLayer {
-  private readonly entries = new Map<string, WallEntry>();
+export class PillarLayer {
+  private readonly entries = new Map<string, PillarEntry>();
 
   constructor(
     private readonly scene: THREE.Scene,
-    private readonly wallStore: WallStore,
+    private readonly pillarStore: PillarStore,
     private readonly selectionStore: SelectionStore
   ) {
-    this.wallStore.subscribe((walls) => this.syncWalls(walls));
+    this.pillarStore.subscribe((pillars) => this.syncPillars(pillars));
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
   }
 
-  /** Current wall meshes, for the shared SelectionRaycaster to raycast against. */
+  /** Current pillar meshes, for the shared SelectionRaycaster to raycast against. */
   getMeshes(): THREE.Object3D[] {
     return Array.from(this.entries.values(), (entry) => entry.mesh);
   }
 
-  private syncWalls(walls: WallData[]): void {
+  private syncPillars(pillars: PillarData[]): void {
     const seenIds = new Set<string>();
 
-    for (const wall of walls) {
-      seenIds.add(wall.id);
-      const entry = this.entries.get(wall.id);
+    for (const pillar of pillars) {
+      seenIds.add(pillar.id);
+      const entry = this.entries.get(pillar.id);
 
       if (entry) {
-        const { dimensionsChanged } = applyWallDataToMesh(entry.mesh, wall);
+        const { dimensionsChanged } = applyPillarDataToMesh(entry.mesh, pillar);
         if (dimensionsChanged) {
           refreshSelectionOutline(entry.outline, entry.mesh);
         }
       } else {
-        const mesh = buildWallMesh(wall);
+        const mesh = buildPillarMesh(pillar);
         const outline = buildSelectionOutline(mesh);
         mesh.add(outline);
         this.scene.add(mesh);
-        this.entries.set(wall.id, { mesh, outline });
+        this.entries.set(pillar.id, { mesh, outline });
       }
     }
 
@@ -76,7 +75,7 @@ export class WallLayer {
     }
   }
 
-  private disposeEntry(entry: WallEntry): void {
+  private disposeEntry(entry: PillarEntry): void {
     this.scene.remove(entry.mesh);
     entry.mesh.geometry.dispose();
     (entry.mesh.material as THREE.Material).dispose();

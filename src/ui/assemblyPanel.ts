@@ -1,53 +1,70 @@
 import { el } from "./dom";
 import { SelectionStore } from "../engine/selection/SelectionStore";
+import { resolveConstructionObject } from "../engine/objects/resolveConstructionObject";
 import type { AssemblyData } from "../engine/assemblies/types";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { WallStore } from "../engine/wall/WallStore";
-import type { ObjectId } from "../engine/objects/types";
+import type { PillarStore } from "../engine/pillar/PillarStore";
+import type { ObjectId, ObjectType } from "../engine/objects/types";
 
 /** Truncates a long id for display; today's ids (e.g. "wall-1") are already short, so this is usually a no-op. */
 function shortId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
+// Only wall/pillar are resolvable today (see resolveConstructionObject.ts) -
+// this map only needs an entry for each type that resolver can actually
+// return. A new object type's store joining the resolver adds one line here.
+const TYPE_LABELS: Partial<Record<ObjectType, string>> = {
+  wall: "Wall",
+  pillar: "Pillar"
+};
+
 /**
- * Resolves a member object id to a readable label. Only WallStore
- * exists today - a future object type (pillar, beam, ...) would add
- * another `store.get(id)` check here, in the same "found -> readable
- * label, not found -> fall through" shape. Never removes anything;
- * an id that matches no known store just reads as "Unknown object."
+ * Resolves a member object id to a readable label, using
+ * resolveConstructionObject() to check every implemented object-type
+ * store (today: wall, pillar) rather than assuming everything is a
+ * wall. Never removes anything; an id that matches no known store just
+ * reads as "Unknown object."
  */
-function resolveMemberLabel(objectId: ObjectId, wallStore: WallStore): { label: string; wallId: ObjectId | null } {
-  const wall = wallStore.get(objectId);
-  if (wall) {
-    return { label: `Wall — ${shortId(objectId)}`, wallId: objectId };
+function resolveMemberLabel(
+  objectId: ObjectId,
+  wallStore: WallStore,
+  pillarStore: PillarStore
+): { label: string; selectableId: ObjectId | null } {
+  const resolved = resolveConstructionObject(objectId, { wallStore, pillarStore });
+  if (resolved) {
+    const typeLabel = TYPE_LABELS[resolved.type] ?? resolved.type;
+    return { label: `${typeLabel} — ${shortId(objectId)}`, selectableId: objectId };
   }
-  return { label: `Unknown object — ${shortId(objectId)}`, wallId: null };
+  return { label: `Unknown object — ${shortId(objectId)}`, selectableId: null };
 }
 
 /**
  * Minimal assembly-management panel: list existing assemblies (name +
  * object count), create/select/delete an assembly, show the selected
  * assembly's member objects, and add/remove the currently-selected
- * wall to/from the currently-selected assembly. Lives in the left
- * sidebar.
+ * construction object (a wall or a pillar) to/from the
+ * currently-selected assembly. Lives in the left sidebar.
  *
  * Uses its own SelectionStore instance for "which assembly is selected
- * in this panel" - deliberately separate from the wall SelectionStore.
- * `wallSelectionStore` (the existing one from ProjectContext) is read
+ * in this panel" - deliberately separate from the shared construction-
+ * object SelectionStore. `selectionStore` (the one shared instance from
+ * ProjectContext - the same one WallLayer/PillarLayer and rightSidebar.ts
+ * use, holding at most one selected wall-or-pillar id at a time) is read
  * (`.get()`/`.subscribe()`) throughout this panel to drive the Add/
  * Remove button state, and is also *written to* in exactly one place:
- * clicking a listed wall member calls `.select()` on it, the same way
- * clicking a wall mesh in the 3D viewport already does. That's a
- * normal use of the shared store's own public API from a new UI entry
- * point, not a merge of the two selection concepts - assembly
- * selection is never affected by clicking a wall member, and wall
- * selection is never affected by anything assembly-related otherwise.
+ * clicking a listed member calls `.select()` on it, the same way
+ * clicking a mesh in the 3D viewport already does. That's a normal use
+ * of the shared store's own public API from a new UI entry point, not
+ * a merge of the two selection concepts - assembly selection is never
+ * affected by clicking a member, and construction-object selection is
+ * never affected by anything else assembly-related.
  *
- * `wallStore` is read-only here (`.get()`/`.subscribe()`), used only
- * to resolve a member id into a readable label - this panel never
- * writes to WallStore.
+ * `wallStore`/`pillarStore` are read-only here (`.get()`/`.subscribe()`),
+ * used only (via resolveConstructionObject) to resolve a member id into
+ * a readable label - this panel never writes to either store.
  *
  * All writes (create/delete/addObject/removeObject) go through
  * commandExecutor - this panel never calls AssemblyStore's write
@@ -58,8 +75,9 @@ function resolveMemberLabel(objectId: ObjectId, wallStore: WallStore): { label: 
 export function createAssemblyPanel(
   assemblyStore: AssemblyStore,
   commandExecutor: CommandExecutor,
-  wallSelectionStore: SelectionStore,
-  wallStore: WallStore
+  selectionStore: SelectionStore,
+  wallStore: WallStore,
+  pillarStore: PillarStore
 ): HTMLElement {
   const assemblySelection = new SelectionStore();
 
@@ -102,32 +120,32 @@ export function createAssemblyPanel(
     }
   });
 
-  const addWallButton = el("button", {
+  const addObjectButton = el("button", {
     className: "toolbar-button",
-    text: "Add Selected Wall",
+    text: "Add Selected Object",
     attrs: { type: "button" }
   });
-  addWallButton.addEventListener("click", () => {
+  addObjectButton.addEventListener("click", () => {
     const assembly = getSelectedAssembly();
-    const wallId = wallSelectionStore.get();
-    if (!assembly || !wallId) {
+    const selectedObjectId = selectionStore.get();
+    if (!assembly || !selectedObjectId) {
       return; // the button is disabled in this state, but guard anyway
     }
-    commandExecutor.execute({ type: "assembly.addObject", assemblyId: assembly.id, objectId: wallId });
+    commandExecutor.execute({ type: "assembly.addObject", assemblyId: assembly.id, objectId: selectedObjectId });
   });
 
-  const removeWallButton = el("button", {
+  const removeObjectButton = el("button", {
     className: "toolbar-button",
-    text: "Remove Selected Wall",
+    text: "Remove Selected Object",
     attrs: { type: "button" }
   });
-  removeWallButton.addEventListener("click", () => {
+  removeObjectButton.addEventListener("click", () => {
     const assembly = getSelectedAssembly();
-    const wallId = wallSelectionStore.get();
-    if (!assembly || !wallId) {
+    const selectedObjectId = selectionStore.get();
+    if (!assembly || !selectedObjectId) {
       return; // the button is disabled in this state, but guard anyway
     }
-    commandExecutor.execute({ type: "assembly.removeObject", assemblyId: assembly.id, objectId: wallId });
+    commandExecutor.execute({ type: "assembly.removeObject", assemblyId: assembly.id, objectId: selectedObjectId });
   });
 
   function getSelectedAssembly(): AssemblyData | undefined {
@@ -137,11 +155,11 @@ export function createAssemblyPanel(
 
   function updateMembershipButtons(): void {
     const assembly = getSelectedAssembly();
-    const wallId = wallSelectionStore.get();
-    const isMember = !!assembly && !!wallId && assembly.objectIds.includes(wallId);
+    const selectedObjectId = selectionStore.get();
+    const isMember = !!assembly && !!selectedObjectId && assembly.objectIds.includes(selectedObjectId);
 
-    addWallButton.disabled = !assembly || !wallId || isMember;
-    removeWallButton.disabled = !assembly || !wallId || !isMember;
+    addObjectButton.disabled = !assembly || !selectedObjectId || isMember;
+    removeObjectButton.disabled = !assembly || !selectedObjectId || !isMember;
   }
 
   assemblySelection.subscribe((selectedId) => {
@@ -149,7 +167,7 @@ export function createAssemblyPanel(
   });
   assemblyStore.subscribe(updateMembershipButtons);
   assemblySelection.subscribe(updateMembershipButtons);
-  wallSelectionStore.subscribe(updateMembershipButtons);
+  selectionStore.subscribe(updateMembershipButtons);
 
   const list = el("div", { className: "assembly-list" });
 
@@ -216,16 +234,16 @@ export function createAssemblyPanel(
             "ul",
             { className: "assembly-members" },
             assembly.objectIds.map((objectId) => {
-              const { label, wallId } = resolveMemberLabel(objectId, wallStore);
+              const { label, selectableId } = resolveMemberLabel(objectId, wallStore, pillarStore);
               const item = el("li", { className: "assembly-members__item" });
 
-              if (wallId) {
+              if (selectableId) {
                 const link = el("button", {
                   className: "assembly-members__link",
                   text: label,
                   attrs: { type: "button" }
                 });
-                link.addEventListener("click", () => wallSelectionStore.select(wallId));
+                link.addEventListener("click", () => selectionStore.select(selectableId));
                 item.append(link);
               } else {
                 item.append(el("span", { className: "assembly-members__unknown", text: label }));
@@ -241,6 +259,7 @@ export function createAssemblyPanel(
   assemblyStore.subscribe(renderSelectedAssemblyDetail);
   assemblySelection.subscribe(renderSelectedAssemblyDetail);
   wallStore.subscribe(renderSelectedAssemblyDetail);
+  pillarStore.subscribe(renderSelectedAssemblyDetail);
 
   return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Assemblies" }),
@@ -248,8 +267,8 @@ export function createAssemblyPanel(
     list,
     detail,
     el("div", { className: "assembly-panel__actions assembly-panel__actions--membership" }, [
-      addWallButton,
-      removeWallButton
+      addObjectButton,
+      removeObjectButton
     ])
   ]);
 }

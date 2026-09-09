@@ -2,9 +2,11 @@ import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
+import type { PillarData } from "../engine/pillar/types";
+import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
-import type { UpdateWallCommand } from "../engine/commands/types";
+import type { UpdateWallCommand, UpdatePillarCommand } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
@@ -86,27 +88,32 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
-function buildWallPanels(
-  wall: WallData,
-  commandExecutor: CommandExecutor,
-  onDuplicateWall: () => void,
-  onDeleteWall: () => void
-): HTMLElement[] {
+/** Shared by both buildWallPanels and buildPillarPanels - identical Duplicate/Delete action row for whichever type is selected. */
+function buildActionsRow(onDuplicateSelected: () => void, onDeleteSelected: () => void): HTMLElement {
   const duplicateButton = el("button", {
     className: "toolbar-button",
     text: "Duplicate",
     attrs: { type: "button" }
   });
-  duplicateButton.addEventListener("click", onDuplicateWall);
+  duplicateButton.addEventListener("click", onDuplicateSelected);
 
   const deleteButton = el("button", {
     className: "toolbar-button toolbar-button--danger",
     text: "Delete",
     attrs: { type: "button" }
   });
-  deleteButton.addEventListener("click", onDeleteWall);
+  deleteButton.addEventListener("click", onDeleteSelected);
 
-  const actions = el("div", { className: "property-panel__actions" }, [duplicateButton, deleteButton]);
+  return el("div", { className: "property-panel__actions" }, [duplicateButton, deleteButton]);
+}
+
+function buildWallPanels(
+  wall: WallData,
+  commandExecutor: CommandExecutor,
+  onDuplicateSelected: () => void,
+  onDeleteSelected: () => void
+): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
 
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
@@ -165,32 +172,119 @@ function buildWallPanels(
   return [actions, properties, transform, dimensions, material, color];
 }
 
+/**
+ * Pillar's own panel builder - deliberately separate from
+ * buildWallPanels rather than a shared generic-over-dimensions version:
+ * a wall's fields (length/height/thickness) and a pillar's
+ * (width/depth/height) aren't interchangeable, and keeping them as two
+ * concrete, type-safe functions means neither one has to guess which
+ * fields the other actually has. Structurally near-identical by
+ * design - see rightSidebar's module doc.
+ */
+function buildPillarPanels(
+  pillar: PillarData,
+  commandExecutor: CommandExecutor,
+  onDuplicateSelected: () => void,
+  onDeleteSelected: () => void
+): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
+
+  const properties = section("Properties", [readOnlyRow("Name", "Pillar"), readOnlyRow("Type", pillar.type)]);
+
+  const rotationDegrees = Math.round(radiansToDegrees(pillar.rotation) * 100) / 100;
+
+  const updatePillar = (changes: UpdatePillarCommand["changes"]): void => {
+    commandExecutor.execute({ type: "pillar.update", id: pillar.id, changes });
+  };
+
+  const transform = section("Transform", [
+    numberInputRow(
+      "Position X",
+      pillar.position.x,
+      (value) => updatePillar({ position: { ...pillar.position, x: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Y",
+      pillar.position.y,
+      (value) => updatePillar({ position: { ...pillar.position, y: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Z",
+      pillar.position.z,
+      (value) => updatePillar({ position: { ...pillar.position, z: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Rotation Y",
+      rotationDegrees,
+      (value) => updatePillar({ rotation: degreesToRadians(value) }),
+      { step: 1 }
+    )
+  ]);
+
+  const dimensions = section("Dimensions", [
+    numberInputRow(
+      "Width",
+      pillar.dimensions.width,
+      (value) => updatePillar({ dimensions: { ...pillar.dimensions, width: value } }),
+      { min: 0.05, step: 0.05 }
+    ),
+    numberInputRow(
+      "Depth",
+      pillar.dimensions.depth,
+      (value) => updatePillar({ dimensions: { ...pillar.dimensions, depth: value } }),
+      { min: 0.05, step: 0.05 }
+    ),
+    numberInputRow(
+      "Height",
+      pillar.dimensions.height,
+      (value) => updatePillar({ dimensions: { ...pillar.dimensions, height: value } }),
+      { min: 0.1, step: 0.1 }
+    )
+  ]);
+
+  const material = section("Material", [readOnlyRow("Material", pillar.material)]);
+
+  const color = section("Color", [colorInputRow("Color", pillar.color, (value) => updatePillar({ color: value }))]);
+
+  return [actions, properties, transform, dimensions, material, color];
+}
+
 function buildEmptyState(): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
-    el("p", { className: "sidebar__placeholder", text: "Select a wall to view and edit its properties." })
+    el("p", {
+      className: "sidebar__placeholder",
+      text: "Select a wall or pillar to view and edit its properties."
+    })
   ]);
 }
 
 export type RightSidebarOptions = {
   wallStore: WallStore;
+  pillarStore: PillarStore;
   selectionStore: SelectionStore;
   commandExecutor: CommandExecutor;
-  onDuplicateWall: () => void;
-  onDeleteWall: () => void;
+  onDuplicateSelected: () => void;
+  onDeleteSelected: () => void;
 };
 
 /**
  * Right sidebar / inspector. Tabbed: Properties/Materials/Blocks/
- * Colors. Properties is the existing wall editor - reactive, subscribes
- * to both stores and re-renders whenever the selection or the selected
- * wall's data changes, plus Duplicate/Delete (moved in from the old
- * header, same callbacks). Materials/Blocks/Colors are "Coming soon" -
- * this milestone doesn't add material libraries or block catalogs.
+ * Colors. Properties resolves the current selection against wallStore
+ * first, then pillarStore - the same "try one store, fall back to the
+ * next" shape assemblyPanel.ts's resolveMemberLabel already uses -
+ * and renders the matching type-specific panel (buildWallPanels /
+ * buildPillarPanels), or the empty state if the selected id belongs to
+ * neither (or nothing is selected). Wall and pillar rendering stay
+ * fully separate, type-safe functions - this module never merges their
+ * shapes into one generic form.
  *
- * Reads come straight from wallStore; edits go through
- * commandExecutor.execute() (a "wall.update" command) rather than
- * touching wallStore or WallHistoryController directly - this module
- * never touches Three.js directly either.
+ * Reads come straight from the stores; edits go through
+ * commandExecutor.execute() ("wall.update"/"pillar.update" commands)
+ * rather than touching the stores or history controllers directly -
+ * this module never touches Three.js directly either.
  */
 export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const properties = el("div", { className: "property-panel" });
@@ -198,15 +292,27 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const render = (): void => {
     const selectedId = options.selectionStore.get();
     const wall = selectedId ? options.wallStore.get(selectedId) : undefined;
+    const pillar = !wall && selectedId ? options.pillarStore.get(selectedId) : undefined;
 
-    properties.replaceChildren(
-      ...(wall
-        ? buildWallPanels(wall, options.commandExecutor, options.onDuplicateWall, options.onDeleteWall)
-        : [buildEmptyState()])
-    );
+    let content: HTMLElement[];
+    if (wall) {
+      content = buildWallPanels(wall, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
+    } else if (pillar) {
+      content = buildPillarPanels(
+        pillar,
+        options.commandExecutor,
+        options.onDuplicateSelected,
+        options.onDeleteSelected
+      );
+    } else {
+      content = [buildEmptyState()];
+    }
+
+    properties.replaceChildren(...content);
   };
 
   options.wallStore.subscribe(render);
+  options.pillarStore.subscribe(render);
   options.selectionStore.subscribe(render);
 
   const { strip, panel } = createTabStrip(

@@ -4,6 +4,8 @@ import type { WallStore } from "../wall/WallStore";
 // file directly, e.g. from src/engine/commands/verify.ts - see
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { createWallData, duplicateWallData } from "../wall/createWall.ts";
+import { createPillarData, duplicatePillarData } from "../pillar/createPillar.ts";
+import { PillarStore } from "../pillar/PillarStore.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import type {
   Command,
@@ -12,12 +14,17 @@ import type {
   UpdateWallCommand,
   DeleteWallCommand,
   DuplicateWallCommand,
+  AddPillarCommand,
+  UpdatePillarCommand,
+  DeletePillarCommand,
+  DuplicatePillarCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
   AddObjectToAssemblyCommand,
   RemoveObjectFromAssemblyCommand,
-  WallHistoryLike
+  WallHistoryLike,
+  PillarHistoryLike
 } from "./types";
 
 const KNOWN_COMMAND_TYPES = [
@@ -25,6 +32,10 @@ const KNOWN_COMMAND_TYPES = [
   "wall.update",
   "wall.delete",
   "wall.duplicate",
+  "pillar.add",
+  "pillar.update",
+  "pillar.delete",
+  "pillar.duplicate",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -55,16 +66,43 @@ function isCommand(value: unknown): value is Command {
  * only pass (wallStore, wallHistory) - e.g. main.ts - keep compiling
  * unchanged; assembly commands simply aren't reachable from those
  * callers unless they choose to pass a shared AssemblyStore in.
+ *
+ * pillarStore/pillarHistory follow the same "defaulted, so existing
+ * callers keep compiling" idea, but pillarHistory's default can't just
+ * be "a fresh PillarHistoryController" the way assemblyStore's default
+ * is "a fresh AssemblyStore" - PillarHistoryController needs a shared
+ * SelectionStore and HistoryManager to be meaningful, and manufacturing
+ * throwaway instances of those here would be worse than not defaulting
+ * at all. Instead the default pillarHistory is a thin pass-through
+ * straight to the default pillarStore: real undo/redo, just not
+ * recorded anywhere. Every real caller (main.ts, via ProjectContext)
+ * always supplies a real PillarHistoryController explicitly; the
+ * default only exists so wall-only/assembly-only call sites (e.g. the
+ * existing tests in commands/verify.ts) keep compiling unchanged.
  */
 export class CommandExecutor {
   private readonly wallStore: WallStore;
   private readonly wallHistory: WallHistoryLike;
+  private readonly pillarStore: PillarStore;
+  private readonly pillarHistory: PillarHistoryLike;
   private readonly assemblyStore: AssemblyStore;
 
-  constructor(wallStore: WallStore, wallHistory: WallHistoryLike, assemblyStore: AssemblyStore = new AssemblyStore()) {
+  constructor(
+    wallStore: WallStore,
+    wallHistory: WallHistoryLike,
+    assemblyStore: AssemblyStore = new AssemblyStore(),
+    pillarStore: PillarStore = new PillarStore(),
+    pillarHistory: PillarHistoryLike = {
+      add: (pillar) => pillarStore.add(pillar),
+      update: (id, changes) => pillarStore.update(id, changes),
+      remove: (id) => pillarStore.remove(id)
+    }
+  ) {
     this.wallStore = wallStore;
     this.wallHistory = wallHistory;
     this.assemblyStore = assemblyStore;
+    this.pillarStore = pillarStore;
+    this.pillarHistory = pillarHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -82,6 +120,14 @@ export class CommandExecutor {
         return this.executeDeleteWall(input);
       case "wall.duplicate":
         return this.executeDuplicateWall(input);
+      case "pillar.add":
+        return this.executeAddPillar(input);
+      case "pillar.update":
+        return this.executeUpdatePillar(input);
+      case "pillar.delete":
+        return this.executeDeletePillar(input);
+      case "pillar.duplicate":
+        return this.executeDuplicatePillar(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -161,6 +207,72 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Wall duplicated." };
+  }
+
+  private executeAddPillar(command: AddPillarCommand): CommandResult {
+    const pillar = createPillarData(command.pillar ?? {});
+    const result = this.pillarHistory.add(pillar);
+
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: "Could not add pillar: validation failed." };
+    }
+    return { success: true, objectId: pillar.id, message: "Pillar added." };
+  }
+
+  private executeUpdatePillar(command: UpdatePillarCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "pillar.update command is missing an id." };
+    }
+
+    const result = this.pillarHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update pillar: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Pillar updated." };
+  }
+
+  private executeDeletePillar(command: DeletePillarCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "pillar.delete command is missing an id." };
+    }
+
+    const existing = this.pillarStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No pillar found with id "${command.id}".` };
+    }
+
+    this.pillarHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Pillar deleted." };
+  }
+
+  private executeDuplicatePillar(command: DuplicatePillarCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "pillar.duplicate command is missing an id." };
+    }
+
+    const source = this.pillarStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No pillar found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicatePillarData(source);
+    const result = this.pillarHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicatePillarData() always produces valid data from an already-valid
+      // source pillar, so this shouldn't happen in practice - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate pillar: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Pillar duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {

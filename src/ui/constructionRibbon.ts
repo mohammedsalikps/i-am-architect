@@ -23,19 +23,25 @@ const RIBBON_ITEMS = [
 ];
 
 /**
- * Construction ribbon: one button per buildable element type. Only
- * "Wall" is wired up (to the same onAddWall callback the Manual Build
- * tab uses) since it's the only object type the engine implements -
- * every other item is a disabled placeholder rather than a click that
- * does nothing, per the "disabled states for unavailable actions"
- * requirement.
+ * Construction ribbon: one button per buildable element type. "Wall"
+ * and "Pillar" are wired up (to the onAddWall/onAddPillar callbacks -
+ * the same ones the Manual Build tab uses) since those are the only
+ * two object types the engine implements - every other item is a
+ * disabled placeholder rather than a click that does nothing, per the
+ * "disabled states for unavailable actions" requirement.
  */
-export function createConstructionRibbon(onAddWall: () => void): HTMLElement {
+export function createConstructionRibbon(onAddWall: () => void, onAddPillar: () => void): HTMLElement {
+  const handlers: Partial<Record<string, () => void>> = {
+    Wall: onAddWall,
+    Pillar: onAddPillar
+  };
+
   return el(
     "div",
     { className: "app-ribbon" },
     RIBBON_ITEMS.map((label) => {
-      const isEnabled = label === "Wall";
+      const handler = handlers[label];
+      const isEnabled = !!handler;
       const button = el(
         "button",
         {
@@ -48,8 +54,8 @@ export function createConstructionRibbon(onAddWall: () => void): HTMLElement {
         ]
       );
       button.disabled = !isEnabled;
-      if (isEnabled) {
-        button.addEventListener("click", onAddWall);
+      if (handler) {
+        button.addEventListener("click", handler);
       }
       return button;
     })

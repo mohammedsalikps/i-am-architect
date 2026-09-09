@@ -2,7 +2,7 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectContext } from "./engine/project/ProjectContext";
-import type { AddWallCommand } from "./engine/commands/types";
+import type { AddWallCommand, AddPillarCommand } from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
 
@@ -11,10 +11,10 @@ if (!appRoot) {
 }
 
 // One shared composition root - see src/engine/project/ProjectContext.ts.
-// assemblyStore is the same instance commandExecutor uses internally
-// (not an invisible default of its own) - the left sidebar's assembly
-// panel reads/writes it through commandExecutor, same as wallStore.
-const { wallStore, assemblyStore, selectionStore, history, commandExecutor } = createProjectContext();
+// assemblyStore/pillarStore are the same instances commandExecutor uses
+// internally (not invisible defaults of their own) - the UI reads/writes
+// them through commandExecutor, same as wallStore.
+const { wallStore, pillarStore, assemblyStore, selectionStore, history, commandExecutor } = createProjectContext();
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -30,28 +30,63 @@ function addWall(): void {
   commandExecutor.execute(command);
 }
 
+// Successive pillars are spaced along X, on the opposite side of the
+// grid from where walls stack along Z, so a freshly-added pillar is
+// never buried inside a wall.
+const PILLAR_X_START = 4;
+const PILLAR_X_SPACING = 1.5;
+
+function addPillar(): void {
+  const index = pillarStore.getAll().length;
+  const command: AddPillarCommand = {
+    type: "pillar.add",
+    pillar: { position: { x: PILLAR_X_START + index * PILLAR_X_SPACING } }
+  };
+  commandExecutor.execute(command);
+}
+
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
-function deleteSelectedWall(): void {
+/**
+ * Duplicate/Delete now act on "whichever construction object is
+ * currently selected" rather than "the selected wall" - selectionStore
+ * is shared between walls and pillars (see ProjectContext), so the
+ * selected id could belong to either store. Checking wallStore first,
+ * then pillarStore, mirrors the same "try one store, fall back to the
+ * next" shape rightSidebar.ts and assemblyPanel.ts already use to
+ * resolve a selected/member id without assuming its type.
+ */
+function deleteSelected(): void {
   const selectedId = selectionStore.get();
   if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
-  // Selection is cleared as a side effect of WallHistoryController.remove()
-  // (called inside the executor) - CommandExecutor itself never touches
-  // SelectionStore, so no explicit clear() is needed here.
-  commandExecutor.execute({ type: "wall.delete", id: selectedId });
+  if (wallStore.get(selectedId)) {
+    // Selection is cleared as a side effect of WallHistoryController.remove()
+    // (called inside the executor) - CommandExecutor itself never touches
+    // SelectionStore, so no explicit clear() is needed here.
+    commandExecutor.execute({ type: "wall.delete", id: selectedId });
+  } else if (pillarStore.get(selectedId)) {
+    commandExecutor.execute({ type: "pillar.delete", id: selectedId });
+  }
 }
 
-function duplicateSelectedWall(): void {
+function duplicateSelected(): void {
   const selectedId = selectionStore.get();
   if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
-  const result = commandExecutor.execute({ type: "wall.duplicate", id: selectedId });
-  if (result.success && result.objectId) {
-    selectionStore.select(result.objectId);
+  if (wallStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "wall.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
+  } else if (pillarStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "pillar.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
   }
 }
 
@@ -64,11 +99,13 @@ const shell = createAppShell({
   projectName: "Untitled Project",
   onViewChange: (preset) => sceneManager.current?.setView(preset),
   onAddWall: addWall,
-  onDuplicateWall: duplicateSelectedWall,
-  onDeleteWall: deleteSelectedWall,
+  onAddPillar: addPillar,
+  onDuplicateSelected: duplicateSelected,
+  onDeleteSelected: deleteSelected,
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   wallStore,
+  pillarStore,
   assemblyStore,
   selectionStore,
   history,
@@ -77,5 +114,5 @@ const shell = createAppShell({
 
 appRoot.append(shell.root);
 
-sceneManager.current = new SceneManager(shell.viewportContainer, wallStore, selectionStore);
+sceneManager.current = new SceneManager(shell.viewportContainer, wallStore, pillarStore, selectionStore);
 sceneManager.current.start();

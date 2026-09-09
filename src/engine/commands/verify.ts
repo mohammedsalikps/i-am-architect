@@ -1,24 +1,25 @@
 /**
- * Lightweight in-memory verification for CommandExecutor - both wall
- * commands and assembly commands. Same approach as the other verify.ts
- * scripts in this project: no test framework, plain assertion helpers,
- * run directly by Node. Run with:
+ * Lightweight in-memory verification for CommandExecutor - wall
+ * commands, pillar commands, and assembly commands. Same approach as
+ * the other verify.ts scripts in this project: no test framework,
+ * plain assertion helpers, run directly by Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/commands/verify.ts
  *
- * WallHistoryController is NOT instantiated here - its constructor
- * uses TypeScript parameter-property shorthand, which Node's native
- * TypeScript support cannot run directly (only erasable syntax is
- * supported). Instead this uses a small stand-in that satisfies the
- * WallHistoryLike interface (add/update/remove) and mirrors
- * WallHistoryController's one real rule for testing purposes: an
- * update/add only "records history" when the underlying WallStore
- * write actually succeeds. That's enough to verify CommandExecutor's
- * own routing logic (this file's actual unit under test). Full
- * integration with the real WallHistoryController (real undo/redo) is
- * verified separately in the browser, against the real compiled
- * module - see the implementation report.
+ * Neither WallHistoryController nor PillarHistoryController is
+ * instantiated here - both constructors use TypeScript parameter-
+ * property shorthand, which Node's native TypeScript support cannot
+ * run directly (only erasable syntax is supported). Instead this uses
+ * small stand-ins that satisfy the WallHistoryLike/PillarHistoryLike
+ * interfaces (add/update/remove) and mirror each controller's one real
+ * rule for testing purposes: an update/add only "records history" when
+ * the underlying store write actually succeeds. That's enough to
+ * verify CommandExecutor's own routing logic (this file's actual unit
+ * under test). Full integration with the real WallHistoryController/
+ * PillarHistoryController (real undo/redo) is verified separately in
+ * the browser, against the real compiled module - see the
+ * implementation report.
  *
  * Assembly commands need no such stand-in - AssemblyStore has no
  * parameter-property constructor, so the real class is used directly.
@@ -32,10 +33,13 @@
  */
 import { CommandExecutor } from "./CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
+import { PillarStore } from "../pillar/PillarStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
-import type { WallHistoryLike } from "./types.ts";
+import type { PillarData, PillarId } from "../pillar/types.ts";
+import type { PillarValidationResult } from "../pillar/validatePillar.ts";
+import type { WallHistoryLike, PillarHistoryLike } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -79,6 +83,33 @@ function makeWallHistoryStub(store: WallStore): WallHistoryLike & { recordedCoun
       return result;
     },
     remove(id: WallId): void {
+      store.remove(id);
+    }
+  };
+}
+
+/** A PillarHistoryLike stand-in backed by a real PillarStore - mirrors makeWallHistoryStub above. */
+function makePillarHistoryStub(store: PillarStore): PillarHistoryLike & { recordedCount: number } {
+  let recordedCount = 0;
+  return {
+    get recordedCount(): number {
+      return recordedCount;
+    },
+    add(pillar: PillarData): PillarValidationResult {
+      const result = store.add(pillar);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    update(id: PillarId, changes: Parameters<PillarHistoryLike["update"]>[1]): PillarValidationResult {
+      const result = store.update(id, changes);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    remove(id: PillarId): void {
       store.remove(id);
     }
   };
@@ -271,6 +302,176 @@ function run(): void {
 
     executor.execute({ type: "wall.update", id: "does-not-exist", changes: { color: "#000000" } });
     assertEqual(history.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  // --- Pillar commands ---
+
+  function makePillarExecutor(): { executor: CommandExecutor; pillars: PillarStore } {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const pillars = new PillarStore();
+    const pillarHistory = makePillarHistoryStub(pillars);
+    return {
+      executor: new CommandExecutor(wallStoreStub, wallHistory, new AssemblyStore(), pillars, pillarHistory),
+      pillars
+    };
+  }
+
+  check("a valid pillar.add command succeeds and stores a pillar", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const result = executor.execute({ type: "pillar.add", pillar: { width: 0.5, color: "#ff0000" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    const stored = pillars.get(result.objectId as PillarId);
+    assertTrue(stored, "pillar should be stored");
+    assertEqual(stored.dimensions.width, 0.5, "stored width");
+    assertEqual(stored.color, "#ff0000", "stored color");
+  });
+
+  check("a valid pillar.update command succeeds and applies the change", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const added = executor.execute({ type: "pillar.add", pillar: {} });
+    const id = added.objectId as PillarId;
+
+    const result = executor.execute({
+      type: "pillar.update",
+      id,
+      changes: { color: "#00ff00" }
+    });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.objectId, id, "result.objectId");
+    assertEqual(pillars.get(id)?.color, "#00ff00", "stored color after update");
+  });
+
+  check("a valid pillar.delete command succeeds and removes the pillar", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const added = executor.execute({ type: "pillar.add", pillar: {} });
+    const id = added.objectId as PillarId;
+
+    const result = executor.execute({ type: "pillar.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(pillars.get(id), undefined, "pillar should be gone");
+  });
+
+  check("a valid pillar.duplicate command succeeds and creates an independent pillar", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const added = executor.execute({ type: "pillar.add", pillar: { width: 0.6, color: "#123456" } });
+    const originalId = added.objectId as PillarId;
+
+    const result = executor.execute({ type: "pillar.duplicate", id: originalId });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertTrue(result.objectId !== originalId, "duplicate should have a different id");
+    const duplicate = pillars.get(result.objectId as PillarId);
+    assertTrue(duplicate, "duplicate should be stored");
+    assertEqual(duplicate.dimensions.width, 0.6, "duplicate width matches source");
+    assertEqual(duplicate.color, "#123456", "duplicate color matches source");
+    assertTrue(pillars.get(originalId) !== undefined, "original pillar should still exist");
+  });
+
+  check("pillar.update with a missing id is rejected", () => {
+    const { executor } = makePillarExecutor();
+    const result = executor.execute({ type: "pillar.update", changes: { color: "#000000" } });
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("pillar.delete with a missing id is rejected", () => {
+    const { executor } = makePillarExecutor();
+    assertEqual(executor.execute({ type: "pillar.delete" }).success, false, "result.success");
+  });
+
+  check("pillar.add with invalid dimensions is rejected and reports field errors", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const result = executor.execute({ type: "pillar.add", pillar: { width: 0 } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(
+      result.errors && result.errors.some((e) => e.field === "dimensions.width"),
+      "expected a dimensions.width error"
+    );
+    assertEqual(pillars.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("an invalid pillar.update preserves the existing pillar", () => {
+    const { executor, pillars } = makePillarExecutor();
+
+    const added = executor.execute({ type: "pillar.add", pillar: {} });
+    const id = added.objectId as PillarId;
+    const before = pillars.get(id);
+
+    const result = executor.execute({
+      type: "pillar.update",
+      id,
+      changes: { dimensions: { ...before!.dimensions, depth: -1 } }
+    });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(pillars.get(id), before, "pillar should be byte-for-byte unchanged");
+  });
+
+  check("successful pillar commands are recorded as history (via the PillarHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const pillars = new PillarStore();
+    const pillarHistory = makePillarHistoryStub(pillars);
+    const executor = new CommandExecutor(wallStoreStub, wallHistory, new AssemblyStore(), pillars, pillarHistory);
+
+    assertEqual(pillarHistory.recordedCount, 0, "no history yet");
+
+    const added = executor.execute({ type: "pillar.add", pillar: {} });
+    assertEqual(pillarHistory.recordedCount, 1, "a valid add() should record history");
+
+    executor.execute({ type: "pillar.update", id: added.objectId as PillarId, changes: { color: "#abcdef" } });
+    assertEqual(pillarHistory.recordedCount, 2, "a valid update() should record history");
+  });
+
+  check("failed pillar commands create no history entry (via the PillarHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const pillars = new PillarStore();
+    const pillarHistory = makePillarHistoryStub(pillars);
+    const executor = new CommandExecutor(wallStoreStub, wallHistory, new AssemblyStore(), pillars, pillarHistory);
+
+    executor.execute({ type: "pillar.add", pillar: { width: -1 } });
+    assertEqual(pillarHistory.recordedCount, 0, "an invalid add() should not record history");
+
+    const added = executor.execute({ type: "pillar.add", pillar: {} });
+    assertEqual(pillarHistory.recordedCount, 1, "sanity: the valid add() above should have recorded");
+
+    executor.execute({
+      type: "pillar.update",
+      id: added.objectId as PillarId,
+      changes: { rotation: Infinity }
+    });
+    assertEqual(pillarHistory.recordedCount, 1, "an invalid update() should not record additional history");
+
+    executor.execute({ type: "pillar.update", id: "does-not-exist", changes: { color: "#000000" } });
+    assertEqual(pillarHistory.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  check("wall and pillar commands do not interfere with each other's stores", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const pillars = new PillarStore();
+    const pillarHistory = makePillarHistoryStub(pillars);
+    const executor = new CommandExecutor(wallStoreStub, wallHistory, new AssemblyStore(), pillars, pillarHistory);
+
+    const wallResult = executor.execute({ type: "wall.add", wall: {} });
+    const pillarResult = executor.execute({ type: "pillar.add", pillar: {} });
+
+    assertTrue(wallStoreStub.get(wallResult.objectId as WallId) !== undefined, "wall should be in wallStore");
+    assertEqual(pillars.get(wallResult.objectId as PillarId), undefined, "wall id should not leak into pillarStore");
+    assertTrue(pillars.get(pillarResult.objectId as PillarId) !== undefined, "pillar should be in pillarStore");
+    assertEqual(wallStoreStub.get(pillarResult.objectId as WallId), undefined, "pillar id should not leak into wallStore");
   });
 
   // --- Assembly commands ---
