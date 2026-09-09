@@ -5,6 +5,11 @@
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "moduleResolution": "bundler",
+    // Lets the standalone verification script (run directly by Node, not
+    // bundled by Vite) use explicit .ts extensions in its own imports,
+    // which Node's native TypeScript support requires. Safe because
+    // noEmit is already on - nothing here changes what gets bundled.
+    "allowImportingTsExtensions": true,
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,

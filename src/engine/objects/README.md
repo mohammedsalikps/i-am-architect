@@ -28,6 +28,55 @@ export interface WallDimensions { length: number; height: number; thickness: num
 export type WallData = ConstructionObjectBase<"wall", WallDimensions>;
 ```
 
+## Generic registry (`ObjectRegistry`)
+
+`ObjectRegistry<T extends ConstructionObjectBase>` (`ObjectRegistry.ts`)
+is a generic, object-type-agnostic store: `add/update/set/remove/get/
+getAll/has/subscribe`. It is **not wired into the running app yet** -
+`WallStore` still owns all wall data. It exists so the *next* object
+type (pillar, beam, slab, ...) doesn't need to hand-copy `WallStore`'s
+plumbing the way this document previously suggested ("copy WallStore's
+shape") - it can just instantiate `new ObjectRegistry<PillarData>()`.
+
+**Generic type design.** The registry is generic over `T extends
+ConstructionObjectBase` rather than tied to any concrete type, so the
+same class works for `WallData`, a future `PillarData`, etc. It knows
+nothing beyond the shared envelope (`id`, `type`, `position`, `rotation`,
+`dimensions`, `material`, `color`, `assemblyId`) - it has no
+type-specific business rules.
+
+**Immutability at the boundary.** Objects are deep-cloned going in
+(`add`/`update`/`set`) and coming out (`get`/`getAll`), and the internal
+`Map` is never exposed. Mutating a returned object, or mutating the
+object you passed to `add()` afterward, never affects what's stored.
+This matters more here than it did for `WallStore`, precisely because
+the registry will eventually be shared machinery for every object type
+- a caller-side mutation bug in one object type's UI code should not be
+able to corrupt another type's store.
+
+**Why `WallStore` still exists / hasn't migrated.** `WallStore.update()`
+has one piece of wall-specific behavior the generic registry
+deliberately does not know: when `dimensions.height` changes, it
+re-derives `position.y` so the wall's base stays on the ground. A
+generic registry can't encode that rule (it doesn't know a wall has a
+"height" or that height means anything about grounding) without ceasing
+to be generic. Migrating `WallStore` onto `ObjectRegistry` today would
+either lose that behavior or force type-specific logic into the generic
+class - both worse than the current small amount of duplication.
+
+**Future migration path.** Once a second object type (e.g. pillars)
+needs its own store, `WallStore` can be refactored to *compose*
+`ObjectRegistry<WallData>` internally: delegate `add/set/remove/get/
+getAll/has/subscribe` straight through, and keep only the
+grounding rule as an override in `WallStore.update()` that calls the
+registry's `update()`/`set()` underneath. The public `WallStore` API
+(and therefore `WallHistoryController`, `WallLayer`, `rightSidebar.ts`,
+etc.) would not need to change at all - only `WallStore`'s internals
+would. A future `PillarStore`, `BeamStore`, `SlabStore` etc. would each
+follow the same pattern: compose `ObjectRegistry<TheirDataType>`, add
+only whatever type-specific rule they need on top (or none at all, if
+they need no derived-field behavior).
+
 ## Adding a new object type later
 
 1. Add the type name to the `ObjectType` union in `types.ts`, if it
@@ -36,8 +85,12 @@ export type WallData = ConstructionObjectBase<"wall", WallDimensions>;
 2. Create `src/engine/<type>/types.ts` defining `<Type>Dimensions` and
    `<Type>Data = ConstructionObjectBase<"<type>", <Type>Dimensions>`.
 3. Create `src/engine/<type>/create<Type>.ts` (a factory, following
-   `wall/createWall.ts`) and a `<Type>Store` (copy `WallStore`'s shape:
-   `add/update/set/remove/get/getAll/subscribe`), then wire it into
+   `wall/createWall.ts`) and a `<Type>Store` that composes
+   `ObjectRegistry<<Type>Data>` internally (see "Generic registry"
+   above) - or, if `WallStore` was migrated onto `ObjectRegistry` by
+   then, follow that pattern. Add only the type-specific rules your
+   object actually needs on top; use `ObjectRegistry` directly if it
+   needs none. Then wire the store into
    `src/engine/history/<type>History.ts` the same way `wallHistory.ts`
    wires `WallStore` into `HistoryManager`.
 4. Create `src/scene/<type>/` with a mesh-builder module and a
@@ -55,7 +108,8 @@ to support) and `SceneManager` composing one more `<Type>Layer`.
 
 | Concern | Owner | Knows about Three.js? |
 |---|---|---|
-| Object data + validation rules (e.g. a wall's base stays grounded) | `<Type>Store` (e.g. `WallStore`) | No |
+| Generic CRUD + subscribe storage, reusable across all object types | `ObjectRegistry<T>` (generic) | No |
+| Object data + type-specific validation rules (e.g. a wall's base stays grounded) | `<Type>Store` (e.g. `WallStore`), optionally composing `ObjectRegistry<T>` | No |
 | Undo/redo | `HistoryManager` (generic) + `<type>History.ts` (e.g. `wallHistory.ts`) | No |
 | Selection | `SelectionStore` (generic, shared across all object types) | No |
 | Mesh creation/sync/disposal, click-to-select raycasting | `<Type>Layer` (e.g. `WallLayer`) + its mesh-builder module | Yes |
