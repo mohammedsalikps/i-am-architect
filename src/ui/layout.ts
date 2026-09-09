@@ -4,10 +4,15 @@ import { createLeftSidebar } from "./leftSidebar";
 import { createRightSidebar } from "./rightSidebar";
 import { createCommandBar } from "./commandBar";
 import type { ViewPreset } from "./viewControls";
+import type { WallStore } from "../engine/wall/WallStore";
+import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 export type AppShellOptions = {
   projectName: string;
   onViewChange: (preset: ViewPreset) => void;
+  onAddWall: () => void;
+  wallStore: WallStore;
+  selectionStore: SelectionStore;
 };
 
 export type AppShell = {
@@ -24,9 +29,13 @@ export type AppShell = {
  * SceneManager is mounted into `viewportContainer` from main.ts.
  */
 export function createAppShell(options: AppShellOptions): AppShell {
-  const header = createHeader({ projectName: options.projectName, onViewChange: options.onViewChange });
+  const header = createHeader({
+    projectName: options.projectName,
+    onViewChange: options.onViewChange,
+    onAddWall: options.onAddWall
+  });
   const leftSidebar = createLeftSidebar();
-  const rightSidebar = createRightSidebar();
+  const rightSidebar = createRightSidebar(options.wallStore, options.selectionStore);
   const commandBar = createCommandBar();
 
   const viewportContainer = el("div", { className: "viewport-container" });

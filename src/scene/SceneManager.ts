@@ -3,6 +3,9 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
 import { addTestCube } from "./testCube";
+import { WallLayer } from "./wall/WallLayer";
+import type { WallStore } from "../engine/wall/WallStore";
+import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 /** Camera view presets the UI's view-control buttons can request. */
 export type ViewPreset = "perspective" | "top" | "front" | "side";
@@ -17,8 +20,10 @@ const VIEW_CAMERA_POSITIONS: Record<ViewPreset, THREE.Vector3Tuple> = {
 /**
  * Owns the Three.js scene, camera, renderer and controls for the
  * 3D workspace. Purely a rendering/viewport concern - construction
- * logic (walls, bricks, dimensions, etc.) belongs in src/engine and
- * will be added to the scene from the outside in later milestones.
+ * *data* logic (walls, bricks, dimensions, etc.) belongs in src/engine.
+ * Rendering of construction objects is delegated to dedicated layers
+ * (e.g. WallLayer) rather than inlined here, so this class stays a
+ * general-purpose scene host.
  */
 export class SceneManager {
   private readonly scene: THREE.Scene;
@@ -27,7 +32,7 @@ export class SceneManager {
   private readonly controls: OrbitControls;
   private readonly container: HTMLElement;
 
-  constructor(container: HTMLElement) {
+  constructor(container: HTMLElement, wallStore: WallStore, selectionStore: SelectionStore) {
     this.container = container;
 
     this.scene = new THREE.Scene();
@@ -53,6 +58,10 @@ export class SceneManager {
     addLights(this.scene);
     addGround(this.scene);
     addTestCube(this.scene);
+
+    // Not stored on `this`: WallLayer stays alive via the subscriptions it
+    // registers with wallStore/selectionStore, which outlive this constructor.
+    new WallLayer(this.scene, this.camera, this.renderer.domElement, wallStore, selectionStore);
 
     window.addEventListener("resize", this.handleResize);
   }

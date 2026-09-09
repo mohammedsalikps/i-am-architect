@@ -111,6 +111,18 @@ button {
   padding: 6px 10px;
 }
 
+.toolbar-button--primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+  font-weight: 500;
+}
+
+.toolbar-button--primary:hover {
+  filter: brightness(1.1);
+  background: var(--color-accent);
+}
+
 .app-header__project {
   margin-left: auto;
   display: flex;
@@ -246,6 +258,32 @@ button {
     #2a2a2a 4px,
     #2a2a2a 8px
   );
+}
+
+.property-row__input {
+  width: 72px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--color-text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.property-row__input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.property-row__color-input {
+  width: 28px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  background: var(--color-bg);
+  cursor: pointer;
 }
 
 /* ---------- Command bar ---------- */
