@@ -2,7 +2,8 @@ import { el } from "./dom";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
-import type { WallHistoryController } from "../engine/history/wallHistory";
+import type { CommandExecutor } from "../engine/commands/CommandExecutor";
+import type { UpdateWallCommand } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
@@ -84,61 +85,60 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
-function buildWallPanels(wall: WallData, wallHistory: WallHistoryController): HTMLElement[] {
+function buildWallPanels(wall: WallData, commandExecutor: CommandExecutor): HTMLElement[] {
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
   // Rounded for display only - onChange still converts the raw typed value,
   // this just avoids showing float noise like "44.99999999999999".
   const rotationDegrees = Math.round(radiansToDegrees(wall.rotation) * 100) / 100;
 
+  const updateWall = (changes: UpdateWallCommand["changes"]): void => {
+    commandExecutor.execute({ type: "wall.update", id: wall.id, changes });
+  };
+
   const transform = section("Transform", [
     numberInputRow(
       "Position X",
       wall.position.x,
-      (value) => wallHistory.update(wall.id, { position: { ...wall.position, x: value } }),
+      (value) => updateWall({ position: { ...wall.position, x: value } }),
       { step: 0.1 }
     ),
     readOnlyRow("Position Y", formatMeters(wall.position.y)),
     numberInputRow(
       "Position Z",
       wall.position.z,
-      (value) => wallHistory.update(wall.id, { position: { ...wall.position, z: value } }),
+      (value) => updateWall({ position: { ...wall.position, z: value } }),
       { step: 0.1 }
     ),
-    numberInputRow(
-      "Rotation Y",
-      rotationDegrees,
-      (value) => wallHistory.update(wall.id, { rotation: degreesToRadians(value) }),
-      { step: 1 }
-    )
+    numberInputRow("Rotation Y", rotationDegrees, (value) => updateWall({ rotation: degreesToRadians(value) }), {
+      step: 1
+    })
   ]);
 
   const dimensions = section("Dimensions", [
     numberInputRow(
       "Length",
       wall.dimensions.length,
-      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, length: value } }),
+      (value) => updateWall({ dimensions: { ...wall.dimensions, length: value } }),
       { min: 0.1, step: 0.1 }
     ),
     numberInputRow(
       "Height",
       wall.dimensions.height,
-      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, height: value } }),
+      (value) => updateWall({ dimensions: { ...wall.dimensions, height: value } }),
       { min: 0.1, step: 0.1 }
     ),
     numberInputRow(
       "Thickness",
       wall.dimensions.thickness,
-      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, thickness: value } }),
+      (value) => updateWall({ dimensions: { ...wall.dimensions, thickness: value } }),
       { min: 0.05, step: 0.05 }
     )
   ]);
 
   const material = section("Material", [readOnlyRow("Material", wall.material)]);
 
-  const color = section("Color", [
-    colorInputRow("Color", wall.color, (value) => wallHistory.update(wall.id, { color: value }))
-  ]);
+  const color = section("Color", [colorInputRow("Color", wall.color, (value) => updateWall({ color: value }))]);
 
   return [properties, transform, dimensions, material, color];
 }
@@ -152,14 +152,15 @@ function buildEmptyState(): HTMLElement {
 /**
  * Right sidebar / inspector. Reactive: subscribes to both stores and
  * re-renders whenever the selection or the selected wall's data
- * changes. Edits write back through wallHistory.update() (so every
- * edit is undoable) rather than wallStore directly - this module never
- * touches Three.js directly.
+ * changes. Reads come straight from wallStore; edits go through
+ * commandExecutor.execute() (a "wall.update" command) rather than
+ * touching wallStore or WallHistoryController directly - this module
+ * never touches Three.js directly either.
  */
 export function createRightSidebar(
   wallStore: WallStore,
   selectionStore: SelectionStore,
-  wallHistory: WallHistoryController
+  commandExecutor: CommandExecutor
 ): HTMLElement {
   const panel = el("aside", { className: "sidebar sidebar--right" });
 
@@ -167,7 +168,7 @@ export function createRightSidebar(
     const selectedId = selectionStore.get();
     const wall = selectedId ? wallStore.get(selectedId) : undefined;
 
-    panel.replaceChildren(...(wall ? buildWallPanels(wall, wallHistory) : [buildEmptyState()]));
+    panel.replaceChildren(...(wall ? buildWallPanels(wall, commandExecutor) : [buildEmptyState()]));
   };
 
   wallStore.subscribe(render);

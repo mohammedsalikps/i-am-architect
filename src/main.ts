@@ -3,7 +3,6 @@ import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { WallStore } from "./engine/wall/WallStore";
 import { SelectionStore } from "./engine/selection/SelectionStore";
-import { duplicateWallData } from "./engine/wall/createWall";
 import { HistoryManager } from "./engine/history/HistoryManager";
 import { WallHistoryController } from "./engine/history/wallHistory";
 import { CommandExecutor } from "./engine/commands/CommandExecutor";
@@ -19,9 +18,9 @@ const wallStore = new WallStore();
 const selectionStore = new SelectionStore();
 const history = new HistoryManager();
 const wallHistory = new WallHistoryController(wallStore, selectionStore, history);
-// Minimal proof CommandExecutor works end-to-end: "Add Wall" routes through
-// it instead of calling wallHistory directly. Duplicate/Delete/Update still
-// call wallHistory/wallStore directly - see src/engine/commands/README.md.
+// CommandExecutor is the single boundary every wall UI action routes
+// through (Add/Update/Delete/Duplicate) - see src/engine/commands/README.md.
+// wallHistory itself is only used here, to construct the executor.
 const commandExecutor = new CommandExecutor(wallStore, wallHistory);
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
@@ -46,18 +45,21 @@ function deleteSelectedWall(): void {
   if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
-  wallHistory.remove(selectedId);
+  // Selection is cleared as a side effect of WallHistoryController.remove()
+  // (called inside the executor) - CommandExecutor itself never touches
+  // SelectionStore, so no explicit clear() is needed here.
+  commandExecutor.execute({ type: "wall.delete", id: selectedId });
 }
 
 function duplicateSelectedWall(): void {
   const selectedId = selectionStore.get();
-  const wall = selectedId ? wallStore.get(selectedId) : undefined;
-  if (!wall) {
+  if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
-  const duplicate = duplicateWallData(wall);
-  wallHistory.add(duplicate);
-  selectionStore.select(duplicate.id);
+  const result = commandExecutor.execute({ type: "wall.duplicate", id: selectedId });
+  if (result.success && result.objectId) {
+    selectionStore.select(result.objectId);
+  }
 }
 
 // Wrapped in a mutable ref: the header's view-control buttons need a
@@ -76,7 +78,7 @@ const shell = createAppShell({
   wallStore,
   selectionStore,
   history,
-  wallHistory
+  commandExecutor
 });
 
 appRoot.append(shell.root);
