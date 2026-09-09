@@ -2,6 +2,7 @@ import { el } from "./dom";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+import type { WallHistoryController } from "../engine/history/wallHistory";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
@@ -83,7 +84,7 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
-function buildWallPanels(wall: WallData, wallStore: WallStore): HTMLElement[] {
+function buildWallPanels(wall: WallData, wallHistory: WallHistoryController): HTMLElement[] {
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
   // Rounded for display only - onChange still converts the raw typed value,
@@ -94,31 +95,34 @@ function buildWallPanels(wall: WallData, wallStore: WallStore): HTMLElement[] {
     numberInputRow(
       "Position X",
       wall.position.x,
-      (value) => wallStore.update(wall.id, { position: { ...wall.position, x: value } }),
+      (value) => wallHistory.update(wall.id, { position: { ...wall.position, x: value } }),
       { step: 0.1 }
     ),
     readOnlyRow("Position Y", formatMeters(wall.position.y)),
     numberInputRow(
       "Position Z",
       wall.position.z,
-      (value) => wallStore.update(wall.id, { position: { ...wall.position, z: value } }),
+      (value) => wallHistory.update(wall.id, { position: { ...wall.position, z: value } }),
       { step: 0.1 }
     ),
-    numberInputRow("Rotation Y", rotationDegrees, (value) => wallStore.update(wall.id, { rotation: degreesToRadians(value) }), {
-      step: 1
-    })
+    numberInputRow(
+      "Rotation Y",
+      rotationDegrees,
+      (value) => wallHistory.update(wall.id, { rotation: degreesToRadians(value) }),
+      { step: 1 }
+    )
   ]);
 
   const dimensions = section("Dimensions", [
-    numberInputRow("Length", wall.length, (value) => wallStore.update(wall.id, { length: value }), {
+    numberInputRow("Length", wall.length, (value) => wallHistory.update(wall.id, { length: value }), {
       min: 0.1,
       step: 0.1
     }),
-    numberInputRow("Height", wall.height, (value) => wallStore.update(wall.id, { height: value }), {
+    numberInputRow("Height", wall.height, (value) => wallHistory.update(wall.id, { height: value }), {
       min: 0.1,
       step: 0.1
     }),
-    numberInputRow("Thickness", wall.thickness, (value) => wallStore.update(wall.id, { thickness: value }), {
+    numberInputRow("Thickness", wall.thickness, (value) => wallHistory.update(wall.id, { thickness: value }), {
       min: 0.05,
       step: 0.05
     })
@@ -127,7 +131,7 @@ function buildWallPanels(wall: WallData, wallStore: WallStore): HTMLElement[] {
   const material = section("Material", [readOnlyRow("Material", wall.material)]);
 
   const color = section("Color", [
-    colorInputRow("Color", wall.color, (value) => wallStore.update(wall.id, { color: value }))
+    colorInputRow("Color", wall.color, (value) => wallHistory.update(wall.id, { color: value }))
   ]);
 
   return [properties, transform, dimensions, material, color];
@@ -142,17 +146,22 @@ function buildEmptyState(): HTMLElement {
 /**
  * Right sidebar / inspector. Reactive: subscribes to both stores and
  * re-renders whenever the selection or the selected wall's data
- * changes. Edits write back through wallStore.update() - this module
- * never touches Three.js directly.
+ * changes. Edits write back through wallHistory.update() (so every
+ * edit is undoable) rather than wallStore directly - this module never
+ * touches Three.js directly.
  */
-export function createRightSidebar(wallStore: WallStore, selectionStore: SelectionStore): HTMLElement {
+export function createRightSidebar(
+  wallStore: WallStore,
+  selectionStore: SelectionStore,
+  wallHistory: WallHistoryController
+): HTMLElement {
   const panel = el("aside", { className: "sidebar sidebar--right" });
 
   const render = (): void => {
     const selectedId = selectionStore.get();
     const wall = selectedId ? wallStore.get(selectedId) : undefined;
 
-    panel.replaceChildren(...(wall ? buildWallPanels(wall, wallStore) : [buildEmptyState()]));
+    panel.replaceChildren(...(wall ? buildWallPanels(wall, wallHistory) : [buildEmptyState()]));
   };
 
   wallStore.subscribe(render);

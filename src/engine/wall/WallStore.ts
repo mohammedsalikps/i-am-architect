@@ -38,6 +38,17 @@ export class WallStore {
     this.emit();
   }
 
+  /**
+   * Overwrites a wall's data exactly - no partial merge, no derived-field
+   * side effects (unlike update()). Used to restore an exact historical
+   * snapshot for undo/redo, where the snapshot already has whatever
+   * position.y etc. was correct at that point in time.
+   */
+  set(id: WallId, wall: WallData): void {
+    this.walls.set(id, wall);
+    this.emit();
+  }
+
   remove(id: WallId): void {
     if (this.walls.delete(id)) {
       this.emit();

@@ -4,6 +4,8 @@ import { createAppShell } from "./ui/layout";
 import { WallStore } from "./engine/wall/WallStore";
 import { SelectionStore } from "./engine/selection/SelectionStore";
 import { createWallData, duplicateWallData } from "./engine/wall/createWall";
+import { HistoryManager } from "./engine/history/HistoryManager";
+import { WallHistoryController } from "./engine/history/wallHistory";
 
 const appRoot = document.getElementById("app");
 
@@ -13,6 +15,8 @@ if (!appRoot) {
 
 const wallStore = new WallStore();
 const selectionStore = new SelectionStore();
+const history = new HistoryManager();
+const wallHistory = new WallHistoryController(wallStore, selectionStore, history);
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -21,18 +25,18 @@ const WALL_Z_SPACING = 2.5;
 
 function addWall(): void {
   const index = wallStore.getAll().length;
-  wallStore.add(createWallData({ position: { z: WALL_Z_START + index * WALL_Z_SPACING } }));
+  wallHistory.add(createWallData({ position: { z: WALL_Z_START + index * WALL_Z_SPACING } }));
 }
 
 addWall(); // default wall, visible on the grid at startup
+history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 function deleteSelectedWall(): void {
   const selectedId = selectionStore.get();
   if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
-  wallStore.remove(selectedId);
-  selectionStore.clear();
+  wallHistory.remove(selectedId);
 }
 
 function duplicateSelectedWall(): void {
@@ -42,7 +46,7 @@ function duplicateSelectedWall(): void {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
   const duplicate = duplicateWallData(wall);
-  wallStore.add(duplicate);
+  wallHistory.add(duplicate);
   selectionStore.select(duplicate.id);
 }
 
@@ -57,8 +61,12 @@ const shell = createAppShell({
   onAddWall: addWall,
   onDuplicateWall: duplicateSelectedWall,
   onDeleteWall: deleteSelectedWall,
+  onUndo: () => history.undo(),
+  onRedo: () => history.redo(),
   wallStore,
-  selectionStore
+  selectionStore,
+  history,
+  wallHistory
 });
 
 appRoot.append(shell.root);

@@ -6,6 +6,8 @@ import { createCommandBar } from "./commandBar";
 import type { ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+import type { HistoryManager } from "../engine/history/HistoryManager";
+import type { WallHistoryController } from "../engine/history/wallHistory";
 
 export type AppShellOptions = {
   projectName: string;
@@ -13,8 +15,12 @@ export type AppShellOptions = {
   onAddWall: () => void;
   onDuplicateWall: () => void;
   onDeleteWall: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   wallStore: WallStore;
   selectionStore: SelectionStore;
+  history: HistoryManager;
+  wallHistory: WallHistoryController;
 };
 
 export type AppShell = {
@@ -37,10 +43,13 @@ export function createAppShell(options: AppShellOptions): AppShell {
     onAddWall: options.onAddWall,
     onDuplicateWall: options.onDuplicateWall,
     onDeleteWall: options.onDeleteWall,
-    selectionStore: options.selectionStore
+    onUndo: options.onUndo,
+    onRedo: options.onRedo,
+    selectionStore: options.selectionStore,
+    history: options.history
   });
   const leftSidebar = createLeftSidebar();
-  const rightSidebar = createRightSidebar(options.wallStore, options.selectionStore);
+  const rightSidebar = createRightSidebar(options.wallStore, options.selectionStore, options.wallHistory);
   const commandBar = createCommandBar();
 
   const viewportContainer = el("div", { className: "viewport-container" });
