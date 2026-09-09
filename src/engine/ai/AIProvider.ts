@@ -18,12 +18,12 @@ import type { AIProviderRequest, AIProviderResponse } from "./types";
  */
 export interface AIProvider {
   /**
-   * Synchronous by design for now - MockAIProvider needs nothing async.
-   * A real network-backed provider would need this to become
-   * `Promise<AIProviderResponse>`; that's a deliberate, out-of-scope
-   * change for a future milestone (see ai/README.md "Limitations") -
-   * introducing it now, before any real provider exists to justify it,
-   * would just make AICommandPipeline and every test harder to read.
+   * May return synchronously (MockAIProvider does - it needs nothing
+   * async) or return a Promise (a real network-backed provider, e.g.
+   * providers/OpenAIProvider.ts, always does - an HTTP call cannot
+   * resolve synchronously). AICommandPipeline.run() always `await`s
+   * this, which works identically either way, so no implementation is
+   * forced to introduce async machinery it doesn't need.
    */
-  interpret(request: AIProviderRequest): AIProviderResponse;
+  interpret(request: AIProviderRequest): AIProviderResponse | Promise<AIProviderResponse>;
 }

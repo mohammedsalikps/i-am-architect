@@ -107,11 +107,19 @@ export class AICommandPipeline {
     this.commandExecutor = commandExecutor;
   }
 
-  run(
+  /**
+   * Always returns a Promise, even when `provider` happens to be
+   * synchronous (e.g. MockAIProvider) - `await`ing a plain value
+   * resolves it on the next microtask, so a synchronous provider costs
+   * nothing extra here. This is the one place the "real providers need
+   * async" limitation flagged in earlier versions of this file was
+   * meant to be absorbed - see ai/README.md.
+   */
+  async run(
     instruction: string,
     projectContext: AIProjectSnapshot,
     availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES
-  ): AIPipelineResult {
+  ): Promise<AIPipelineResult> {
     const trimmedInstruction = typeof instruction === "string" ? instruction.trim() : "";
 
     if (trimmedInstruction.length === 0) {
@@ -125,7 +133,7 @@ export class AICommandPipeline {
 
     let response;
     try {
-      response = this.provider.interpret({
+      response = await this.provider.interpret({
         instruction: trimmedInstruction,
         projectContext,
         availableObjectTypes

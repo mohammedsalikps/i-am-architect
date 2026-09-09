@@ -156,13 +156,17 @@ function makeUndoableWallHistory(store: WallStore, history: HistoryManager): Wal
   };
 }
 
-function run(): void {
+async function run(): Promise<void> {
   let passed = 0;
   let failed = 0;
 
-  function check(name: string, fn: () => void): void {
+  // async because AICommandPipeline.run() is now always a Promise (see
+  // AICommandPipeline.ts) - `await fn()` works identically whether fn
+  // itself is sync or async, so every existing synchronous check below
+  // needed no changes beyond adding `await` at its call site.
+  async function check(name: string, fn: () => void | Promise<void>): Promise<void> {
     try {
-      fn();
+      await fn();
       passed += 1;
       console.log(`  ok - ${name}`);
     } catch (error) {
@@ -176,7 +180,7 @@ function run(): void {
 
   // --- buildAIProjectSnapshot ---
 
-  check("buildAIProjectSnapshot summarizes store counts and the current selection", () => {
+  await check("buildAIProjectSnapshot summarizes store counts and the current selection", async () => {
     const source = {
       wallStore: { getAll: () => [1, 2] },
       pillarStore: { getAll: () => [1] },
@@ -204,7 +208,7 @@ function run(): void {
     );
   });
 
-  check("buildAIProjectSnapshot reports selectedObjectId as null when nothing is selected", () => {
+  await check("buildAIProjectSnapshot reports selectedObjectId as null when nothing is selected", async () => {
     const source = {
       wallStore: { getAll: () => [] },
       pillarStore: { getAll: () => [] },
@@ -231,7 +235,7 @@ function run(): void {
   ];
 
   for (const example of EXAMPLES) {
-    check(`MockAIProvider maps "${example.instruction}" to a single deterministic command`, () => {
+    await check(`MockAIProvider maps "${example.instruction}" to a single deterministic command`, async () => {
       const provider = new MockAIProvider();
       const response = provider.interpret({
         instruction: example.instruction,
@@ -245,7 +249,7 @@ function run(): void {
     });
   }
 
-  check("MockAIProvider produces multiple commands, in order, from one multi-clause instruction", () => {
+  await check("MockAIProvider produces multiple commands, in order, from one multi-clause instruction", async () => {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Create a wall and add a pillar and create a beam",
@@ -264,7 +268,7 @@ function run(): void {
     );
   });
 
-  check("MockAIProvider reports an unrecognized clause via notes and produces no command for it", () => {
+  await check("MockAIProvider reports an unrecognized clause via notes and produces no command for it", async () => {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Do a backflip",
@@ -276,7 +280,7 @@ function run(): void {
     assertTrue(response.notes && response.notes.includes("backflip"), "notes should mention the unrecognized clause");
   });
 
-  check("MockAIProvider treats an object type outside availableObjectTypes as unrecognized", () => {
+  await check("MockAIProvider treats an object type outside availableObjectTypes as unrecognized", async () => {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Create a door",
@@ -290,11 +294,11 @@ function run(): void {
 
   // --- AICommandPipeline: single- and multi-command execution ---
 
-  check("AICommandPipeline executes a single recognized instruction end-to-end via CommandExecutor", () => {
+  await check("AICommandPipeline executes a single recognized instruction end-to-end via CommandExecutor", async () => {
     const executor = makeExecutorSpy(() => ({ success: true, objectId: "wall-1", message: "Wall added." }));
     const pipeline = new AICommandPipeline(new MockAIProvider(), executor);
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertTrue(result.success, "result.success");
     assertEqual(executor.calls.length, 1, "executor.calls.length");
@@ -304,11 +308,11 @@ function run(): void {
     assertEqual(result.errors.length, 0, "result.errors.length");
   });
 
-  check("AICommandPipeline executes every command in a multi-command instruction, in order", () => {
+  await check("AICommandPipeline executes every command in a multi-command instruction, in order", async () => {
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(new MockAIProvider(), executor);
 
-    const result = pipeline.run("Create a wall and add a pillar", emptySnapshot);
+    const result = await pipeline.run("Create a wall and add a pillar", emptySnapshot);
 
     assertTrue(result.success, "result.success");
     assertEqual(executor.calls.length, 2, "executor.calls.length");
@@ -319,12 +323,12 @@ function run(): void {
 
   // --- Empty instruction ---
 
-  check("AICommandPipeline rejects an empty instruction without ever calling the provider or the executor", () => {
+  await check("AICommandPipeline rejects an empty instruction without ever calling the provider or the executor", async () => {
     const providerSpy = makeProviderCallCounter(new MockAIProvider());
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(providerSpy, executor);
 
-    const result = pipeline.run("   ", emptySnapshot);
+    const result = await pipeline.run("   ", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors.length, 1, "result.errors.length");
@@ -335,47 +339,47 @@ function run(): void {
 
   // --- Invalid provider output ---
 
-  check("AICommandPipeline rejects a non-array provider response", () => {
+  await check("AICommandPipeline rejects a non-array provider response", async () => {
     const provider = fixedProvider({ commands: "not-an-array" } as unknown as AIProviderResponse);
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors[0].stage, "provider", "error stage");
     assertEqual(executor.calls.length, 0, "executor should never be called");
   });
 
-  check("AICommandPipeline rejects a null provider response", () => {
+  await check("AICommandPipeline rejects a null provider response", async () => {
     const provider = fixedProvider(null as unknown as AIProviderResponse);
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors[0].stage, "provider", "error stage");
   });
 
-  check("AICommandPipeline rejects a provider response with zero commands and surfaces its notes", () => {
+  await check("AICommandPipeline rejects a provider response with zero commands and surfaces its notes", async () => {
     const provider = fixedProvider({ commands: [], notes: "nothing matched" });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Do a backflip", emptySnapshot);
+    const result = await pipeline.run("Do a backflip", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors[0].stage, "provider", "error stage");
     assertEqual(result.errors[0].message, "nothing matched", "error message");
   });
 
-  check("AICommandPipeline catches a throwing provider without throwing itself", () => {
+  await check("AICommandPipeline catches a throwing provider without throwing itself", async () => {
     const provider = throwingProvider("boom");
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors[0].stage, "provider", "error stage");
@@ -384,12 +388,12 @@ function run(): void {
 
   // --- Malformed / unsupported commands ---
 
-  check("AICommandPipeline rejects a structurally malformed command but still processes the rest of the batch", () => {
+  await check("AICommandPipeline rejects a structurally malformed command but still processes the rest of the batch", async () => {
     const provider = fixedProvider({ commands: [42, { type: "wall.add", wall: {} }] });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.outcomes.length, 2, "result.outcomes.length");
@@ -400,37 +404,37 @@ function run(): void {
     assertEqual(result.errors[0].commandIndex, 0, "error commandIndex");
   });
 
-  check("AICommandPipeline rejects an unsupported object type", () => {
+  await check("AICommandPipeline rejects an unsupported object type", async () => {
     const provider = fixedProvider({ commands: [{ type: "roof.add", roof: {} }] });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a roof", emptySnapshot);
+    const result = await pipeline.run("Create a roof", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertTrue(result.errors[0].message.includes("Unsupported object type"), "error message");
     assertEqual(executor.calls.length, 0, "executor should never be called");
   });
 
-  check("AICommandPipeline rejects an object type excluded from this call's availableObjectTypes", () => {
+  await check("AICommandPipeline rejects an object type excluded from this call's availableObjectTypes", async () => {
     const provider = fixedProvider({ commands: [{ type: "slab.add", slab: {} }] });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
     const availableObjectTypes = AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "slab");
 
-    const result = pipeline.run("Create a slab", emptySnapshot, availableObjectTypes);
+    const result = await pipeline.run("Create a slab", emptySnapshot, availableObjectTypes);
 
     assertEqual(result.success, false, "result.success");
     assertTrue(result.errors[0].message.includes("not available"), "error message");
     assertEqual(executor.calls.length, 0, "executor should never be called");
   });
 
-  check("AICommandPipeline rejects an unsupported command type", () => {
+  await check("AICommandPipeline rejects an unsupported command type", async () => {
     const provider = fixedProvider({ commands: [{ type: "wall.frobnicate" }] });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Frobnicate a wall", emptySnapshot);
+    const result = await pipeline.run("Frobnicate a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertTrue(result.errors[0].message.includes("Unsupported command type"), "error message");
@@ -439,7 +443,7 @@ function run(): void {
 
   // --- Command failure propagation ---
 
-  check("AICommandPipeline propagates one command's execution failure without aborting the rest of the batch", () => {
+  await check("AICommandPipeline propagates one command's execution failure without aborting the rest of the batch", async () => {
     const executor = makeExecutorSpy((input) => {
       const type = (input as { type: string }).type;
       return type === "wall.add"
@@ -454,7 +458,7 @@ function run(): void {
     });
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall and add a pillar", emptySnapshot);
+    const result = await pipeline.run("Create a wall and add a pillar", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     assertEqual(executor.calls.length, 2, "both commands should have been attempted");
@@ -465,14 +469,14 @@ function run(): void {
     assertEqual(result.errors[0].commandIndex, 0, "error commandIndex");
   });
 
-  check("AICommandPipeline propagates a real domain validation failure (invalid dimensions) from CommandExecutor", () => {
+  await check("AICommandPipeline propagates a real domain validation failure (invalid dimensions) from CommandExecutor", async () => {
     const store = new WallStore();
     const history = makeWallHistoryStub(store);
     const executor = new CommandExecutor(store, history);
     const provider = fixedProvider({ commands: [{ type: "wall.add", wall: { length: 0 } }] });
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = pipeline.run("Create a wall with no length", emptySnapshot);
+    const result = await pipeline.run("Create a wall with no length", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
     const outcome = result.outcomes[0];
@@ -486,7 +490,7 @@ function run(): void {
 
   // --- Undo/redo compatibility ---
 
-  check("a command executed through AICommandPipeline undoes and redoes exactly like a directly-issued one", () => {
+  await check("a command executed through AICommandPipeline undoes and redoes exactly like a directly-issued one", async () => {
     const store = new WallStore();
     const history = new HistoryManager();
     const wallHistory = makeUndoableWallHistory(store, history);
@@ -496,7 +500,7 @@ function run(): void {
     assertEqual(store.getAll().length, 0, "no walls yet");
     assertEqual(history.canUndo(), false, "nothing to undo yet");
 
-    const result = pipeline.run("Create a wall", emptySnapshot);
+    const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertTrue(result.success, "result.success");
     assertEqual(store.getAll().length, 1, "one wall should have been added");
@@ -512,7 +516,7 @@ function run(): void {
 
   // --- No direct store mutation from the AI layer ---
 
-  check("AICommandPipeline holds no store reference - only a provider and a CommandExecutorLike", () => {
+  await check("AICommandPipeline holds no store reference - only a provider and a CommandExecutorLike", async () => {
     const pipeline = new AICommandPipeline(new MockAIProvider(), makeExecutorSpy());
 
     const ownProperties = Object.getOwnPropertyNames(pipeline).sort();
@@ -520,13 +524,13 @@ function run(): void {
     assertDeepEqual(ownProperties, ["commandExecutor", "provider"], "AICommandPipeline's own instance properties");
   });
 
-  check("every mutation an AI instruction causes goes through the CommandExecutorLike, and only that", () => {
+  await check("every mutation an AI instruction causes goes through the CommandExecutorLike, and only that", async () => {
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(new MockAIProvider(), executor);
 
-    pipeline.run("Create a wall", emptySnapshot);
-    pipeline.run("Add a pillar and create a beam", emptySnapshot);
-    pipeline.run("Add a slab, create a door, add a window", emptySnapshot);
+    await pipeline.run("Create a wall", emptySnapshot);
+    await pipeline.run("Add a pillar and create a beam", emptySnapshot);
+    await pipeline.run("Add a slab, create a door, add a window", emptySnapshot);
 
     assertEqual(executor.calls.length, 6, "one executor call per recognized command across all three instructions");
   });
@@ -537,4 +541,17 @@ function run(): void {
   }
 }
 
-run();
+// run() is async (see above), so a synchronous top-level `run();` here
+// would let this script exit with code 0 before any check had actually
+// finished. Instead, wait for the returned promise; on failure, log and
+// rethrow so this becomes an unhandled rejection - Node's default
+// behavior for that is to exit with a non-zero code, the same effect
+// every other (synchronous) verify.ts in this project gets for free
+// from an uncaught throw. (Deliberately not `process.exitCode` - the
+// Node-only `process` global isn't typed without @types/node, which
+// this project doesn't depend on, and referencing it would fail
+// `tsc --noEmit`.)
+run().catch((error) => {
+  console.error(error);
+  throw error;
+});
