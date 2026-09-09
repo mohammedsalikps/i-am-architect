@@ -1,31 +1,37 @@
 /**
- * Lightweight in-memory verification for OpenAIProvider - request
- * shaping, response parsing, every required error case (missing key,
- * failed request, malformed response), and end-to-end integration
- * through the real AICommandPipeline. Same approach as every other
- * verify.ts in this project: no test framework, plain assertion
- * helpers, run directly by Node. Run with:
+ * Lightweight in-memory verification for this directory's two real
+ * (network-backed) AIProvider implementations - OpenAIProvider (talks
+ * to OpenAI directly) and BackendAIProvider (talks to the AI proxy
+ * backend under backend/ - see its own section below). Same approach as
+ * every other verify.ts in this project: no test framework, plain
+ * assertion helpers, run directly by Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/ai/providers/verify.ts
  *
- * Every check below constructs OpenAIProvider with a hand-rolled mock
- * `fetch` function (see makeMockFetch()) - never the real global
- * `fetch`, never a real API key, and OpenAIProvider itself never falls
- * back to a global transport (see OpenAIProvider.ts's constructor).
- * That combination is what guarantees this file makes zero real network
- * calls: nothing here has a code path capable of reaching
- * api.openai.com. Every mock fetch call is also counted, and every
- * check that expects exactly one request asserts that count - see
- * "no real API request" checks below.
+ * Every check below constructs its provider with a hand-rolled mock
+ * `fetch` function - never the real global `fetch`, never a real
+ * secret of any kind, and neither provider ever falls back to a global
+ * transport on its own (see each class's constructor). That combination
+ * is what guarantees this file makes zero real network calls: nothing
+ * here has a code path capable of reaching api.openai.com OR a real AI
+ * proxy backend. Every mock fetch call is also counted, and every check
+ * that expects exactly one request asserts that count.
  *
  * Explicit .ts extensions below are required for Node's native
  * TypeScript support to resolve these relative imports (see
  * allowImportingTsExtensions in tsconfig.json) - this file is run
  * directly by Node, not bundled by Vite.
  */
+// "node:fs"/"node:url" below are typed by ./node-fs-url.d.ts, a minimal
+// local ambient shim - see that file's own header comment for why it
+// exists instead of an @types/node dependency.
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { OpenAIProvider } from "./OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "./OpenAIProvider.ts";
+import { BackendAIProvider } from "./BackendAIProvider.ts";
+import type { BackendFetch, BackendHttpResponse } from "./BackendAIProvider.ts";
 import { AICommandPipeline } from "../AICommandPipeline.ts";
 import type { CommandExecutorLike } from "../AICommandPipeline.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../types.ts";
@@ -120,6 +126,56 @@ function makeExecutorSpy(
       return resultFor(input);
     }
   };
+}
+
+// --- BackendAIProvider-specific helpers ---
+
+type MockBackendFetchCall = {
+  url: string;
+  init: { method: "POST"; headers: Record<string, string>; body: string; signal?: AbortSignal };
+};
+
+/** Mirrors makeMockFetch above, for BackendFetch instead of OpenAIFetch - a hand-rolled mock that never touches the network. */
+function makeMockBackendFetch(
+  handler: (call: MockBackendFetchCall) => BackendHttpResponse | Promise<BackendHttpResponse>
+): BackendFetch & { calls: MockBackendFetchCall[] } {
+  const calls: MockBackendFetchCall[] = [];
+  const fetchImpl: BackendFetch = async (url, init) => {
+    const call = { url, init };
+    calls.push(call);
+    return handler(call);
+  };
+  return Object.assign(fetchImpl, { calls });
+}
+
+/** A well-formed backend HTTP response wrapping `body` (an `{ commands, notes? }`-shaped object) as JSON. */
+function okBackendResponse(body: unknown): BackendHttpResponse {
+  const serialized = JSON.stringify(body);
+  return {
+    ok: true,
+    status: 200,
+    json: async () => JSON.parse(serialized),
+    text: async () => serialized
+  };
+}
+
+/**
+ * A BackendFetch that respects an AbortSignal the way a real `fetch`
+ * does - resolves after `delayMs` unless aborted first, in which case
+ * it rejects immediately with an AbortError-shaped error. Lets the
+ * timeout check below be fast and deterministic (BackendAIProvider's
+ * own short `timeoutMs` fires well before `delayMs` ever would), rather
+ * than actually waiting out a long delay.
+ */
+function makeSlowBackendFetch(delayMs: number): BackendFetch {
+  return (_url, init) =>
+    new Promise<BackendHttpResponse>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(okBackendResponse({ commands: [] })), delayMs);
+      init.signal?.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      });
+    });
 }
 
 async function run(): Promise<void> {
@@ -423,6 +479,272 @@ async function run(): Promise<void> {
     async () => {
       const mockFetch = makeMockFetch(() => okChatResponse({ commands: [{ type: "roof.add", roof: {} }] }));
       const provider = new OpenAIProvider({ apiKey: "sk-test", fetch: mockFetch });
+      const executor = makeExecutorSpy();
+      const pipeline = new AICommandPipeline(provider, executor);
+
+      const result = await pipeline.run("Create a roof", emptySnapshot);
+
+      assertEqual(result.success, false, "result.success");
+      assertEqual(result.errors[0].stage, "validation", "error stage");
+      assertTrue(result.errors[0].message.includes("Unsupported object type"), "error message");
+      assertEqual(executor.calls.length, 0, "executor should never be called");
+    }
+  );
+
+  // --- BackendAIProvider ---
+
+  console.log("\nBackendAIProvider verification\n");
+
+  await check("BackendAIProvider throws a clear error when constructed without a baseUrl", () => {
+    let threw = false;
+    try {
+      new BackendAIProvider({ baseUrl: "", fetch: makeMockBackendFetch(() => okBackendResponse({ commands: [] })) });
+    } catch (error) {
+      threw = true;
+      const message = error instanceof Error ? error.message : String(error);
+      assertTrue(message.includes("baseUrl"), 'error message should mention "baseUrl"');
+    }
+    assertTrue(threw, "constructing without a baseUrl should throw");
+  });
+
+  await check("BackendAIProvider throws a clear error when constructed without a fetch transport", () => {
+    let threw = false;
+    try {
+      new BackendAIProvider({ baseUrl: "http://localhost:8787" } as unknown as ConstructorParameters<
+        typeof BackendAIProvider
+      >[0]);
+    } catch (error) {
+      threw = true;
+      const message = error instanceof Error ? error.message : String(error);
+      assertTrue(message.includes("fetch"), 'error message should mention "fetch"');
+    }
+    assertTrue(threw, "constructing without a fetch transport should throw");
+  });
+
+  await check("BackendAIProvider sends a POST to <baseUrl>/api/ai/interpret with the exact provider contract as the body", async () => {
+    const mockFetch = makeMockBackendFetch(() => okBackendResponse({ commands: [{ type: "wall.add", wall: {} }] }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    await provider.interpret({
+      instruction: "Create a wall",
+      projectContext: emptySnapshot,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertEqual(mockFetch.calls.length, 1, "exactly one request should have been made");
+    const call = mockFetch.calls[0];
+    assertEqual(call.url, "http://localhost:8787/api/ai/interpret", "request URL");
+    assertEqual(call.init.method, "POST", "request method");
+    assertEqual(call.init.headers["Content-Type"], "application/json", "Content-Type header");
+    assertEqual(call.init.headers.Authorization, undefined, "no Authorization header should ever be sent");
+
+    assertDeepEqual(
+      JSON.parse(call.init.body),
+      { instruction: "Create a wall", projectContext: emptySnapshot, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES },
+      "request body is exactly { instruction, projectContext, availableObjectTypes }"
+    );
+  });
+
+  await check("BackendAIProvider strips a trailing slash from baseUrl before building the request URL", async () => {
+    const mockFetch = makeMockBackendFetch(() => okBackendResponse({ commands: [] }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787/", fetch: mockFetch });
+
+    await provider.interpret({
+      instruction: "Create a wall",
+      projectContext: emptySnapshot,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertEqual(mockFetch.calls[0].url, "http://localhost:8787/api/ai/interpret", "no doubled slash");
+  });
+
+  await check("BackendAIProvider parses a well-formed backend response into commands", async () => {
+    const mockFetch = makeMockBackendFetch(() =>
+      okBackendResponse({ commands: [{ type: "pillar.add", pillar: {} }], notes: "used default dimensions" })
+    );
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    const response = await provider.interpret({
+      instruction: "Add a pillar",
+      projectContext: emptySnapshot,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertDeepEqual(response, { commands: [{ type: "pillar.add", pillar: {} }], notes: "used default dimensions" }, "response");
+  });
+
+  await check("BackendAIProvider throws with the status code and body when the backend returns a non-OK response", async () => {
+    const mockFetch = makeMockBackendFetch(() => ({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: "Backend request failed with status 401: invalid_api_key" }),
+      text: async () => "Backend request failed with status 401: invalid_api_key"
+    }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    await assertRejects(
+      () =>
+        provider.interpret({
+          instruction: "Create a wall",
+          projectContext: emptySnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        }),
+      "502",
+      "non-OK HTTP status"
+    );
+  });
+
+  await check("BackendAIProvider throws when the backend's response body is not valid JSON", async () => {
+    const mockFetch = makeMockBackendFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token");
+      },
+      text: async () => "not json"
+    }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    await assertRejects(
+      () =>
+        provider.interpret({
+          instruction: "Create a wall",
+          projectContext: emptySnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        }),
+      "not valid JSON",
+      "malformed HTTP body"
+    );
+  });
+
+  await check('BackendAIProvider throws when the response is missing a "commands" array', async () => {
+    const mockFetch = makeMockBackendFetch(() => okBackendResponse({ somethingElse: true }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    await assertRejects(
+      () =>
+        provider.interpret({
+          instruction: "Create a wall",
+          projectContext: emptySnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        }),
+      'expected "{ commands: [] }"',
+      "missing commands array"
+    );
+  });
+
+  await check("BackendAIProvider throws when the underlying fetch fails (network failure)", async () => {
+    const mockFetch: BackendFetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+
+    await assertRejects(
+      () =>
+        provider.interpret({
+          instruction: "Create a wall",
+          projectContext: emptySnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        }),
+      "Backend request failed",
+      "network failure"
+    );
+  });
+
+  await check("BackendAIProvider aborts and throws a clear timeout error when the backend is too slow", async () => {
+    // The mock resolves after 5000ms if never aborted; timeoutMs is 20,
+    // so BackendAIProvider's own timer must abort it well before that -
+    // this check would take 5s to pass instead of milliseconds if the
+    // abort wiring were broken.
+    const provider = new BackendAIProvider({
+      baseUrl: "http://localhost:8787",
+      fetch: makeSlowBackendFetch(5000),
+      timeoutMs: 20
+    });
+
+    await assertRejects(
+      () =>
+        provider.interpret({
+          instruction: "Create a wall",
+          projectContext: emptySnapshot,
+          availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+        }),
+      "timed out after 20ms",
+      "timeout"
+    );
+  });
+
+  await check(
+    "BackendAIProvider's source contains no OpenAI API key, secret, or Authorization header logic",
+    () => {
+      const sourcePath = fileURLToPath(new URL("./BackendAIProvider.ts", import.meta.url));
+      const source = readFileSync(sourcePath, "utf8");
+
+      // Checks for actual risky *usage* (an env/global read, a header
+      // actually being built, a key-shaped literal, an "apiKey" field
+      // this provider has no business having) - NOT a bare mention of
+      // "OPENAI_API_KEY"/"Authorization" as English words, which this
+      // file's own doc comments legitimately use to explain that
+      // neither is present. A substring-only check would flag that
+      // explanatory prose as a false positive.
+      assertTrue(!source.includes("process.env"), 'source must not reference "process.env"');
+      assertTrue(!source.includes("import.meta.env"), 'source must not reference "import.meta.env"');
+      assertTrue(
+        !/["']?Authorization["']?\s*:/i.test(source),
+        "source must not construct an Authorization header (an actual object/header key, not just the word in prose)"
+      );
+      assertTrue(!/sk-[a-zA-Z0-9]/.test(source), "source must not contain an OpenAI-key-shaped literal");
+      assertTrue(
+        !/\bapiKey\b/.test(source),
+        'source must not reference an "apiKey" identifier - this provider has no concept of one'
+      );
+    }
+  );
+
+  await check(
+    "AICommandPipeline executes BackendAIProvider output end-to-end via a mocked transport, making exactly one request",
+    async () => {
+      const mockFetch = makeMockBackendFetch(() =>
+        okBackendResponse({ commands: [{ type: "wall.add", wall: {} }, { type: "beam.add", beam: {} }] })
+      );
+      const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+      const executor = makeExecutorSpy();
+      const pipeline = new AICommandPipeline(provider, executor);
+
+      const result = await pipeline.run("Create a wall and a beam", emptySnapshot);
+
+      assertTrue(result.success, "result.success");
+      assertEqual(mockFetch.calls.length, 1, "exactly one (mocked) backend request should have been made");
+      assertEqual(executor.calls.length, 2, "both commands should have reached CommandExecutor");
+      assertDeepEqual(executor.calls[0], { type: "wall.add", wall: {} }, "first command");
+      assertDeepEqual(executor.calls[1], { type: "beam.add", beam: {} }, "second command");
+    }
+  );
+
+  await check("AICommandPipeline surfaces a BackendAIProvider failure as a provider-stage pipeline error", async () => {
+    const mockFetch = makeMockBackendFetch(() => ({
+      ok: false,
+      status: 502,
+      json: async () => ({}),
+      text: async () => "upstream failure"
+    }));
+    const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
+    const executor = makeExecutorSpy();
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Create a wall", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(result.errors[0].stage, "provider", "error stage");
+    assertTrue(result.errors[0].message.includes("502"), "error message should include the HTTP status");
+    assertEqual(executor.calls.length, 0, "executor should never be called");
+  });
+
+  await check(
+    "AICommandPipeline rejects an unsupported command from BackendAIProvider the same way it rejects any other provider's",
+    async () => {
+      const mockFetch = makeMockBackendFetch(() => okBackendResponse({ commands: [{ type: "roof.add", roof: {} }] }));
+      const provider = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: mockFetch });
       const executor = makeExecutorSpy();
       const pipeline = new AICommandPipeline(provider, executor);
 
