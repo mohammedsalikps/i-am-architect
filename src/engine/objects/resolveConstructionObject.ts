@@ -1,11 +1,13 @@
 import type { ObjectId, ObjectType } from "./types";
 import type { WallStore } from "../wall/WallStore";
 import type { PillarStore } from "../pillar/PillarStore";
+import type { BeamStore } from "../beam/BeamStore";
 
 /** The stores this resolver knows how to check - extend alongside a new object type's store. */
 export interface ConstructionObjectStores {
   wallStore: WallStore;
   pillarStore: PillarStore;
+  beamStore: BeamStore;
 }
 
 export interface ResolvedConstructionObjectRef {
@@ -16,8 +18,8 @@ export interface ResolvedConstructionObjectRef {
 /**
  * Resolves an arbitrary object id to which store (if any) currently
  * holds it, without the caller needing to know or guess the type in
- * advance. Checks each store in a fixed order (wall, then pillar) and
- * returns as soon as one matches.
+ * advance. Checks each store in a fixed order (wall, then pillar, then
+ * beam) and returns as soon as one matches.
  *
  * This is the shared version of a "try wall, then pillar" pattern that
  * already existed independently in a few UI modules (assemblyPanel.ts's
@@ -45,6 +47,9 @@ export function resolveConstructionObject(
   }
   if (stores.pillarStore.get(id)) {
     return { type: "pillar", id };
+  }
+  if (stores.beamStore.get(id)) {
+    return { type: "beam", id };
   }
   return undefined;
 }

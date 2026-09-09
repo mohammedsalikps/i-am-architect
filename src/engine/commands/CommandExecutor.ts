@@ -6,6 +6,8 @@ import type { WallStore } from "../wall/WallStore";
 import { createWallData, duplicateWallData } from "../wall/createWall.ts";
 import { createPillarData, duplicatePillarData } from "../pillar/createPillar.ts";
 import { PillarStore } from "../pillar/PillarStore.ts";
+import { createBeamData, duplicateBeamData } from "../beam/createBeam.ts";
+import { BeamStore } from "../beam/BeamStore.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import type {
   Command,
@@ -18,13 +20,18 @@ import type {
   UpdatePillarCommand,
   DeletePillarCommand,
   DuplicatePillarCommand,
+  AddBeamCommand,
+  UpdateBeamCommand,
+  DeleteBeamCommand,
+  DuplicateBeamCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
   AddObjectToAssemblyCommand,
   RemoveObjectFromAssemblyCommand,
   WallHistoryLike,
-  PillarHistoryLike
+  PillarHistoryLike,
+  BeamHistoryLike
 } from "./types";
 
 const KNOWN_COMMAND_TYPES = [
@@ -36,6 +43,10 @@ const KNOWN_COMMAND_TYPES = [
   "pillar.update",
   "pillar.delete",
   "pillar.duplicate",
+  "beam.add",
+  "beam.update",
+  "beam.delete",
+  "beam.duplicate",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -79,12 +90,17 @@ function isCommand(value: unknown): value is Command {
  * always supplies a real PillarHistoryController explicitly; the
  * default only exists so wall-only/assembly-only call sites (e.g. the
  * existing tests in commands/verify.ts) keep compiling unchanged.
+ *
+ * beamStore/beamHistory follow the exact same defaulting idea as
+ * pillarStore/pillarHistory - see the paragraph above.
  */
 export class CommandExecutor {
   private readonly wallStore: WallStore;
   private readonly wallHistory: WallHistoryLike;
   private readonly pillarStore: PillarStore;
   private readonly pillarHistory: PillarHistoryLike;
+  private readonly beamStore: BeamStore;
+  private readonly beamHistory: BeamHistoryLike;
   private readonly assemblyStore: AssemblyStore;
 
   constructor(
@@ -96,6 +112,12 @@ export class CommandExecutor {
       add: (pillar) => pillarStore.add(pillar),
       update: (id, changes) => pillarStore.update(id, changes),
       remove: (id) => pillarStore.remove(id)
+    },
+    beamStore: BeamStore = new BeamStore(),
+    beamHistory: BeamHistoryLike = {
+      add: (beam) => beamStore.add(beam),
+      update: (id, changes) => beamStore.update(id, changes),
+      remove: (id) => beamStore.remove(id)
     }
   ) {
     this.wallStore = wallStore;
@@ -103,6 +125,8 @@ export class CommandExecutor {
     this.assemblyStore = assemblyStore;
     this.pillarStore = pillarStore;
     this.pillarHistory = pillarHistory;
+    this.beamStore = beamStore;
+    this.beamHistory = beamHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -128,6 +152,14 @@ export class CommandExecutor {
         return this.executeDeletePillar(input);
       case "pillar.duplicate":
         return this.executeDuplicatePillar(input);
+      case "beam.add":
+        return this.executeAddBeam(input);
+      case "beam.update":
+        return this.executeUpdateBeam(input);
+      case "beam.delete":
+        return this.executeDeleteBeam(input);
+      case "beam.duplicate":
+        return this.executeDuplicateBeam(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -273,6 +305,72 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Pillar duplicated." };
+  }
+
+  private executeAddBeam(command: AddBeamCommand): CommandResult {
+    const beam = createBeamData(command.beam ?? {});
+    const result = this.beamHistory.add(beam);
+
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: "Could not add beam: validation failed." };
+    }
+    return { success: true, objectId: beam.id, message: "Beam added." };
+  }
+
+  private executeUpdateBeam(command: UpdateBeamCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "beam.update command is missing an id." };
+    }
+
+    const result = this.beamHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update beam: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Beam updated." };
+  }
+
+  private executeDeleteBeam(command: DeleteBeamCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "beam.delete command is missing an id." };
+    }
+
+    const existing = this.beamStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No beam found with id "${command.id}".` };
+    }
+
+    this.beamHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Beam deleted." };
+  }
+
+  private executeDuplicateBeam(command: DuplicateBeamCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "beam.duplicate command is missing an id." };
+    }
+
+    const source = this.beamStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No beam found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateBeamData(source);
+    const result = this.beamHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateBeamData() always produces valid data from an already-valid
+      // source beam, so this shouldn't happen in practice - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate beam: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Beam duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {

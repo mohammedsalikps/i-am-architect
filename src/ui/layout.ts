@@ -9,6 +9,7 @@ import { createStatusBar } from "./statusBar";
 import { createViewControls, type ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
+import type { BeamStore } from "../engine/beam/BeamStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -19,12 +20,14 @@ export type AppShellOptions = {
   onViewChange: (preset: ViewPreset) => void;
   onAddWall: () => void;
   onAddPillar: () => void;
+  onAddBeam: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
   onUndo: () => void;
   onRedo: () => void;
   wallStore: WallStore;
   pillarStore: PillarStore;
+  beamStore: BeamStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -59,18 +62,20 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const mainNav = createMainNav();
 
-  const ribbon = createConstructionRibbon(options.onAddWall, options.onAddPillar);
+  const ribbon = createConstructionRibbon(options.onAddWall, options.onAddPillar, options.onAddBeam);
 
   const leftSidebar = createLeftSidebar(
     options.assemblyStore,
     options.commandExecutor,
     options.selectionStore,
     options.wallStore,
-    options.pillarStore
+    options.pillarStore,
+    options.beamStore
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
     pillarStore: options.pillarStore,
+    beamStore: options.beamStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,

@@ -4,9 +4,11 @@ import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarData } from "../engine/pillar/types";
 import type { PillarStore } from "../engine/pillar/PillarStore";
+import type { BeamData } from "../engine/beam/types";
+import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
-import type { UpdateWallCommand, UpdatePillarCommand } from "../engine/commands/types";
+import type { UpdateWallCommand, UpdatePillarCommand, UpdateBeamCommand } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
@@ -252,11 +254,86 @@ function buildPillarPanels(
   return [actions, properties, transform, dimensions, material, color];
 }
 
+/**
+ * Beam's own panel builder - deliberately separate from
+ * buildWallPanels/buildPillarPanels for the same reason pillar's is:
+ * a beam's fields (length/width/height) aren't interchangeable with
+ * either sibling's, and two concrete, type-safe functions mean neither
+ * has to guess which fields the other actually has.
+ */
+function buildBeamPanels(
+  beam: BeamData,
+  commandExecutor: CommandExecutor,
+  onDuplicateSelected: () => void,
+  onDeleteSelected: () => void
+): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
+
+  const properties = section("Properties", [readOnlyRow("Name", "Beam"), readOnlyRow("Type", beam.type)]);
+
+  const rotationDegrees = Math.round(radiansToDegrees(beam.rotation) * 100) / 100;
+
+  const updateBeam = (changes: UpdateBeamCommand["changes"]): void => {
+    commandExecutor.execute({ type: "beam.update", id: beam.id, changes });
+  };
+
+  const transform = section("Transform", [
+    numberInputRow(
+      "Position X",
+      beam.position.x,
+      (value) => updateBeam({ position: { ...beam.position, x: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Y",
+      beam.position.y,
+      (value) => updateBeam({ position: { ...beam.position, y: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow(
+      "Position Z",
+      beam.position.z,
+      (value) => updateBeam({ position: { ...beam.position, z: value } }),
+      { step: 0.1 }
+    ),
+    numberInputRow("Rotation Y", rotationDegrees, (value) => updateBeam({ rotation: degreesToRadians(value) }), {
+      step: 1
+    })
+  ]);
+
+  const dimensions = section("Dimensions", [
+    numberInputRow(
+      "Length",
+      beam.dimensions.length,
+      (value) => updateBeam({ dimensions: { ...beam.dimensions, length: value } }),
+      { min: 0.1, step: 0.1 }
+    ),
+    numberInputRow(
+      "Width",
+      beam.dimensions.width,
+      (value) => updateBeam({ dimensions: { ...beam.dimensions, width: value } }),
+      { min: 0.05, step: 0.05 }
+    ),
+    numberInputRow(
+      "Height",
+      beam.dimensions.height,
+      (value) => updateBeam({ dimensions: { ...beam.dimensions, height: value } }),
+      { min: 0.05, step: 0.05 }
+    )
+  ]);
+
+  const material = section("Material", [readOnlyRow("Material", beam.material)]);
+
+  const color = section("Color", [colorInputRow("Color", beam.color, (value) => updateBeam({ color: value }))]);
+
+  return [actions, properties, transform, dimensions, material, color];
+}
+
 function buildEmptyState(): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
     el("p", {
       className: "sidebar__placeholder",
-      text: "Select a wall or pillar to view and edit its properties."
+      text: "Select a wall, pillar, or beam to view and edit its properties."
     })
   ]);
 }
@@ -264,6 +341,7 @@ function buildEmptyState(): HTMLElement {
 export type RightSidebarOptions = {
   wallStore: WallStore;
   pillarStore: PillarStore;
+  beamStore: BeamStore;
   selectionStore: SelectionStore;
   commandExecutor: CommandExecutor;
   onDuplicateSelected: () => void;
@@ -272,19 +350,22 @@ export type RightSidebarOptions = {
 
 /**
  * Right sidebar / inspector. Tabbed: Properties/Materials/Blocks/
- * Colors. Properties resolves the current selection against wallStore
- * first, then pillarStore - the same "try one store, fall back to the
- * next" shape assemblyPanel.ts's resolveMemberLabel already uses -
- * and renders the matching type-specific panel (buildWallPanels /
- * buildPillarPanels), or the empty state if the selected id belongs to
- * neither (or nothing is selected). Wall and pillar rendering stay
- * fully separate, type-safe functions - this module never merges their
- * shapes into one generic form.
+ * Colors. Properties resolves the current selection against wallStore,
+ * then pillarStore, then beamStore - the same "try each store in turn"
+ * shape assemblyPanel.ts's resolveMemberLabel already uses (both could
+ * use the shared resolveConstructionObject() helper instead; they
+ * don't need to, since neither is broken - see that file's docs) - and
+ * renders the matching type-specific panel (buildWallPanels /
+ * buildPillarPanels / buildBeamPanels), or the empty state if the
+ * selected id belongs to none of them (or nothing is selected). Wall,
+ * pillar, and beam rendering stay fully separate, type-safe functions -
+ * this module never merges their shapes into one generic form.
  *
  * Reads come straight from the stores; edits go through
- * commandExecutor.execute() ("wall.update"/"pillar.update" commands)
- * rather than touching the stores or history controllers directly -
- * this module never touches Three.js directly either.
+ * commandExecutor.execute() ("wall.update"/"pillar.update"/
+ * "beam.update" commands) rather than touching the stores or history
+ * controllers directly - this module never touches Three.js directly
+ * either.
  */
 export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const properties = el("div", { className: "property-panel" });
@@ -293,6 +374,7 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     const selectedId = options.selectionStore.get();
     const wall = selectedId ? options.wallStore.get(selectedId) : undefined;
     const pillar = !wall && selectedId ? options.pillarStore.get(selectedId) : undefined;
+    const beam = !wall && !pillar && selectedId ? options.beamStore.get(selectedId) : undefined;
 
     let content: HTMLElement[];
     if (wall) {
@@ -304,6 +386,8 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
         options.onDuplicateSelected,
         options.onDeleteSelected
       );
+    } else if (beam) {
+      content = buildBeamPanels(beam, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
     } else {
       content = [buildEmptyState()];
     }
@@ -313,6 +397,7 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
 
   options.wallStore.subscribe(render);
   options.pillarStore.subscribe(render);
+  options.beamStore.subscribe(render);
   options.selectionStore.subscribe(render);
 
   const { strip, panel } = createTabStrip(

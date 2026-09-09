@@ -6,6 +6,7 @@ import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
+import type { BeamStore } from "../engine/beam/BeamStore";
 import type { ObjectId, ObjectType } from "../engine/objects/types";
 
 /** Truncates a long id for display; today's ids (e.g. "wall-1") are already short, so this is usually a no-op. */
@@ -13,27 +14,30 @@ function shortId(id: string): string {
   return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
 }
 
-// Only wall/pillar are resolvable today (see resolveConstructionObject.ts) -
-// this map only needs an entry for each type that resolver can actually
-// return. A new object type's store joining the resolver adds one line here.
+// Only wall/pillar/beam are resolvable today (see
+// resolveConstructionObject.ts) - this map only needs an entry for each
+// type that resolver can actually return. A new object type's store
+// joining the resolver adds one line here.
 const TYPE_LABELS: Partial<Record<ObjectType, string>> = {
   wall: "Wall",
-  pillar: "Pillar"
+  pillar: "Pillar",
+  beam: "Beam"
 };
 
 /**
  * Resolves a member object id to a readable label, using
  * resolveConstructionObject() to check every implemented object-type
- * store (today: wall, pillar) rather than assuming everything is a
- * wall. Never removes anything; an id that matches no known store just
- * reads as "Unknown object."
+ * store (today: wall, pillar, beam) rather than assuming everything is
+ * a wall. Never removes anything; an id that matches no known store
+ * just reads as "Unknown object."
  */
 function resolveMemberLabel(
   objectId: ObjectId,
   wallStore: WallStore,
-  pillarStore: PillarStore
+  pillarStore: PillarStore,
+  beamStore: BeamStore
 ): { label: string; selectableId: ObjectId | null } {
-  const resolved = resolveConstructionObject(objectId, { wallStore, pillarStore });
+  const resolved = resolveConstructionObject(objectId, { wallStore, pillarStore, beamStore });
   if (resolved) {
     const typeLabel = TYPE_LABELS[resolved.type] ?? resolved.type;
     return { label: `${typeLabel} — ${shortId(objectId)}`, selectableId: objectId };
@@ -45,14 +49,14 @@ function resolveMemberLabel(
  * Minimal assembly-management panel: list existing assemblies (name +
  * object count), create/select/delete an assembly, show the selected
  * assembly's member objects, and add/remove the currently-selected
- * construction object (a wall or a pillar) to/from the
+ * construction object (a wall, pillar, or beam) to/from the
  * currently-selected assembly. Lives in the left sidebar.
  *
  * Uses its own SelectionStore instance for "which assembly is selected
  * in this panel" - deliberately separate from the shared construction-
  * object SelectionStore. `selectionStore` (the one shared instance from
  * ProjectContext - the same one WallLayer/PillarLayer and rightSidebar.ts
- * use, holding at most one selected wall-or-pillar id at a time) is read
+ * use, holding at most one selected construction-object id at a time) is read
  * (`.get()`/`.subscribe()`) throughout this panel to drive the Add/
  * Remove button state, and is also *written to* in exactly one place:
  * clicking a listed member calls `.select()` on it, the same way
@@ -62,9 +66,10 @@ function resolveMemberLabel(
  * affected by clicking a member, and construction-object selection is
  * never affected by anything else assembly-related.
  *
- * `wallStore`/`pillarStore` are read-only here (`.get()`/`.subscribe()`),
- * used only (via resolveConstructionObject) to resolve a member id into
- * a readable label - this panel never writes to either store.
+ * `wallStore`/`pillarStore`/`beamStore` are read-only here
+ * (`.get()`/`.subscribe()`), used only (via resolveConstructionObject)
+ * to resolve a member id into a readable label - this panel never
+ * writes to any of them.
  *
  * All writes (create/delete/addObject/removeObject) go through
  * commandExecutor - this panel never calls AssemblyStore's write
@@ -77,7 +82,8 @@ export function createAssemblyPanel(
   commandExecutor: CommandExecutor,
   selectionStore: SelectionStore,
   wallStore: WallStore,
-  pillarStore: PillarStore
+  pillarStore: PillarStore,
+  beamStore: BeamStore
 ): HTMLElement {
   const assemblySelection = new SelectionStore();
 
@@ -234,7 +240,7 @@ export function createAssemblyPanel(
             "ul",
             { className: "assembly-members" },
             assembly.objectIds.map((objectId) => {
-              const { label, selectableId } = resolveMemberLabel(objectId, wallStore, pillarStore);
+              const { label, selectableId } = resolveMemberLabel(objectId, wallStore, pillarStore, beamStore);
               const item = el("li", { className: "assembly-members__item" });
 
               if (selectableId) {
@@ -260,6 +266,7 @@ export function createAssemblyPanel(
   assemblySelection.subscribe(renderSelectedAssemblyDetail);
   wallStore.subscribe(renderSelectedAssemblyDetail);
   pillarStore.subscribe(renderSelectedAssemblyDetail);
+  beamStore.subscribe(renderSelectedAssemblyDetail);
 
   return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Assemblies" }),

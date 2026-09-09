@@ -1,25 +1,27 @@
 /**
  * Lightweight in-memory verification for CommandExecutor - wall
- * commands, pillar commands, and assembly commands. Same approach as
- * the other verify.ts scripts in this project: no test framework,
- * plain assertion helpers, run directly by Node. Run with:
+ * commands, pillar commands, beam commands, and assembly commands.
+ * Same approach as the other verify.ts scripts in this project: no
+ * test framework, plain assertion helpers, run directly by Node. Run
+ * with:
  *   npm run verify
  * or directly:
  *   node src/engine/commands/verify.ts
  *
- * Neither WallHistoryController nor PillarHistoryController is
- * instantiated here - both constructors use TypeScript parameter-
- * property shorthand, which Node's native TypeScript support cannot
- * run directly (only erasable syntax is supported). Instead this uses
- * small stand-ins that satisfy the WallHistoryLike/PillarHistoryLike
- * interfaces (add/update/remove) and mirror each controller's one real
- * rule for testing purposes: an update/add only "records history" when
- * the underlying store write actually succeeds. That's enough to
- * verify CommandExecutor's own routing logic (this file's actual unit
- * under test). Full integration with the real WallHistoryController/
- * PillarHistoryController (real undo/redo) is verified separately in
- * the browser, against the real compiled module - see the
- * implementation report.
+ * Neither WallHistoryController, PillarHistoryController, nor
+ * BeamHistoryController is instantiated here - all three constructors
+ * use TypeScript parameter-property shorthand, which Node's native
+ * TypeScript support cannot run directly (only erasable syntax is
+ * supported). Instead this uses small stand-ins that satisfy the
+ * WallHistoryLike/PillarHistoryLike/BeamHistoryLike interfaces
+ * (add/update/remove) and mirror each controller's one real rule for
+ * testing purposes: an update/add only "records history" when the
+ * underlying store write actually succeeds. That's enough to verify
+ * CommandExecutor's own routing logic (this file's actual unit under
+ * test). Full integration with the real WallHistoryController/
+ * PillarHistoryController/BeamHistoryController (real undo/redo) is
+ * verified separately in the browser, against the real compiled
+ * module - see the implementation report.
  *
  * Assembly commands need no such stand-in - AssemblyStore has no
  * parameter-property constructor, so the real class is used directly.
@@ -34,12 +36,15 @@
 import { CommandExecutor } from "./CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
 import { PillarStore } from "../pillar/PillarStore.ts";
+import { BeamStore } from "../beam/BeamStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
 import type { PillarData, PillarId } from "../pillar/types.ts";
 import type { PillarValidationResult } from "../pillar/validatePillar.ts";
-import type { WallHistoryLike, PillarHistoryLike } from "./types.ts";
+import type { BeamData, BeamId } from "../beam/types.ts";
+import type { BeamValidationResult } from "../beam/validateBeam.ts";
+import type { WallHistoryLike, PillarHistoryLike, BeamHistoryLike } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -110,6 +115,33 @@ function makePillarHistoryStub(store: PillarStore): PillarHistoryLike & { record
       return result;
     },
     remove(id: PillarId): void {
+      store.remove(id);
+    }
+  };
+}
+
+/** A BeamHistoryLike stand-in backed by a real BeamStore - mirrors makeWallHistoryStub/makePillarHistoryStub above. */
+function makeBeamHistoryStub(store: BeamStore): BeamHistoryLike & { recordedCount: number } {
+  let recordedCount = 0;
+  return {
+    get recordedCount(): number {
+      return recordedCount;
+    },
+    add(beam: BeamData): BeamValidationResult {
+      const result = store.add(beam);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    update(id: BeamId, changes: Parameters<BeamHistoryLike["update"]>[1]): BeamValidationResult {
+      const result = store.update(id, changes);
+      if (result.valid) {
+        recordedCount += 1;
+      }
+      return result;
+    },
+    remove(id: BeamId): void {
       store.remove(id);
     }
   };
@@ -472,6 +504,218 @@ function run(): void {
     assertEqual(pillars.get(wallResult.objectId as PillarId), undefined, "wall id should not leak into pillarStore");
     assertTrue(pillars.get(pillarResult.objectId as PillarId) !== undefined, "pillar should be in pillarStore");
     assertEqual(wallStoreStub.get(pillarResult.objectId as WallId), undefined, "pillar id should not leak into wallStore");
+  });
+
+  // --- Beam commands ---
+
+  function makeBeamExecutor(): { executor: CommandExecutor; beams: BeamStore } {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const beams = new BeamStore();
+    const beamHistory = makeBeamHistoryStub(beams);
+    return {
+      executor: new CommandExecutor(
+        wallStoreStub,
+        wallHistory,
+        new AssemblyStore(),
+        new PillarStore(),
+        undefined,
+        beams,
+        beamHistory
+      ),
+      beams
+    };
+  }
+
+  check("a valid beam.add command succeeds and stores a beam", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const result = executor.execute({ type: "beam.add", beam: { length: 4, color: "#ff0000" } });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    const stored = beams.get(result.objectId as BeamId);
+    assertTrue(stored, "beam should be stored");
+    assertEqual(stored.dimensions.length, 4, "stored length");
+    assertEqual(stored.color, "#ff0000", "stored color");
+  });
+
+  check("a valid beam.update command succeeds and applies the change", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const added = executor.execute({ type: "beam.add", beam: {} });
+    const id = added.objectId as BeamId;
+
+    const result = executor.execute({
+      type: "beam.update",
+      id,
+      changes: { color: "#00ff00" }
+    });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.objectId, id, "result.objectId");
+    assertEqual(beams.get(id)?.color, "#00ff00", "stored color after update");
+  });
+
+  check("a valid beam.delete command succeeds and removes the beam", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const added = executor.execute({ type: "beam.add", beam: {} });
+    const id = added.objectId as BeamId;
+
+    const result = executor.execute({ type: "beam.delete", id });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(beams.get(id), undefined, "beam should be gone");
+  });
+
+  check("a valid beam.duplicate command succeeds and creates an independent beam", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const added = executor.execute({ type: "beam.add", beam: { length: 5, color: "#123456" } });
+    const originalId = added.objectId as BeamId;
+
+    const result = executor.execute({ type: "beam.duplicate", id: originalId });
+
+    assertTrue(result.success, "result.success");
+    assertTrue(!!result.objectId, "result.objectId should be set");
+    assertTrue(result.objectId !== originalId, "duplicate should have a different id");
+    const duplicate = beams.get(result.objectId as BeamId);
+    assertTrue(duplicate, "duplicate should be stored");
+    assertEqual(duplicate.dimensions.length, 5, "duplicate length matches source");
+    assertEqual(duplicate.color, "#123456", "duplicate color matches source");
+    assertTrue(beams.get(originalId) !== undefined, "original beam should still exist");
+  });
+
+  check("beam.update with a missing id is rejected", () => {
+    const { executor } = makeBeamExecutor();
+    const result = executor.execute({ type: "beam.update", changes: { color: "#000000" } });
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("beam.delete with a missing id is rejected", () => {
+    const { executor } = makeBeamExecutor();
+    assertEqual(executor.execute({ type: "beam.delete" }).success, false, "result.success");
+  });
+
+  check("beam.add with invalid dimensions is rejected and reports field errors", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const result = executor.execute({ type: "beam.add", beam: { length: 0 } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(
+      result.errors && result.errors.some((e) => e.field === "dimensions.length"),
+      "expected a dimensions.length error"
+    );
+    assertEqual(beams.getAll().length, 0, "nothing should have been stored");
+  });
+
+  check("an invalid beam.update preserves the existing beam", () => {
+    const { executor, beams } = makeBeamExecutor();
+
+    const added = executor.execute({ type: "beam.add", beam: {} });
+    const id = added.objectId as BeamId;
+    const before = beams.get(id);
+
+    const result = executor.execute({
+      type: "beam.update",
+      id,
+      changes: { dimensions: { ...before!.dimensions, width: -1 } }
+    });
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(beams.get(id), before, "beam should be byte-for-byte unchanged");
+  });
+
+  check("successful beam commands are recorded as history (via the BeamHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const beams = new BeamStore();
+    const beamHistory = makeBeamHistoryStub(beams);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      beams,
+      beamHistory
+    );
+
+    assertEqual(beamHistory.recordedCount, 0, "no history yet");
+
+    const added = executor.execute({ type: "beam.add", beam: {} });
+    assertEqual(beamHistory.recordedCount, 1, "a valid add() should record history");
+
+    executor.execute({ type: "beam.update", id: added.objectId as BeamId, changes: { color: "#abcdef" } });
+    assertEqual(beamHistory.recordedCount, 2, "a valid update() should record history");
+  });
+
+  check("failed beam commands create no history entry (via the BeamHistoryLike stub)", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const beams = new BeamStore();
+    const beamHistory = makeBeamHistoryStub(beams);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      new PillarStore(),
+      undefined,
+      beams,
+      beamHistory
+    );
+
+    executor.execute({ type: "beam.add", beam: { length: -1 } });
+    assertEqual(beamHistory.recordedCount, 0, "an invalid add() should not record history");
+
+    const added = executor.execute({ type: "beam.add", beam: {} });
+    assertEqual(beamHistory.recordedCount, 1, "sanity: the valid add() above should have recorded");
+
+    executor.execute({
+      type: "beam.update",
+      id: added.objectId as BeamId,
+      changes: { rotation: Infinity }
+    });
+    assertEqual(beamHistory.recordedCount, 1, "an invalid update() should not record additional history");
+
+    executor.execute({ type: "beam.update", id: "does-not-exist", changes: { color: "#000000" } });
+    assertEqual(beamHistory.recordedCount, 1, "an update() for a missing id should not record history");
+  });
+
+  check("wall, pillar, and beam commands do not interfere with each other's stores", () => {
+    const wallStoreStub = new WallStore();
+    const wallHistory = makeWallHistoryStub(wallStoreStub);
+    const pillars = new PillarStore();
+    const pillarHistory = makePillarHistoryStub(pillars);
+    const beams = new BeamStore();
+    const beamHistory = makeBeamHistoryStub(beams);
+    const executor = new CommandExecutor(
+      wallStoreStub,
+      wallHistory,
+      new AssemblyStore(),
+      pillars,
+      pillarHistory,
+      beams,
+      beamHistory
+    );
+
+    const wallResult = executor.execute({ type: "wall.add", wall: {} });
+    const pillarResult = executor.execute({ type: "pillar.add", pillar: {} });
+    const beamResult = executor.execute({ type: "beam.add", beam: {} });
+
+    assertTrue(wallStoreStub.get(wallResult.objectId as WallId) !== undefined, "wall should be in wallStore");
+    assertEqual(pillars.get(wallResult.objectId as PillarId), undefined, "wall id should not leak into pillarStore");
+    assertEqual(beams.get(wallResult.objectId as BeamId), undefined, "wall id should not leak into beamStore");
+
+    assertTrue(pillars.get(pillarResult.objectId as PillarId) !== undefined, "pillar should be in pillarStore");
+    assertEqual(wallStoreStub.get(pillarResult.objectId as WallId), undefined, "pillar id should not leak into wallStore");
+    assertEqual(beams.get(pillarResult.objectId as BeamId), undefined, "pillar id should not leak into beamStore");
+
+    assertTrue(beams.get(beamResult.objectId as BeamId) !== undefined, "beam should be in beamStore");
+    assertEqual(wallStoreStub.get(beamResult.objectId as WallId), undefined, "beam id should not leak into wallStore");
+    assertEqual(pillars.get(beamResult.objectId as PillarId), undefined, "beam id should not leak into pillarStore");
   });
 
   // --- Assembly commands ---

@@ -19,6 +19,8 @@ import { WallStore } from "../wall/WallStore.ts";
 import { createWallData } from "../wall/createWall.ts";
 import { PillarStore } from "../pillar/PillarStore.ts";
 import { createPillarData } from "../pillar/createPillar.ts";
+import { BeamStore } from "../beam/BeamStore.ts";
+import { createBeamData } from "../beam/createBeam.ts";
 import type { ConstructionObjectBase } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
@@ -169,48 +171,56 @@ function run(): void {
 
   // --- resolveConstructionObject() ---
 
-  check("resolves a wall id to type 'wall'", () => {
-    const wallStore = new WallStore();
-    const pillarStore = new PillarStore();
-    const wall = createWallData();
-    wallStore.add(wall);
+  function makeEmptyStores(): { wallStore: WallStore; pillarStore: PillarStore; beamStore: BeamStore } {
+    return { wallStore: new WallStore(), pillarStore: new PillarStore(), beamStore: new BeamStore() };
+  }
 
-    const resolved = resolveConstructionObject(wall.id, { wallStore, pillarStore });
+  check("resolves a wall id to type 'wall'", () => {
+    const stores = makeEmptyStores();
+    const wall = createWallData();
+    stores.wallStore.add(wall);
+
+    const resolved = resolveConstructionObject(wall.id, stores);
     assertDeepEqual(resolved, { type: "wall", id: wall.id }, "resolved wall ref");
   });
 
   check("resolves a pillar id to type 'pillar'", () => {
-    const wallStore = new WallStore();
-    const pillarStore = new PillarStore();
+    const stores = makeEmptyStores();
     const pillar = createPillarData();
-    pillarStore.add(pillar);
+    stores.pillarStore.add(pillar);
 
-    const resolved = resolveConstructionObject(pillar.id, { wallStore, pillarStore });
+    const resolved = resolveConstructionObject(pillar.id, stores);
     assertDeepEqual(resolved, { type: "pillar", id: pillar.id }, "resolved pillar ref");
   });
 
-  check("resolves an id in neither store to undefined", () => {
-    const wallStore = new WallStore();
-    const pillarStore = new PillarStore();
+  check("resolves a beam id to type 'beam'", () => {
+    const stores = makeEmptyStores();
+    const beam = createBeamData();
+    stores.beamStore.add(beam);
 
-    const resolved = resolveConstructionObject("does-not-exist", { wallStore, pillarStore });
+    const resolved = resolveConstructionObject(beam.id, stores);
+    assertDeepEqual(resolved, { type: "beam", id: beam.id }, "resolved beam ref");
+  });
+
+  check("resolves an id in no store to undefined", () => {
+    const stores = makeEmptyStores();
+
+    const resolved = resolveConstructionObject("does-not-exist", stores);
     assertEqual(resolved, undefined, "unresolved id");
   });
 
-  check("a wall id and a pillar id never collide - each resolves to its own store only", () => {
-    const wallStore = new WallStore();
-    const pillarStore = new PillarStore();
+  check("a wall id, a pillar id, and a beam id never collide - each resolves to its own store only", () => {
+    const stores = makeEmptyStores();
     const wall = createWallData();
     const pillar = createPillarData();
-    wallStore.add(wall);
-    pillarStore.add(pillar);
+    const beam = createBeamData();
+    stores.wallStore.add(wall);
+    stores.pillarStore.add(pillar);
+    stores.beamStore.add(beam);
 
-    assertEqual(resolveConstructionObject(wall.id, { wallStore, pillarStore })?.type, "wall", "wall id resolves as wall");
-    assertEqual(
-      resolveConstructionObject(pillar.id, { wallStore, pillarStore })?.type,
-      "pillar",
-      "pillar id resolves as pillar"
-    );
+    assertEqual(resolveConstructionObject(wall.id, stores)?.type, "wall", "wall id resolves as wall");
+    assertEqual(resolveConstructionObject(pillar.id, stores)?.type, "pillar", "pillar id resolves as pillar");
+    assertEqual(resolveConstructionObject(beam.id, stores)?.type, "beam", "beam id resolves as beam");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -2,7 +2,7 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectContext } from "./engine/project/ProjectContext";
-import type { AddWallCommand, AddPillarCommand } from "./engine/commands/types";
+import type { AddWallCommand, AddPillarCommand, AddBeamCommand } from "./engine/commands/types";
 
 const appRoot = document.getElementById("app");
 
@@ -11,10 +11,12 @@ if (!appRoot) {
 }
 
 // One shared composition root - see src/engine/project/ProjectContext.ts.
-// assemblyStore/pillarStore are the same instances commandExecutor uses
-// internally (not invisible defaults of their own) - the UI reads/writes
-// them through commandExecutor, same as wallStore.
-const { wallStore, pillarStore, assemblyStore, selectionStore, history, commandExecutor } = createProjectContext();
+// assemblyStore/pillarStore/beamStore are the same instances
+// commandExecutor uses internally (not invisible defaults of their
+// own) - the UI reads/writes them through commandExecutor, same as
+// wallStore.
+const { wallStore, pillarStore, beamStore, assemblyStore, selectionStore, history, commandExecutor } =
+  createProjectContext();
 
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
@@ -45,17 +47,33 @@ function addPillar(): void {
   commandExecutor.execute(command);
 }
 
+// Successive beams are spaced along Z on the positive side, away from
+// both the wall stack (negative Z) and the pillar stack (positive X),
+// so a freshly-added beam is never buried inside either.
+const BEAM_Z_START = 4;
+const BEAM_Z_SPACING = 1.5;
+
+function addBeam(): void {
+  const index = beamStore.getAll().length;
+  const command: AddBeamCommand = {
+    type: "beam.add",
+    beam: { position: { z: BEAM_Z_START + index * BEAM_Z_SPACING } }
+  };
+  commandExecutor.execute(command);
+}
+
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 /**
  * Duplicate/Delete now act on "whichever construction object is
  * currently selected" rather than "the selected wall" - selectionStore
- * is shared between walls and pillars (see ProjectContext), so the
- * selected id could belong to either store. Checking wallStore first,
- * then pillarStore, mirrors the same "try one store, fall back to the
- * next" shape rightSidebar.ts and assemblyPanel.ts already use to
- * resolve a selected/member id without assuming its type.
+ * is shared between walls, pillars, and beams (see ProjectContext), so
+ * the selected id could belong to any of the three stores. Checking
+ * wallStore, then pillarStore, then beamStore, mirrors the same "try
+ * each store in turn" shape rightSidebar.ts and assemblyPanel.ts
+ * already use to resolve a selected/member id without assuming its
+ * type.
  */
 function deleteSelected(): void {
   const selectedId = selectionStore.get();
@@ -69,6 +87,8 @@ function deleteSelected(): void {
     commandExecutor.execute({ type: "wall.delete", id: selectedId });
   } else if (pillarStore.get(selectedId)) {
     commandExecutor.execute({ type: "pillar.delete", id: selectedId });
+  } else if (beamStore.get(selectedId)) {
+    commandExecutor.execute({ type: "beam.delete", id: selectedId });
   }
 }
 
@@ -87,6 +107,11 @@ function duplicateSelected(): void {
     if (result.success && result.objectId) {
       selectionStore.select(result.objectId);
     }
+  } else if (beamStore.get(selectedId)) {
+    const result = commandExecutor.execute({ type: "beam.duplicate", id: selectedId });
+    if (result.success && result.objectId) {
+      selectionStore.select(result.objectId);
+    }
   }
 }
 
@@ -100,12 +125,14 @@ const shell = createAppShell({
   onViewChange: (preset) => sceneManager.current?.setView(preset),
   onAddWall: addWall,
   onAddPillar: addPillar,
+  onAddBeam: addBeam,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   wallStore,
   pillarStore,
+  beamStore,
   assemblyStore,
   selectionStore,
   history,
@@ -114,5 +141,5 @@ const shell = createAppShell({
 
 appRoot.append(shell.root);
 
-sceneManager.current = new SceneManager(shell.viewportContainer, wallStore, pillarStore, selectionStore);
+sceneManager.current = new SceneManager(shell.viewportContainer, wallStore, pillarStore, beamStore, selectionStore);
 sceneManager.current.start();

@@ -4,9 +4,11 @@ import { addLights } from "./lights";
 import { addGround } from "./ground";
 import { WallLayer } from "./wall/WallLayer";
 import { PillarLayer } from "./pillar/PillarLayer";
+import { BeamLayer } from "./beam/BeamLayer";
 import { SelectionRaycaster } from "./SelectionRaycaster";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
+import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 /** Camera view presets the UI's view-control buttons can request. */
@@ -24,9 +26,10 @@ const VIEW_CAMERA_POSITIONS: Record<ViewPreset, THREE.Vector3Tuple> = {
  * 3D workspace. Purely a rendering/viewport concern - construction
  * *data* logic (walls, bricks, dimensions, etc.) belongs in src/engine.
  * Rendering of construction objects is delegated to dedicated layers
- * (WallLayer, PillarLayer, ...) rather than inlined here, so this class
- * stays a general-purpose scene host. Click-to-select is likewise
- * delegated to one shared SelectionRaycaster spanning every layer.
+ * (WallLayer, PillarLayer, BeamLayer, ...) rather than inlined here, so
+ * this class stays a general-purpose scene host. Click-to-select is
+ * likewise delegated to one shared SelectionRaycaster spanning every
+ * layer.
  */
 export class SceneManager {
   private readonly scene: THREE.Scene;
@@ -39,6 +42,7 @@ export class SceneManager {
     container: HTMLElement,
     wallStore: WallStore,
     pillarStore: PillarStore,
+    beamStore: BeamStore,
     selectionStore: SelectionStore
   ) {
     this.container = container;
@@ -66,18 +70,20 @@ export class SceneManager {
     addLights(this.scene);
     addGround(this.scene);
 
-    // Not stored on `this`: WallLayer/PillarLayer stay alive via the
-    // subscriptions they register with their stores/selectionStore,
-    // which outlive this constructor.
+    // Not stored on `this`: WallLayer/PillarLayer/BeamLayer stay alive
+    // via the subscriptions they register with their stores/
+    // selectionStore, which outlive this constructor.
     const wallLayer = new WallLayer(this.scene, wallStore, selectionStore);
     const pillarLayer = new PillarLayer(this.scene, pillarStore, selectionStore);
+    const beamLayer = new BeamLayer(this.scene, beamStore, selectionStore);
 
-    // One shared raycaster combines both layers' meshes into a single
-    // click handler - see SelectionRaycaster.ts for why two independent
+    // One shared raycaster combines every layer's meshes into a single
+    // click handler - see SelectionRaycaster.ts for why independent
     // per-layer raycasters would race each other.
     const selectionRaycaster = new SelectionRaycaster(this.camera, this.renderer.domElement, selectionStore);
     selectionRaycaster.registerLayer(() => wallLayer.getMeshes());
     selectionRaycaster.registerLayer(() => pillarLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => beamLayer.getMeshes());
 
     window.addEventListener("resize", this.handleResize);
   }
