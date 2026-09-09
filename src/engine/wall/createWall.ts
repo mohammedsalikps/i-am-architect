@@ -1,4 +1,5 @@
-import type { Vector3Data, WallData } from "./types";
+import type { Vector3Data } from "../objects/types";
+import type { WallData } from "./types";
 
 export interface CreateWallOptions {
   position?: Partial<Vector3Data>;
@@ -23,6 +24,8 @@ let nextId = 1;
 /**
  * Creates a new wall with sensible defaults. The base always rests on
  * the ground (y = height / 2) unless a full position is supplied.
+ * Options stay flat (length/height/thickness) for a simple call site -
+ * only the stored WallData nests them under `dimensions`.
  */
 export function createWallData(options: CreateWallOptions = {}): WallData {
   const height = options.height ?? DEFAULTS.height;
@@ -33,11 +36,14 @@ export function createWallData(options: CreateWallOptions = {}): WallData {
     type: "wall",
     position,
     rotation: options.rotation ?? 0,
-    length: options.length ?? DEFAULTS.length,
-    height,
-    thickness: options.thickness ?? DEFAULTS.thickness,
+    dimensions: {
+      length: options.length ?? DEFAULTS.length,
+      height,
+      thickness: options.thickness ?? DEFAULTS.thickness
+    },
     material: options.material ?? DEFAULTS.material,
-    color: options.color ?? DEFAULTS.color
+    color: options.color ?? DEFAULTS.color,
+    assemblyId: null
   };
 
   return wall;
@@ -59,9 +65,9 @@ export function duplicateWallData(wall: WallData): WallData {
       z: wall.position.z + DUPLICATE_OFFSET
     },
     rotation: wall.rotation,
-    length: wall.length,
-    height: wall.height,
-    thickness: wall.thickness,
+    length: wall.dimensions.length,
+    height: wall.dimensions.height,
+    thickness: wall.dimensions.thickness,
     material: wall.material,
     color: wall.color
   });

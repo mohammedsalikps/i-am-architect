@@ -1,32 +1,19 @@
-/**
- * Construction-engine wall data model. Framework-agnostic on purpose -
- * no Three.js or DOM types here, so this can be reused by any renderer
- * (including City Builder later).
- */
+import type { ConstructionObjectBase, ObjectId } from "../objects/types";
 
-export type WallId = string;
+export type WallId = ObjectId;
 
-export interface Vector3Data {
-  x: number;
-  y: number;
-  z: number;
-}
-
-export interface WallData {
-  id: WallId;
-  type: "wall";
-  /** Center of the wall box, in meters. y is derived from height so the base rests at y=0. */
-  position: Vector3Data;
-  /** Rotation around the vertical (Y) axis, in radians. Walls are plan-rotated only for now. */
-  rotation: number;
-  /** Along the wall's local X axis, in meters. */
+/** A wall's type-specific size fields, in meters. */
+export interface WallDimensions {
   length: number;
-  /** In meters. */
   height: number;
-  /** Along the wall's local Z axis, in meters. */
   thickness: number;
-  /** Material identifier - a placeholder string until a real material system exists. */
-  material: string;
-  /** Hex color string, e.g. "#c9c9c9". */
-  color: string;
 }
+
+/**
+ * A wall is a ConstructionObjectBase specialized with wall-shaped
+ * dimensions. See src/engine/objects/types.ts for the shared envelope
+ * (id/type/position/rotation/material/color/assemblyId) this builds on,
+ * and src/engine/objects/README.md for how future object types follow
+ * the same pattern.
+ */
+export type WallData = ConstructionObjectBase<"wall", WallDimensions>;

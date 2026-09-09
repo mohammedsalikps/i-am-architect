@@ -1,7 +1,16 @@
 # Construction Engine
 
-This folder is reserved for the construction engine core: walls, bricks,
-pillars, beams, slabs, doors, windows, dimensions, materials, and other
-building logic — decoupled from Three.js rendering (see `src/scene`).
+Framework-agnostic construction data and logic - no Three.js or DOM
+imports anywhere under this folder. See `src/scene` for rendering and
+`src/ui` for the editor chrome built on top of this.
 
-Intentionally empty in this milestone.
+- `objects/` - the shared construction-object foundation every object
+  type builds on. Start here when adding a new object type. See
+  `objects/README.md`.
+- `wall/` - the wall object type: data model, store, and factory
+  functions. The only object type implemented so far.
+- `selection/` - generic single-selection state, shared by every object
+  type.
+- `history/` - generic undo/redo (`HistoryManager`) plus one adapter per
+  object type (`wallHistory.ts`) that turns that type's mutations into
+  undoable commands.

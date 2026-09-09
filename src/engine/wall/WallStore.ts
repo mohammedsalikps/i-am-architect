@@ -17,10 +17,15 @@ export class WallStore {
   }
 
   /**
-   * Merges `changes` into the existing wall. If `height` changes without
-   * an explicit `position`, the wall's base is kept resting on the
-   * ground by recomputing position.y - this rule lives here so every
-   * caller (UI, future tools) gets consistent behavior for free.
+   * Merges `changes` into the existing wall. `changes.dimensions`, like
+   * `changes.position`, must be a complete replacement object when
+   * provided (not a partial merge) - callers spread the current value
+   * and override one field, e.g. `{ ...wall.dimensions, height: 3 }`.
+   *
+   * If dimensions.height changes without an explicit `position`, the
+   * wall's base is kept resting on the ground by recomputing
+   * position.y - this rule lives here so every caller (UI, future
+   * tools) gets consistent behavior for free.
    */
   update(id: WallId, changes: Partial<Omit<WallData, "id" | "type">>): void {
     const existing = this.walls.get(id);
@@ -30,8 +35,8 @@ export class WallStore {
 
     const next: WallData = { ...existing, ...changes };
 
-    if (changes.height !== undefined && changes.position === undefined) {
-      next.position = { ...next.position, y: changes.height / 2 };
+    if (changes.dimensions?.height !== undefined && changes.position === undefined) {
+      next.position = { ...next.position, y: changes.dimensions.height / 2 };
     }
 
     this.walls.set(id, next);

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import type { WallData } from "../../engine/wall/types";
 
 function buildWallGeometry(wall: WallData): THREE.BoxGeometry {
-  return new THREE.BoxGeometry(wall.length, wall.height, wall.thickness);
+  return new THREE.BoxGeometry(wall.dimensions.length, wall.dimensions.height, wall.dimensions.thickness);
 }
 
 /** Converts wall data into a real, rectangular Three.js mesh. */
@@ -27,9 +27,9 @@ export function buildWallMesh(wall: WallData): THREE.Mesh {
 export function applyWallDataToMesh(mesh: THREE.Mesh, wall: WallData): { dimensionsChanged: boolean } {
   const geometry = mesh.geometry as THREE.BoxGeometry;
   const dimensionsChanged =
-    geometry.parameters.width !== wall.length ||
-    geometry.parameters.height !== wall.height ||
-    geometry.parameters.depth !== wall.thickness;
+    geometry.parameters.width !== wall.dimensions.length ||
+    geometry.parameters.height !== wall.dimensions.height ||
+    geometry.parameters.depth !== wall.dimensions.thickness;
 
   if (dimensionsChanged) {
     geometry.dispose();

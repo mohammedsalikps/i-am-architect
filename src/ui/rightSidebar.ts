@@ -114,18 +114,24 @@ function buildWallPanels(wall: WallData, wallHistory: WallHistoryController): HT
   ]);
 
   const dimensions = section("Dimensions", [
-    numberInputRow("Length", wall.length, (value) => wallHistory.update(wall.id, { length: value }), {
-      min: 0.1,
-      step: 0.1
-    }),
-    numberInputRow("Height", wall.height, (value) => wallHistory.update(wall.id, { height: value }), {
-      min: 0.1,
-      step: 0.1
-    }),
-    numberInputRow("Thickness", wall.thickness, (value) => wallHistory.update(wall.id, { thickness: value }), {
-      min: 0.05,
-      step: 0.05
-    })
+    numberInputRow(
+      "Length",
+      wall.dimensions.length,
+      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, length: value } }),
+      { min: 0.1, step: 0.1 }
+    ),
+    numberInputRow(
+      "Height",
+      wall.dimensions.height,
+      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, height: value } }),
+      { min: 0.1, step: 0.1 }
+    ),
+    numberInputRow(
+      "Thickness",
+      wall.dimensions.thickness,
+      (value) => wallHistory.update(wall.id, { dimensions: { ...wall.dimensions, thickness: value } }),
+      { min: 0.05, step: 0.05 }
+    )
   ]);
 
   const material = section("Material", [readOnlyRow("Material", wall.material)]);
