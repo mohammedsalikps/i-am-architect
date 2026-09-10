@@ -41,6 +41,8 @@ import { AIService } from "../AIService.ts";
 import { AiPromptController } from "../AiPromptController.ts";
 import { BackendAIProvider } from "../providers/BackendAIProvider.ts";
 import { createMockBackend } from "./mockBackend.ts";
+import { MockAIProvider } from "../MockAIProvider.ts";
+import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
 import type { MockBackend, MockBackendHandler } from "./mockBackend.ts";
 import type { WallData } from "../../wall/types.ts";
 import type { PillarData } from "../../pillar/types.ts";
@@ -481,6 +483,200 @@ async function run(): Promise<void> {
 
     assertEqual(app.backend.requests.length, 2, "both requests reached the backend");
     assertEqual(app.context.wallStore.getAll().length, 2, "both walls created");
+  });
+
+  // --- Construction context sent to the provider ---
+
+  /** Compares two values by their JSON form, which is what the provider actually receives. */
+  function assertSameJson(actual: unknown, expected: unknown, message: string): void {
+    assertEqual(JSON.stringify(actual), JSON.stringify(expected), message);
+  }
+
+  /**
+   * Fails if `value` holds anything but plain JSON data: a function, a
+   * class instance (a Three.js mesh, a DOM node, a store), `undefined`
+   * (which JSON silently drops), a non-finite number (which JSON turns
+   * into null), or the same object reached twice (a shared reference).
+   */
+  function assertPlainJson(value: unknown, path: string, seen: Set<object> = new Set()): void {
+    if (value === null || typeof value === "string" || typeof value === "boolean") {
+      return;
+    }
+    if (typeof value === "number") {
+      assertTrue(Number.isFinite(value), `${path} must be a finite number`);
+      return;
+    }
+    assertTrue(typeof value === "object", `${path} must be plain data, got ${typeof value}`);
+    const object = value as object;
+    assertTrue(!seen.has(object), `${path} shares a reference with another part of the snapshot`);
+    seen.add(object);
+    const prototype = Object.getPrototypeOf(object);
+    assertTrue(
+      prototype === Object.prototype || prototype === Array.prototype,
+      `${path} must be a plain object or array, not a class instance`
+    );
+    for (const [key, child] of Object.entries(object)) {
+      assertPlainJson(child, `${path}.${key}`, seen);
+    }
+  }
+
+  await check("the context sent to the backend lists existing objects with ids, types, dimensions, and transforms", async () => {
+    const app = wireApp(alwaysReply([]));
+
+    // State built only through the CommandExecutor the toolbar uses.
+    const wall = app.context.commandExecutor.execute({ type: "wall.add", wall: { length: 5, height: 3, color: "#336699" } });
+    const pillar = app.context.commandExecutor.execute({
+      type: "pillar.add",
+      pillar: { position: { x: 2, z: -1 }, width: 0.5 }
+    });
+    app.context.commandExecutor.execute({ type: "wall.update", id: wall.objectId as string, changes: { rotation: 0.5 } });
+
+    await app.controller.submit("Describe the model");
+
+    const context = app.backend.requests[0].projectContext;
+    assertEqual(context.objects.length, 2, "both objects are in the context");
+    const sentWall = context.objects.find((object) => object.id === wall.objectId);
+    const sentPillar = context.objects.find((object) => object.id === pillar.objectId);
+    assertTrue(sentWall && sentPillar, "both objects are present under their real ids");
+
+    assertEqual(sentWall.type, "wall", "wall type");
+    assertSameJson(sentWall.dimensions, { height: 3, length: 5, thickness: 0.2 }, "wall dimensions, keys sorted");
+    assertSameJson(sentWall.position, { x: 0, y: 1.5, z: 0 }, "wall position, grounded by the real store");
+    assertEqual(sentWall.rotation, 0.5, "wall rotation reflects the later update");
+    assertEqual(sentWall.color, "#336699", "wall color");
+    assertEqual(sentWall.material, "generic", "wall material");
+
+    assertEqual(sentPillar.type, "pillar", "pillar type");
+    assertSameJson(sentPillar.position, { x: 2, y: 1.35, z: -1 }, "pillar position");
+    assertEqual(sentPillar.dimensions.width, 0.5, "pillar width");
+  });
+
+  await check("assembly membership reaches the backend, taken from the assemblies' own records", async () => {
+    const app = wireApp(alwaysReply([]));
+
+    const wall = app.context.commandExecutor.execute({ type: "wall.add", wall: {} });
+    const door = app.context.commandExecutor.execute({ type: "door.add", door: {} });
+    const groundFloor = app.context.commandExecutor.execute({
+      type: "assembly.create",
+      assembly: { name: "Ground Floor", description: "Level 0" }
+    });
+    const facade = app.context.commandExecutor.execute({ type: "assembly.create", assembly: { name: "Facade" } });
+    for (const assembly of [groundFloor, facade]) {
+      const added = app.context.commandExecutor.execute({
+        type: "assembly.addObject",
+        assemblyId: assembly.objectId as string,
+        objectId: wall.objectId as string
+      });
+      assertTrue(added.success, "precondition: the wall was added to the assembly");
+    }
+
+    await app.controller.submit("Describe the model");
+
+    const context = app.backend.requests[0].projectContext;
+    assertEqual(context.assemblyCount, 2, "assembly count");
+    const sentWall = context.objects.find((object) => object.id === wall.objectId);
+    const sentDoor = context.objects.find((object) => object.id === door.objectId);
+    assertTrue(sentWall && sentDoor, "both objects present");
+    assertEqual(sentWall.assemblyIds.length, 2, "the wall belongs to both assemblies");
+    assertTrue(
+      sentWall.assemblyIds.includes(groundFloor.objectId as string) && sentWall.assemblyIds.includes(facade.objectId as string),
+      "the wall lists both assembly ids"
+    );
+    assertSameJson(sentDoor.assemblyIds, [], "the door is ungrouped");
+
+    const sentGround = context.assemblies.find((assembly) => assembly.id === groundFloor.objectId);
+    const sentFacade = context.assemblies.find((assembly) => assembly.id === facade.objectId);
+    assertTrue(sentGround && sentFacade, "both assemblies present");
+    assertEqual(sentGround.name, "Ground Floor", "assembly name");
+    assertEqual(sentGround.description, "Level 0", "assembly description");
+    assertSameJson(sentGround.objectIds, [wall.objectId], "assembly members");
+    assertEqual(sentFacade.description, null, "an unset description is null, not absent");
+  });
+
+  await check("the context is plain JSON data - no class instances, functions, or shared references reach the provider", async () => {
+    const app = wireApp(alwaysReply([]));
+
+    const wall = app.context.commandExecutor.execute({ type: "wall.add", wall: {} });
+    app.context.commandExecutor.execute({ type: "window.add", window: {} });
+    const assembly = app.context.commandExecutor.execute({ type: "assembly.create", assembly: { name: "Core" } });
+    app.context.commandExecutor.execute({
+      type: "assembly.addObject",
+      assemblyId: assembly.objectId as string,
+      objectId: wall.objectId as string
+    });
+
+    await app.controller.submit("Describe the model");
+
+    // What the builder produced in-process, before any serialization - the
+    // stricter check, since a leaked reference would still be live here.
+    const built = buildAIProjectSnapshot(app.context);
+    assertPlainJson(built, "snapshot");
+
+    // What actually reached the backend matches it exactly.
+    assertSameJson(app.backend.requests[0].projectContext, built, "the backend received exactly the built snapshot");
+  });
+
+  await check("the context is deterministic - undo reordering a store leaves it unchanged", async () => {
+    const app = wireApp(alwaysReply([]));
+
+    const first = app.context.commandExecutor.execute({ type: "wall.add", wall: { length: 3 } });
+    app.context.commandExecutor.execute({ type: "wall.add", wall: { length: 6 } });
+    const before = buildAIProjectSnapshot(app.context);
+
+    // Delete then undo, through the real history: the restored wall
+    // re-enters the store's map at the end, reversing the store's order.
+    app.context.commandExecutor.execute({ type: "wall.delete", id: first.objectId as string });
+    app.context.history.undo();
+
+    const storeOrder = app.context.wallStore.getAll().map((wall) => wall.id);
+    assertEqual(storeOrder[storeOrder.length - 1], first.objectId as string, "precondition: the store order really changed");
+
+    const after = buildAIProjectSnapshot(app.context);
+    assertSameJson(after.objects, before.objects, "objects are identical despite the reordering");
+    assertSameJson(after.assemblies, before.assemblies, "assemblies are identical");
+  });
+
+  await check("an empty project still produces a valid, empty context", async () => {
+    const app = wireApp(alwaysReply([]));
+
+    await app.controller.submit("What is here?");
+
+    // Reaching the mock at all proves the request passed the shared
+    // parser, which requires `objects` and `assemblies` arrays.
+    assertEqual(app.backend.requests.length, 1, "the request was accepted");
+    const context = app.backend.requests[0].projectContext;
+    assertSameJson(context.objects, [], "no objects");
+    assertSameJson(context.assemblies, [], "no assemblies");
+    assertEqual(context.wallCount, 0, "counts still present");
+    assertPlainJson(context, "context");
+  });
+
+  await check("a provider can inspect the context - MockAIProvider sees an existing object through the whole path", async () => {
+    const provider = new MockAIProvider();
+    const app = wireApp((request) => {
+      const response = provider.interpret({
+        instruction: request.instruction,
+        projectContext: request.projectContext,
+        availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+      });
+      return response.notes === undefined
+        ? { kind: "ok", commands: response.commands }
+        : { kind: "ok", commands: response.commands, notes: response.notes };
+    });
+
+    const door = app.context.commandExecutor.execute({ type: "door.add", door: {} });
+
+    // "pillar" is matched before "door" in MockAIProvider's keyword order,
+    // so naming the door by id doesn't change which command is produced.
+    await app.controller.submit(`Add a pillar beside ${door.objectId}`);
+
+    assertEqual(app.controller.getState().status, "success", "controller status");
+    assertIncludes(
+      app.controller.getState().notes,
+      `Referenced existing objects: ${door.objectId} (door).`,
+      "the provider found the door in the context it received"
+    );
+    assertEqual(app.context.pillarStore.getAll().length, 1, "the pillar was still built");
   });
 
   // --- Secrets and harness discipline ---

@@ -74,7 +74,20 @@ const validSnapshot: AIProjectSnapshot = {
   doorCount: 0,
   windowCount: 0,
   assemblyCount: 0,
-  selectedObjectId: null
+  selectedObjectId: null,
+  objects: [
+    {
+      id: "wall-1",
+      type: "wall",
+      position: { x: 0, y: 1.35, z: 0 },
+      rotation: 0,
+      dimensions: { height: 2.7, length: 4, thickness: 0.2 },
+      material: "generic",
+      color: "#c9c9c9",
+      assemblyIds: []
+    }
+  ],
+  assemblies: []
 };
 
 /** A hand-rolled, HTTP-free AIProvider stand-in - records every request it receives and returns/throws whatever the test configures. Used for every check that isn't specifically about proving OpenAIProvider reuse. */
@@ -412,6 +425,63 @@ async function run(): Promise<void> {
       });
     }
   );
+
+  // --- Construction context validation ---
+
+  await check("POST /api/ai/interpret strips fields the snapshot doesn't define before the provider sees them", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const tampered = JSON.parse(JSON.stringify(validSnapshot));
+      tampered.injected = "top-level extra";
+      tampered.objects[0].mesh = { geometry: "should never reach a provider" };
+      tampered.objects[0].position.w = 1;
+
+      const res = await fetch(`${baseUrl}/api/ai/interpret`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: "Build a wall", projectContext: tampered })
+      });
+
+      assertEqual(res.status, 200, "extra fields alone are not an error");
+      assertDeepEqual(provider.calls[0].projectContext, validSnapshot, "the provider received only the defined fields");
+    });
+  });
+
+  await check("POST /api/ai/interpret rejects a malformed construction object with 400", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const tampered = JSON.parse(JSON.stringify(validSnapshot));
+      tampered.objects[0].position = { x: "0" };
+
+      const res = await fetch(`${baseUrl}/api/ai/interpret`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: "Build a wall", projectContext: tampered })
+      });
+
+      assertEqual(res.status, 400, "status");
+      const body = (await res.json()) as { error: string };
+      assertTrue(body.error.includes("projectContext.objects[0].position"), `error should name the field, got "${body.error}"`);
+      assertEqual(provider.calls.length, 0, "provider should never be called");
+    });
+  });
+
+  await check("POST /api/ai/interpret rejects a context with no objects list with 400", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const tampered = JSON.parse(JSON.stringify(validSnapshot));
+      delete tampered.objects;
+
+      const res = await fetch(`${baseUrl}/api/ai/interpret`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: "Build a wall", projectContext: tampered })
+      });
+
+      assertEqual(res.status, 400, "status");
+      assertEqual(provider.calls.length, 0, "provider should never be called");
+    });
+  });
 
   // --- Contract check: the real frontend provider against this real server ---
 

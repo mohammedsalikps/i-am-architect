@@ -77,7 +77,9 @@ const emptySnapshot: AIProjectSnapshot = {
   doorCount: 0,
   windowCount: 0,
   assemblyCount: 0,
-  selectedObjectId: null
+  selectedObjectId: null,
+  objects: [],
+  assemblies: []
 };
 
 type MockFetchCall = { url: string; init: { method: "POST"; headers: Record<string, string>; body: string } };

@@ -16,7 +16,8 @@ module ever makes a real network call (see "Verification approach").
 
 | File | Responsibility |
 |---|---|
-| `types.ts` | Shared request/response/result types, `AI_SUPPORTED_OBJECT_TYPES`, and `buildAIProjectSnapshot()`. |
+| `types.ts` | Shared request/response/result types, `AI_SUPPORTED_OBJECT_TYPES`, and `buildAIProjectSnapshot()` - the only place store data enters the AI layer, as a plain, deterministic snapshot of the current model. |
+| `parseProjectSnapshot.ts` | `parseAIProjectSnapshot()` - validates an untrusted incoming snapshot and returns a sanitized copy. Shared by the backend and the E2E mock backend. |
 | `AIProvider.ts` | The `AIProvider` interface every provider (mock or real) implements. |
 | `MockAIProvider.ts` | A deterministic, keyword-matching `AIProvider` - no network calls, no randomness. |
 | `providers/OpenAIProvider.ts` | A real, OpenAI-backed `AIProvider` - structured JSON output, injected API key and HTTP transport. See "Security boundary". |
@@ -60,7 +61,8 @@ AIPipelineResult { success, outcomes[], errors[] }
 - **No direct store or scene access.** Neither `AIProvider` nor
   `AICommandPipeline` imports `WallStore`/`PillarStore`/.../`SceneManager`/
   any Three.js type. A provider only ever sees a read-only
-  `AIProjectSnapshot` (plain counts + the selected id, built by
+  `AIProjectSnapshot` (counts, the selected id, and every current
+  object and assembly as plain, deterministic JSON, built by
   `buildAIProjectSnapshot()`) - never a live store reference. The
   pipeline's only way to cause a mutation is calling
   `commandExecutor.execute()`, exactly the same entry point the UI
@@ -198,6 +200,15 @@ as positive proof no extra (or real) request happened.**
 
 ## Limitations
 
+- **OpenAI doesn't use the construction context yet.** Every provider
+  now receives the full snapshot - each object's id, type, dimensions,
+  transform, material, color, and assembly membership - and the
+  backend validates and relays it. But `OpenAIProvider`'s system prompt
+  was deliberately left unchanged in this milestone, so it still only
+  summarizes the counts and selected id. Putting the objects in front of
+  the model is a separate prompt change. `MockAIProvider` does read the
+  context, to prove a provider can: it notes any existing object the
+  instruction names by id.
 - **`MockAIProvider`'s language understanding is still limited.** It
   only recognizes "create/add a `<type>`" style clauses via whole-word
   keyword matching (wall/pillar/beam/slab/door/window) - no

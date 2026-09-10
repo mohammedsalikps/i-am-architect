@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import type { AIProvider } from "../../src/engine/ai/AIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../../src/engine/ai/types.ts";
 import type { AIProjectSnapshot } from "../../src/engine/ai/types.ts";
+import { parseAIProjectSnapshot } from "../../src/engine/ai/parseProjectSnapshot.ts";
 import type { ObjectType } from "../../src/engine/objects/types.ts";
 
 /**
@@ -103,10 +104,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
 type ParsedInterpretRequest =
   | {
       ok: true;
@@ -116,16 +113,6 @@ type ParsedInterpretRequest =
     }
   | { ok: false; error: string };
 
-const SNAPSHOT_COUNT_FIELDS = [
-  "wallCount",
-  "pillarCount",
-  "beamCount",
-  "slabCount",
-  "doorCount",
-  "windowCount",
-  "assemblyCount"
-] as const;
-
 /**
  * Loosely validates the request body has the shape an AIProviderRequest
  * needs. Deliberately NOT a replacement for AICommandPipeline's own
@@ -134,6 +121,12 @@ const SNAPSHOT_COUNT_FIELDS = [
  * decides "is this even worth relaying to the provider", the same way
  * AICommandPipeline itself rejects an empty instruction before ever
  * calling a provider.
+ *
+ * `projectContext` is checked and sanitized by the shared
+ * parseAIProjectSnapshot() (src/engine/ai/parseProjectSnapshot.ts) - the
+ * same function the frontend's end-to-end mock backend uses - and only
+ * its rebuilt copy is passed on, so any field a client adds beyond
+ * AIProjectSnapshot's is dropped here.
  */
 function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
   if (!isPlainObject(body)) {
@@ -145,18 +138,9 @@ function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
     return { ok: false, error: '"instruction" is required and must be a non-empty string.' };
   }
 
-  const projectContext = body.projectContext;
-  if (!isPlainObject(projectContext)) {
-    return { ok: false, error: '"projectContext" is required and must be an object.' };
-  }
-  for (const field of SNAPSHOT_COUNT_FIELDS) {
-    if (!isFiniteNumber(projectContext[field])) {
-      return { ok: false, error: `"projectContext.${field}" is required and must be a number.` };
-    }
-  }
-  const selectedObjectId = projectContext.selectedObjectId;
-  if (selectedObjectId !== null && typeof selectedObjectId !== "string") {
-    return { ok: false, error: '"projectContext.selectedObjectId" must be a string or null.' };
+  const snapshot = parseAIProjectSnapshot(body.projectContext);
+  if (!snapshot.ok) {
+    return { ok: false, error: snapshot.error };
   }
 
   let availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES;
@@ -171,16 +155,7 @@ function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
   return {
     ok: true,
     instruction,
-    projectContext: {
-      wallCount: projectContext.wallCount as number,
-      pillarCount: projectContext.pillarCount as number,
-      beamCount: projectContext.beamCount as number,
-      slabCount: projectContext.slabCount as number,
-      doorCount: projectContext.doorCount as number,
-      windowCount: projectContext.windowCount as number,
-      assemblyCount: projectContext.assemblyCount as number,
-      selectedObjectId: (selectedObjectId as string | null | undefined) ?? null
-    },
+    projectContext: snapshot.snapshot,
     availableObjectTypes
   };
 }

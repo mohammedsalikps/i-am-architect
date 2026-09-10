@@ -31,6 +31,7 @@ import { AICommandPipeline } from "./AICommandPipeline.ts";
 import type { CommandExecutorLike } from "./AICommandPipeline.ts";
 import { MockAIProvider } from "./MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "./types.ts";
+import { parseAIProjectSnapshot } from "./parseProjectSnapshot.ts";
 import type { AIProjectSnapshot, AIProviderResponse, AIPipelineResult } from "./types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
@@ -71,7 +72,9 @@ const emptySnapshot: AIProjectSnapshot = {
   doorCount: 0,
   windowCount: 0,
   assemblyCount: 0,
-  selectedObjectId: null
+  selectedObjectId: null,
+  objects: [],
+  assemblies: []
 };
 
 /** A CommandExecutorLike spy - records every call it receives and returns a caller-controlled result, defaulting to success. */
@@ -183,47 +186,341 @@ async function run(): Promise<void> {
 
   // --- buildAIProjectSnapshot ---
 
-  await check("buildAIProjectSnapshot summarizes store counts and the current selection", async () => {
-    const source = {
-      wallStore: { getAll: () => [1, 2] },
-      pillarStore: { getAll: () => [1] },
-      beamStore: { getAll: () => [] },
-      slabStore: { getAll: () => [1, 2, 3] },
-      doorStore: { getAll: () => [1] },
-      windowStore: { getAll: () => [1, 1] },
-      assemblyStore: { getAll: () => [] },
-      selectionStore: { get: () => "wall-1" }
-    };
+  // Store-record fixtures shaped like the real WallData/PillarData/...
+  // records. Types are derived from the builder's own signature, so these
+  // track AIProjectSnapshotSource without a separate import.
+  type SnapshotSource = Parameters<typeof buildAIProjectSnapshot>[0];
+  type ObjectRecords = ReturnType<SnapshotSource["wallStore"]["getAll"]>;
+  type AssemblyRecords = ReturnType<SnapshotSource["assemblyStore"]["getAll"]>;
+  type RecordType = ObjectRecords[number]["type"];
 
-    assertDeepEqual(
-      buildAIProjectSnapshot(source),
-      {
-        wallCount: 2,
-        pillarCount: 1,
-        beamCount: 0,
-        slabCount: 3,
-        doorCount: 1,
-        windowCount: 2,
-        assemblyCount: 0,
-        selectedObjectId: "wall-1"
-      },
-      "snapshot"
+  function makeSnapshotSource(
+    contents: {
+      walls?: ObjectRecords;
+      pillars?: ObjectRecords;
+      doors?: ObjectRecords;
+      assemblies?: AssemblyRecords;
+      selected?: string | null;
+    } = {}
+  ): SnapshotSource {
+    return {
+      wallStore: { getAll: () => contents.walls ?? [] },
+      pillarStore: { getAll: () => contents.pillars ?? [] },
+      beamStore: { getAll: () => [] },
+      slabStore: { getAll: () => [] },
+      doorStore: { getAll: () => contents.doors ?? [] },
+      windowStore: { getAll: () => [] },
+      assemblyStore: { getAll: () => contents.assemblies ?? [] },
+      selectionStore: { get: () => contents.selected ?? null }
+    };
+  }
+
+  function objectRecord(
+    id: string,
+    type: RecordType,
+    dimensions: Record<string, number>,
+    extra: { position?: { x: number; y: number; z: number }; rotation?: number; color?: string; assemblyId?: string | null } = {}
+  ) {
+    return {
+      id,
+      type,
+      position: extra.position ?? { x: 0, y: 1.35, z: 0 },
+      rotation: extra.rotation ?? 0,
+      dimensions,
+      material: "generic",
+      color: extra.color ?? "#c9c9c9",
+      // Real records carry this reserved, never-set field - see AIContextObject.
+      assemblyId: extra.assemblyId ?? null
+    };
+  }
+
+  function wallRecord(id: string, extra: Parameters<typeof objectRecord>[3] & { length?: number } = {}) {
+    return objectRecord(id, "wall", { length: extra.length ?? 4, height: 2.7, thickness: 0.2 }, extra);
+  }
+
+  function assemblyRecord(id: string, name: string, objectIds: string[], description?: string) {
+    // Real AssemblyData carries Date.now() timestamps; the snapshot must drop them.
+    return { id, name, description, objectIds, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_500 };
+  }
+
+  /** Fails if `value` holds anything but plain JSON data - see the matching helper in e2e/verify.ts. */
+  function assertPlainJson(value: unknown, path: string, seen: Set<object> = new Set()): void {
+    if (value === null || typeof value === "string" || typeof value === "boolean") {
+      return;
+    }
+    if (typeof value === "number") {
+      assertTrue(Number.isFinite(value), `${path} must be a finite number`);
+      return;
+    }
+    assertTrue(typeof value === "object", `${path} must be plain data, got ${typeof value}`);
+    const object = value as object;
+    assertTrue(!seen.has(object), `${path} shares a reference with another part of the snapshot`);
+    seen.add(object);
+    const prototype = Object.getPrototypeOf(object);
+    assertTrue(prototype === Object.prototype || prototype === Array.prototype, `${path} must be a plain object or array`);
+    for (const [key, child] of Object.entries(object)) {
+      assertPlainJson(child, `${path}.${key}`, seen);
+    }
+  }
+
+  await check("buildAIProjectSnapshot keeps the store counts and current selection it always reported", async () => {
+    const snapshot = buildAIProjectSnapshot(
+      makeSnapshotSource({
+        walls: [wallRecord("wall-1"), wallRecord("wall-2")],
+        pillars: [objectRecord("pillar-1", "pillar", { width: 0.4, depth: 0.4, height: 2.7 })],
+        assemblies: [assemblyRecord("assembly-1", "Core", [])],
+        selected: "wall-1"
+      })
     );
+
+    assertEqual(snapshot.wallCount, 2, "wallCount");
+    assertEqual(snapshot.pillarCount, 1, "pillarCount");
+    assertEqual(snapshot.beamCount, 0, "beamCount");
+    assertEqual(snapshot.assemblyCount, 1, "assemblyCount");
+    assertEqual(snapshot.selectedObjectId, "wall-1", "selectedObjectId");
   });
 
   await check("buildAIProjectSnapshot reports selectedObjectId as null when nothing is selected", async () => {
-    const source = {
-      wallStore: { getAll: () => [] },
-      pillarStore: { getAll: () => [] },
-      beamStore: { getAll: () => [] },
-      slabStore: { getAll: () => [] },
-      doorStore: { getAll: () => [] },
-      windowStore: { getAll: () => [] },
-      assemblyStore: { getAll: () => [] },
-      selectionStore: { get: () => null }
+    assertEqual(buildAIProjectSnapshot(makeSnapshotSource()).selectedObjectId, null, "selectedObjectId");
+  });
+
+  await check("buildAIProjectSnapshot lists every current object with its id, type, dimensions, and transform", () => {
+    const snapshot = buildAIProjectSnapshot(
+      makeSnapshotSource({
+        walls: [wallRecord("wall-1", { position: { x: 1, y: 1.35, z: -2 }, rotation: 0.25, length: 5 })],
+        pillars: [
+          objectRecord("pillar-1", "pillar", { width: 0.4, depth: 0.4, height: 2.7 }, {
+            position: { x: 3, y: 1.35, z: 0 },
+            color: "#a8a8a8"
+          })
+        ]
+      })
+    );
+
+    assertDeepEqual(
+      snapshot.objects,
+      [
+        {
+          id: "pillar-1",
+          type: "pillar",
+          position: { x: 3, y: 1.35, z: 0 },
+          rotation: 0,
+          dimensions: { depth: 0.4, height: 2.7, width: 0.4 },
+          material: "generic",
+          color: "#a8a8a8",
+          assemblyIds: []
+        },
+        {
+          id: "wall-1",
+          type: "wall",
+          position: { x: 1, y: 1.35, z: -2 },
+          rotation: 0.25,
+          dimensions: { height: 2.7, length: 5, thickness: 0.2 },
+          material: "generic",
+          color: "#c9c9c9",
+          assemblyIds: []
+        }
+      ],
+      "objects, sorted by id, with dimension keys sorted"
+    );
+  });
+
+  await check("buildAIProjectSnapshot takes assembly membership from the assemblies, not the object's own assemblyId", () => {
+    const snapshot = buildAIProjectSnapshot(
+      makeSnapshotSource({
+        walls: [
+          wallRecord("wall-1"),
+          wallRecord("wall-2"),
+          // A stale value in the reserved field must not be reported as membership.
+          wallRecord("wall-3", { assemblyId: "assembly-9" })
+        ],
+        assemblies: [
+          assemblyRecord("assembly-2", "Facade", ["wall-1"]),
+          assemblyRecord("assembly-1", "Ground Floor", ["wall-2", "wall-1"], "Level 0")
+        ]
+      })
+    );
+
+    const byId = new Map(snapshot.objects.map((object) => [object.id, object]));
+    assertDeepEqual(byId.get("wall-1")?.assemblyIds, ["assembly-1", "assembly-2"], "wall-1 is in both, ids sorted");
+    assertDeepEqual(byId.get("wall-2")?.assemblyIds, ["assembly-1"], "wall-2 is in one");
+    assertDeepEqual(byId.get("wall-3")?.assemblyIds, [], "the reserved assemblyId field is ignored");
+
+    assertDeepEqual(
+      snapshot.assemblies,
+      [
+        { id: "assembly-1", name: "Ground Floor", description: "Level 0", objectIds: ["wall-2", "wall-1"] },
+        { id: "assembly-2", name: "Facade", description: null, objectIds: ["wall-1"] }
+      ],
+      "assemblies sorted by id, member order kept, no timestamps, unset description is null"
+    );
+  });
+
+  await check("buildAIProjectSnapshot is deterministic - store insertion order doesn't matter, and ids sort numerically", () => {
+    const ids = ["wall-10", "wall-2", "wall-1"];
+    const forward = buildAIProjectSnapshot(makeSnapshotSource({ walls: ids.map((id) => wallRecord(id)) }));
+    const reversed = buildAIProjectSnapshot(makeSnapshotSource({ walls: [...ids].reverse().map((id) => wallRecord(id)) }));
+
+    assertEqual(JSON.stringify(forward), JSON.stringify(reversed), "identical JSON for identical state");
+    assertDeepEqual(
+      forward.objects.map((object) => object.id),
+      ["wall-1", "wall-2", "wall-10"],
+      "wall-2 sorts before wall-10"
+    );
+  });
+
+  await check("buildAIProjectSnapshot output is plain JSON that survives a round trip unchanged", () => {
+    const snapshot = buildAIProjectSnapshot(
+      makeSnapshotSource({
+        walls: [wallRecord("wall-1")],
+        assemblies: [assemblyRecord("assembly-1", "Core", ["wall-1"])],
+        selected: "wall-1"
+      })
+    );
+
+    assertPlainJson(snapshot, "snapshot");
+    assertEqual(JSON.stringify(JSON.parse(JSON.stringify(snapshot))), JSON.stringify(snapshot), "round trip");
+  });
+
+  await check("buildAIProjectSnapshot copies only known fields - no class instances, functions, extras, or shared references", () => {
+    class FakeMesh {
+      readonly isObject3D = true;
+      geometry = { vertices: [1, 2, 3] };
+    }
+    const record = {
+      ...wallRecord("wall-1"),
+      position: { x: 0, y: 1.35, z: 0, w: 1 },
+      dimensions: { length: 4, height: 2.7, thickness: 0.2, area: () => 10, nested: { depth: 1 } },
+      mesh: new FakeMesh(),
+      dispose: () => undefined,
+      userData: { selected: true }
     };
 
-    assertEqual(buildAIProjectSnapshot(source).selectedObjectId, null, "selectedObjectId");
+    const snapshot = buildAIProjectSnapshot(makeSnapshotSource({ walls: [record] }));
+
+    assertPlainJson(snapshot, "snapshot");
+    const object = snapshot.objects[0];
+    assertDeepEqual(
+      Object.keys(object),
+      ["id", "type", "position", "rotation", "dimensions", "material", "color", "assemblyIds"],
+      "object keys"
+    );
+    assertDeepEqual(Object.keys(object.position), ["x", "y", "z"], "position keys");
+    assertDeepEqual(object.dimensions, { height: 2.7, length: 4, thickness: 0.2 }, "only finite numeric dimensions");
+
+    // Mutating the source after the fact must not reach the snapshot.
+    record.position.x = 99;
+    assertEqual(object.position.x, 0, "the snapshot holds no reference into the store record");
+  });
+
+  await check("buildAIProjectSnapshot handles an empty project", () => {
+    const snapshot = buildAIProjectSnapshot(makeSnapshotSource());
+
+    assertDeepEqual(snapshot.objects, [], "no objects");
+    assertDeepEqual(snapshot.assemblies, [], "no assemblies");
+    assertEqual(snapshot.wallCount, 0, "counts are zero");
+    assertPlainJson(snapshot, "snapshot");
+  });
+
+  // --- parseAIProjectSnapshot (shared by the backend and the E2E mock backend) ---
+
+  const richSnapshot = buildAIProjectSnapshot(
+    makeSnapshotSource({
+      walls: [wallRecord("wall-1")],
+      assemblies: [assemblyRecord("assembly-1", "Core", ["wall-1"], "Structural core")],
+      selected: "wall-1"
+    })
+  );
+
+  await check("parseAIProjectSnapshot accepts a built snapshot and returns an identical copy", () => {
+    const result = parseAIProjectSnapshot(JSON.parse(JSON.stringify(richSnapshot)));
+    assertTrue(result.ok, "a snapshot the builder produced must be accepted");
+    assertEqual(JSON.stringify(result.snapshot), JSON.stringify(richSnapshot), "identical after parsing");
+  });
+
+  await check("parseAIProjectSnapshot still accepts an empty project", () => {
+    const result = parseAIProjectSnapshot(JSON.parse(JSON.stringify(buildAIProjectSnapshot(makeSnapshotSource()))));
+    assertTrue(result.ok, "an empty project must be accepted");
+  });
+
+  await check("parseAIProjectSnapshot strips every field the snapshot doesn't define", () => {
+    const raw = JSON.parse(JSON.stringify(richSnapshot));
+    raw.injected = "top-level extra";
+    raw.objects[0].mesh = { geometry: "should never reach a provider" };
+    raw.objects[0].position.w = 1;
+    raw.assemblies[0].createdAt = 1_700_000_000_000;
+
+    const result = parseAIProjectSnapshot(raw);
+
+    assertTrue(result.ok, "extra fields alone are not an error");
+    assertEqual(JSON.stringify(result.snapshot), JSON.stringify(richSnapshot), "every extra field is gone");
+  });
+
+  await check("parseAIProjectSnapshot rejects a __proto__ key smuggled into dimensions", () => {
+    const raw = JSON.parse(JSON.stringify(richSnapshot));
+    // JSON.parse is the one way a real request can carry an own "__proto__" key.
+    raw.objects[0].dimensions = JSON.parse('{"__proto__": 1, "length": 4}');
+
+    const result = parseAIProjectSnapshot(raw);
+
+    assertTrue(!result.ok, "a __proto__ dimension key must be rejected");
+  });
+
+  await check("parseAIProjectSnapshot rejects malformed input, naming the offending field", () => {
+    const cases: { mutate: (raw: any) => void; path: string }[] = [
+      { mutate: (raw) => delete raw.objects, path: "projectContext.objects" },
+      { mutate: (raw) => (raw.assemblies = "none"), path: "projectContext.assemblies" },
+      { mutate: (raw) => (raw.wallCount = "2"), path: "projectContext.wallCount" },
+      { mutate: (raw) => (raw.objects[0].type = "roof"), path: "projectContext.objects[0].type" },
+      { mutate: (raw) => (raw.objects[0].position = { x: "1", y: 0, z: 0 }), path: "projectContext.objects[0].position" },
+      { mutate: (raw) => (raw.objects[0].rotation = null), path: "projectContext.objects[0].rotation" },
+      { mutate: (raw) => (raw.objects[0].dimensions = { length: "4" }), path: "projectContext.objects[0].dimensions" },
+      { mutate: (raw) => (raw.objects[0].assemblyIds = [1]), path: "projectContext.objects[0].assemblyIds" },
+      { mutate: (raw) => (raw.assemblies[0].objectIds = [""]), path: "projectContext.assemblies[0].objectIds" },
+      { mutate: (raw) => (raw.assemblies[0].description = 5), path: "projectContext.assemblies[0].description" }
+    ];
+
+    for (const { mutate, path } of cases) {
+      const raw = JSON.parse(JSON.stringify(richSnapshot));
+      mutate(raw);
+      const result = parseAIProjectSnapshot(raw);
+      assertTrue(!result.ok, `${path}: malformed input must be rejected`);
+      assertTrue(result.error.includes(`"${path}"`), `${path}: error should name the field, got "${result.error}"`);
+    }
+  });
+
+  // --- MockAIProvider reads the context ---
+
+  await check("MockAIProvider notes an existing object the instruction names by id", () => {
+    const projectContext = buildAIProjectSnapshot(
+      makeSnapshotSource({
+        walls: [wallRecord("wall-1")],
+        doors: [objectRecord("door-1", "door", { width: 0.9, height: 2.1, thickness: 0.05 })]
+      })
+    );
+
+    // "pillar" is matched before "door" in the keyword order, so naming the
+    // door by id doesn't change which command is produced.
+    const response = new MockAIProvider().interpret({
+      instruction: "Add a pillar beside door-1",
+      projectContext,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertDeepEqual(response.commands, [{ type: "pillar.add", pillar: {} }], "commands are unaffected");
+    assertEqual(response.notes, "Referenced existing objects: door-1 (door).", "the door was found in the context");
+  });
+
+  await check("MockAIProvider ignores ids that aren't in the context or only appear inside a longer id", () => {
+    const projectContext = buildAIProjectSnapshot(makeSnapshotSource({ walls: [wallRecord("wall-1")] }));
+
+    const response = new MockAIProvider().interpret({
+      instruction: "Add a pillar near wall-10 and door-7",
+      projectContext,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertTrue(!(response.notes ?? "").includes("Referenced existing objects"), "neither id should be reported");
   });
 
   // --- MockAIProvider: the six required deterministic example instructions ---
@@ -582,7 +879,7 @@ async function run(): Promise<void> {
 
   function makeCountingSnapshotSource(counts: { wallCount: number }) {
     return {
-      wallStore: { getAll: () => Array.from({ length: counts.wallCount }) },
+      wallStore: { getAll: () => Array.from({ length: counts.wallCount }, (_, index) => wallRecord(`wall-${index + 1}`)) },
       pillarStore: { getAll: () => [] },
       beamStore: { getAll: () => [] },
       slabStore: { getAll: () => [] },

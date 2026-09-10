@@ -130,9 +130,21 @@ Request body:
 {
   "instruction": "Create a wall and add a pillar",
   "projectContext": {
-    "wallCount": 0, "pillarCount": 0, "beamCount": 0, "slabCount": 0,
-    "doorCount": 0, "windowCount": 0, "assemblyCount": 0,
-    "selectedObjectId": null
+    "wallCount": 1, "pillarCount": 0, "beamCount": 0, "slabCount": 0,
+    "doorCount": 0, "windowCount": 0, "assemblyCount": 1,
+    "selectedObjectId": null,
+    "objects": [
+      {
+        "id": "wall-1", "type": "wall",
+        "position": { "x": 0, "y": 1.35, "z": 0 }, "rotation": 0,
+        "dimensions": { "height": 2.7, "length": 4, "thickness": 0.2 },
+        "material": "generic", "color": "#c9c9c9",
+        "assemblyIds": ["assembly-1"]
+      }
+    ],
+    "assemblies": [
+      { "id": "assembly-1", "name": "Ground Floor", "description": null, "objectIds": ["wall-1"] }
+    ]
   },
   "availableObjectTypes": ["wall", "pillar", "beam", "slab", "door", "window"]
 }
