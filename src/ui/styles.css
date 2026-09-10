@@ -33,16 +33,28 @@ button {
 
 /* ---------- Shell layout ---------- */
 /*
- * min-height (not height): 100vh. The grid's body row uses
- * minmax(360px, 1fr) so at >=1024px (where the fixed chrome rows
- * comfortably fit within any tested viewport height) it behaves like a
- * normal fill-the-screen app; if the stacked narrow layout below ever
- * needs more room than 100vh, the row - and the page - simply grow and
- * the page scrolls, instead of anything being clipped.
+ * height (not min-height): the shell is exactly one viewport tall, so
+ * no panel's content can grow the document. With min-height the body
+ * row was content-sized - selecting an object let the Properties panel
+ * stretch the row (and the page) until the command bar and status bar
+ * fell below the fold. Now the fixed chrome rows keep their heights,
+ * the body row takes whatever is left, and anything taller than its
+ * region scrolls inside that region instead: each sidebar's
+ * .tab-strip__panel at >=1024px, the whole stacked .app-body below
+ * that (see the responsive section at the end of this file).
+ *
+ * 100vh is the fallback for browsers without dvh; 100dvh excludes
+ * mobile browsers' collapsing URL bar, which 100vh counts, so the status
+ * bar isn't pushed under it.
+ *
+ * The body row keeps its 360px floor: on a window too short for the
+ * chrome plus 360px, the rows overflow the shell and the page scrolls
+ * (see index.html) rather than crushing the 3D viewport to nothing.
  */
 .app-shell {
   width: 100%;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: grid;
   grid-template-rows:
     var(--topbar-height)
@@ -57,6 +69,9 @@ button {
 .app-body {
   display: grid;
   grid-template-columns: calc(var(--rail-width) + var(--sidebar-left-width)) 1fr var(--sidebar-right-width);
+  /* One explicit row capped at the body track's height - an implicit
+     auto row would size itself to the tallest sidebar's content. */
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0; /* allow children to shrink instead of overflowing */
 }
 
@@ -839,10 +854,15 @@ button {
 /* ---------- Responsive: collapse the 3-column body below 1024px ---------- */
 
 @media (max-width: 1023px) {
+  /* The stacked sidebars and viewport scroll inside the body row, so the
+     chrome above and the command/status bars below stay on screen - the
+     same "scroll the region, not the page" rule as the three-column
+     layout, applied to the whole body instead of each sidebar panel. */
   .app-body {
     display: flex;
     flex-direction: column;
     min-height: 0;
+    overflow-y: auto;
   }
 
   .sidebar--left,

@@ -6,10 +6,13 @@
     <title>i am Architect</title>
     <style>
       /* Full-window, minimal, distraction-free viewport for the 3D workspace.
-         overflow-y is auto (not hidden): the app shell targets 100vh, but at
-         narrow widths its stacked chrome can exceed that - scrolling the page
-         is preferable to clipping content. overflow-x stays hidden so nothing
-         can ever force page-level horizontal scroll. */
+         The app shell is exactly one viewport tall and scrolls inside its own
+         regions (see src/ui/styles.css "Shell layout"), so the page itself
+         normally never scrolls. overflow-y is still auto (not hidden) as a
+         last resort for a window too short for the fixed chrome plus the
+         viewport's minimum height - scrolling the page then is preferable to
+         clipping content. overflow-x stays hidden so nothing can ever force
+         page-level horizontal scroll. */
       html,
       body {
         margin: 0;

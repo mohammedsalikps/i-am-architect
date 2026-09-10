@@ -61,8 +61,11 @@ export type AppShell = {
  *
  * Six stacked rows: top bar, main nav, construction ribbon, body
  * (left workspace / viewport / right sidebar), bottom workspace,
- * status bar. See styles.css's "Shell layout" section for how this
- * collapses at narrow widths.
+ * status bar - one child per `.app-shell` grid row, in the same order
+ * (src/ui/verify.ts checks the two stay in step). The shell is exactly
+ * one viewport tall: a panel whose content is too tall scrolls inside
+ * itself rather than growing the page. See styles.css's "Shell layout"
+ * section for details, and for how this collapses at narrow widths.
  */
 export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
