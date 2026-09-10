@@ -1,5 +1,6 @@
 import { el } from "./dom";
 import { GROUND_SIZE, GRID_DIVISIONS } from "../scene/ground";
+import { MOVE_STEP } from "../engine/manipulation/manipulationMath";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 export type StatusBarOptions = {
@@ -24,7 +25,8 @@ function statusItem(label: string, value: string): HTMLElement {
  *   - state: reflects selectionStore, so it's real.
  *   - grid: derived from ground.ts's actual GridHelper spacing, not a
  *     guessed number.
- *   - snap: "Off" because no snapping exists yet - "On" would be a lie.
+ *   - snap: the increment mouse moves and resizes change by - see
+ *     MOVE_STEP/RESIZE_STEP in engine/manipulation/manipulationMath.ts.
  *   - zoom: a static placeholder (no camera-distance plumbing added in
  *     this UI-focused milestone) - documented as a known limitation.
  */
@@ -40,7 +42,7 @@ export function createStatusBar(options: StatusBarOptions): HTMLElement {
     state,
     statusItem("Project", options.projectName),
     statusItem("Units", "Meters"),
-    statusItem("Snap", "Off"),
+    statusItem("Snap", `${MOVE_STEP} m`),
     statusItem("Grid", `${gridSize.toFixed(1)} m`),
     statusItem("Zoom", "100%")
   ]);

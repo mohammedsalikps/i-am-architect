@@ -45,6 +45,7 @@ import { MockAIProvider } from "../MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
 import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
 import { buildAIProjectContext } from "../aiProjectContext.ts";
+import { ObjectManipulator, createStoreObjectReader } from "../../manipulation/ObjectManipulator.ts";
 import type { ConstructionGeometryAnalysis } from "../geometry/types.ts";
 import type { MockBackend, MockBackendHandler } from "./mockBackend.ts";
 import type { WallData } from "../../wall/types.ts";
@@ -1064,6 +1065,149 @@ async function run(): Promise<void> {
       `Geometry relationship: ${JSON.stringify(afterRotation)}.`,
       "the provider saw the rotated geometry"
     );
+  });
+
+  // --- Mouse manipulation through the real engine ---
+  // Real ProjectContext (real stores, real *HistoryController classes, the
+  // real shared HistoryManager) -> ObjectManipulator -> update_object via
+  // the real CommandExecutor. Points are what the scene's controller would
+  // hand over after projecting the pointer onto the drag plane.
+
+  function manipulatorFor(context: ProjectContext): ObjectManipulator {
+    return new ObjectManipulator({
+      commandExecutor: context.commandExecutor,
+      history: context.history,
+      readObject: createStoreObjectReader(context)
+    });
+  }
+
+  function dragThrough(manipulator: ObjectManipulator, points: { x: number; y: number; z: number }[]): void {
+    for (const point of points) {
+      manipulator.update(point);
+    }
+    manipulator.end();
+  }
+
+  await check("mouse move of a real wall: position changes, one undo returns it, one redo moves it back", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const wallId = addThroughExecutor(context, { type: "wall.add", wall: { length: 4, position: { x: 0, z: 0 } } });
+    context.selectionStore.select(wallId);
+    context.history.clearHistory();
+
+    assertTrue(manipulator.begin(wallId, { kind: "move" }, { x: 0, y: 1.35, z: 0 }), "gesture started");
+    dragThrough(manipulator, [0.6, 1.3, 2.2, 3.1, 4.0].map((x) => ({ x, y: 1.35, z: 0.02 })));
+
+    assertSameJson(context.wallStore.get(wallId)?.position, { x: 4, y: 1.35, z: 0 }, "moved to x = 4, y untouched");
+    context.history.undo();
+    assertSameJson(context.wallStore.get(wallId)?.position, { x: 0, y: 1.35, z: 0 }, "undo: straight back to the original position");
+    assertEqual(context.history.canUndo(), false, "the whole drag was a single entry");
+    context.history.redo();
+    assertSameJson(context.wallStore.get(wallId)?.position, { x: 4, y: 1.35, z: 0 }, "redo: straight to the moved position");
+    assertEqual(context.wallStore.getAll().length, 1, "still one wall");
+    assertEqual(context.wallStore.getAll()[0].id, wallId, "same id");
+    assertEqual(context.selectionStore.get(), wallId, "still selected");
+  });
+
+  await check("mouse resize of a real wall from 4 m to 6 m by its end handle: undo gives 4, redo gives 6", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const wallId = addThroughExecutor(context, { type: "wall.add", wall: { length: 4, position: { x: 0, z: 0 } } });
+    context.history.clearHistory();
+
+    // The +X handle sits 0.35 m outside the end face at x = 2, on the base plane; drag it 2 m further.
+    assertTrue(manipulator.begin(wallId, { kind: "resize", axis: "x", side: 1 }, { x: 2.35, y: 0.15, z: 0 }), "gesture started");
+    dragThrough(manipulator, [2.9, 3.5, 4.0, 4.35].map((x) => ({ x, y: 0.15, z: 0 })));
+
+    const resized = context.wallStore.get(wallId);
+    assertEqual(resized?.dimensions.length, 6, "length is 6 m in the store");
+    assertEqual(resized?.position.x, 1, "the far end stayed at x = -2");
+    context.history.undo();
+    assertEqual(context.wallStore.get(wallId)?.dimensions.length, 4, "undo: 4 m");
+    assertEqual(context.wallStore.get(wallId)?.position.x, 0, "undo: original center");
+    assertEqual(context.history.canUndo(), false, "one entry for the whole resize");
+    context.history.redo();
+    assertEqual(context.wallStore.get(wallId)?.dimensions.length, 6, "redo: 6 m");
+    assertEqual(context.wallStore.getAll().length, 1, "still one wall");
+    assertEqual(context.wallStore.getAll()[0].id, wallId, "same id");
+  });
+
+  await check("mouse rotation of a real wall: rotation changes, undo restores the original, redo re-applies", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const wallId = addThroughExecutor(context, { type: "wall.add", wall: { position: { x: 0, z: 0 } } });
+    context.history.clearHistory();
+
+    // Grab the ring on +X and sweep a quarter turn to -Z.
+    assertTrue(manipulator.begin(wallId, { kind: "rotate" }, { x: 3, y: 0, z: 0 }), "gesture started");
+    dragThrough(manipulator, [
+      { x: 2.6, y: 0, z: -1.5 },
+      { x: 1.5, y: 0, z: -2.6 },
+      { x: 0, y: 0, z: -3 }
+    ]);
+
+    const rotated = context.wallStore.get(wallId)?.rotation ?? 0;
+    assertTrue(Math.abs(rotated - Math.PI / 2) < 1e-6, `rotated a quarter turn, got ${rotated}`);
+    context.history.undo();
+    assertEqual(context.wallStore.get(wallId)?.rotation, 0, "undo: original rotation");
+    assertEqual(context.history.canUndo(), false, "one entry for the whole rotation");
+    context.history.redo();
+    assertTrue(Math.abs((context.wallStore.get(wallId)?.rotation ?? 0) - Math.PI / 2) < 1e-6, "redo: rotated again");
+    assertEqual(context.wallStore.getAll().length, 1, "still one wall");
+    assertEqual(context.wallStore.getAll()[0].id, wallId, "same id");
+  });
+
+  await check("mouse manipulation keeps assembly membership, id, and selection, and never adds an object", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const wallId = addThroughExecutor(context, { type: "wall.add", wall: {} });
+    const assemblyId = addThroughExecutor(context, { type: "assembly.create", assembly: { name: "Ground Floor" } });
+    assertTrue(context.commandExecutor.execute({ type: "assembly.addObject", assemblyId, objectId: wallId }).success, "precondition");
+    context.selectionStore.select(wallId);
+    const snapshotBefore = buildAIProjectSnapshot(context);
+
+    manipulator.begin(wallId, { kind: "move" }, { x: 0, y: 1.35, z: 0 });
+    dragThrough(manipulator, [{ x: 1.5, y: 1.35, z: 2 }]);
+    manipulator.begin(wallId, { kind: "resize", axis: "z", side: 1 }, { x: 1.5, y: 1.35, z: 2.35 });
+    dragThrough(manipulator, [{ x: 1.5, y: 1.35, z: 2.55 }]);
+    manipulator.begin(wallId, { kind: "rotate" }, { x: 4.5, y: 0, z: 2 });
+    dragThrough(manipulator, [{ x: 1.5, y: 0, z: -1 }]);
+
+    const after = buildAIProjectSnapshot(context);
+    assertSameJson(context.assemblyStore.get(assemblyId)?.objectIds, [wallId], "still exactly this wall");
+    assertSameJson(after.objects.map((object) => [object.id, object.type, object.assemblyIds]), snapshotBefore.objects.map((object) => [object.id, object.type, object.assemblyIds]), "same objects, ids, types, memberships");
+    assertEqual(after.wallCount, 1, "no wall added");
+    assertEqual(context.selectionStore.get(), wallId, "still selected");
+  });
+
+  await check("all six object types move and resize through the real engine, each gesture one undo entry", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const readObject = createStoreObjectReader(context);
+
+    for (const type of ["wall", "pillar", "beam", "slab", "door", "window"]) {
+      const id = addThroughExecutor(context, { type: `${type}.add`, [type]: {} });
+      context.history.clearHistory();
+      const before = readObject(id);
+      assertTrue(before, `${type} exists`);
+
+      manipulator.begin(id, { kind: "move" }, { x: 0, y: 1, z: 0 });
+      dragThrough(manipulator, [{ x: 0.5, y: 1, z: 0 }, { x: 1, y: 1, z: 0.5 }]);
+      manipulator.begin(id, { kind: "resize", axis: "x", side: -1 }, { x: 0, y: 1, z: 0 });
+      dragThrough(manipulator, [{ x: -0.4, y: 1, z: 0 }]);
+
+      const after = readObject(id);
+      assertTrue(after, `${type} still exists`);
+      assertEqual(after.position.z, before.position.z + 0.5, `${type}: moved 0.5 m in Z`);
+      const xKey = Object.keys(before.dimensions).find((key) => after.dimensions[key] !== before.dimensions[key]);
+      assertTrue(xKey, `${type}: a dimension changed`);
+      assertTrue(Math.abs(after.dimensions[xKey] - before.dimensions[xKey] - 0.4) < 1e-9, `${type}.${xKey} grew by 0.4 m`);
+
+      context.history.undo();
+      context.history.undo();
+      assertSameJson(readObject(id), before, `${type}: two undos (one per gesture) restore it exactly`);
+      assertEqual(context.history.canUndo(), false, `${type}: exactly two entries`);
+    }
   });
 
   // --- Secrets and harness discipline ---

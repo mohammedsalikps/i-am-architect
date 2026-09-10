@@ -281,6 +281,8 @@ sceneManager.current = new SceneManager(
   slabStore,
   doorStore,
   windowStore,
-  selectionStore
+  selectionStore,
+  commandExecutor,
+  history
 );
 sceneManager.current.start();

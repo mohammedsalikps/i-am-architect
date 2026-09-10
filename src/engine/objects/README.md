@@ -130,6 +130,8 @@ changes.
 | Click-to-select raycasting | `SelectionRaycaster` (generic, shared across all layers) - each `<Type>Layer` only exposes `getMeshes()`; it does not listen for clicks itself. See `SelectionRaycaster.ts`'s docs for why this moved out of `WallLayer` once a second selectable type existed | Yes |
 | Selection-outline mesh | `selectionOutline.ts` (generic, shared across all layers) | Yes |
 | Scene/camera/renderer/controls lifecycle | `SceneManager` | Yes |
+| Mouse move/resize/rotate - gesture math and turning a gesture into `update_object` commands, one history group per gesture | `src/engine/manipulation/` (`manipulationMath.ts`, `ObjectManipulator.ts`) | No |
+| Manipulation handles (drawn from store state) and pointer handling | `src/scene/manipulation/` (`ManipulationHandles`, `ManipulationController`) - never writes a store or moves a construction mesh | Yes |
 | Reading/editing object data as UI | `rightSidebar.ts`, `constructionRibbon.ts` | No (goes through the store/history layer) |
 
 `src/engine/` never imports from `src/scene/` or `src/ui/` - data flows

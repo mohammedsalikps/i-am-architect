@@ -9,6 +9,11 @@ import { SlabLayer } from "./slab/SlabLayer";
 import { DoorLayer } from "./door/DoorLayer";
 import { WindowLayer } from "./window/WindowLayer";
 import { SelectionRaycaster } from "./SelectionRaycaster";
+import { ManipulationHandles } from "./manipulation/ManipulationHandles";
+import { ManipulationController } from "./manipulation/ManipulationController";
+import { ObjectManipulator, createStoreObjectReader } from "../engine/manipulation/ObjectManipulator";
+import type { ManipulationHistory } from "../engine/manipulation/ObjectManipulator";
+import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
 import type { BeamStore } from "../engine/beam/BeamStore";
@@ -52,7 +57,10 @@ export class SceneManager {
     slabStore: SlabStore,
     doorStore: DoorStore,
     windowStore: WindowStore,
-    selectionStore: SelectionStore
+    selectionStore: SelectionStore,
+    /** The shared CommandExecutor and HistoryManager - mouse manipulation edits the model only through these. */
+    commandExecutor: { execute(input: unknown): CommandResult },
+    history: ManipulationHistory
   ) {
     this.container = container;
 
@@ -99,6 +107,36 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => slabLayer.getMeshes());
     selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
     selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
+
+    // Mouse manipulation of the selected object: handles render from the
+    // stores like any layer, and every drag becomes update_object commands
+    // through the shared CommandExecutor, one history entry per gesture.
+    // See engine/manipulation/ObjectManipulator.ts. Kept alive by their
+    // own listeners, like the layers above.
+    const stores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore };
+    const readObject = createStoreObjectReader(stores);
+    const handles = new ManipulationHandles({
+      scene: this.scene,
+      selectionStore,
+      stores: [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore],
+      readObject
+    });
+    new ManipulationController({
+      container,
+      canvas: this.renderer.domElement,
+      camera: this.camera,
+      selection: selectionStore,
+      handles,
+      getObjectMeshes: () => [
+        ...wallLayer.getMeshes(),
+        ...pillarLayer.getMeshes(),
+        ...beamLayer.getMeshes(),
+        ...slabLayer.getMeshes(),
+        ...doorLayer.getMeshes(),
+        ...windowLayer.getMeshes()
+      ],
+      manipulator: new ObjectManipulator({ commandExecutor, history, readObject })
+    });
 
     window.addEventListener("resize", this.handleResize);
   }

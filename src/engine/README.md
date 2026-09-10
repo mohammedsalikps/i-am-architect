@@ -13,4 +13,10 @@ imports anywhere under this folder. See `src/scene` for rendering and
   type.
 - `history/` - generic undo/redo (`HistoryManager`) plus one adapter per
   object type (`wallHistory.ts`) that turns that type's mutations into
-  undoable commands.
+  undoable commands. `HistoryManager` groups let one gesture record
+  several commands as a single undo entry.
+- `manipulation/` - mouse move/resize/rotate of the selected object:
+  pure gesture math plus `ObjectManipulator`, which turns a gesture into
+  `update_object` commands, one history entry per gesture. The
+  Three.js/pointer side lives in `src/scene/manipulation/`. See
+  `manipulation/README.md`.
