@@ -48,6 +48,11 @@ export class ProjectMetaStore {
     this.set({ id: record.id, name: record.name, createdAt: record.createdAt, updatedAt: record.updatedAt });
   }
 
+  /** Forgets the stored project this model belonged to (it was deleted), keeping the name - the model is now unsaved. */
+  detach(): void {
+    this.set({ ...this.meta, id: null, createdAt: null, updatedAt: null });
+  }
+
   /** Back to a new, never-saved "Untitled Project" - see clearProject(). */
   reset(): void {
     this.set({ ...UNSAVED });

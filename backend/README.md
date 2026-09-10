@@ -1,104 +1,88 @@
-# AI proxy backend
+# Backend
 
-A small, dependency-free Node backend whose only job is to keep
-`OPENAI_API_KEY` off the client. It accepts a construction instruction
-and a read-only project snapshot from the frontend, calls the existing,
-unmodified `OpenAIProvider` (`src/engine/ai/providers/OpenAIProvider.ts`)
-server-side, and returns the structured commands it produced. It does
-**not** execute anything - see "Architecture" below.
+A small, dependency-free Node backend between the browser and everything
+that needs a secret. It:
+
+- signs users up, in and out (`/api/auth/*`), through Supabase Auth - or an
+  in-memory stand-in for local development;
+- stores each signed-in user's projects (`/api/projects`) in Supabase
+  PostgreSQL - or in memory - where each user reaches only their own;
+- relays AI command-interpretation requests (`/api/ai/interpret`) from a
+  signed-in user to the existing `OpenAIProvider`, keeping
+  `OPENAI_API_KEY` server-side. It does **not** execute anything - see
+  "Architecture".
 
 This is a separate, independently-installed service (its own
-`package.json`/`node_modules`/`tsconfig.json`) - it is not part of the
-Vite frontend build and does not affect `npm run build`/`npm run
-verify` at the repo root.
-
-## Why this exists
-
-`src/engine/ai/README.md`'s "Security boundary" section explains why
-`OpenAIProvider` was never wired into any browser-reachable code: this
-project's frontend is a pure client-side Vite SPA, and there is no way
-to keep an API key secret in code that ships to a browser. This backend
-is exactly the "trusted, server-side process" that section said a real
-deployment would need.
+`package.json`/`node_modules`/`tsconfig.json`) - it is not part of the Vite
+frontend build and does not affect `npm run build`/`npm run verify` at the
+repo root.
 
 ## Architecture
 
 ```
-Frontend (future)                  This backend                    OpenAI
-─────────────────                  ─────────────                   ──────
-                     POST /api/ai/interpret
-{instruction,          ──────────▶   reads OPENAI_API_KEY
- projectContext,                     (only here, only server-side)
- availableObjectTypes}               │
-                                      ▼
-                                parseAIProjectContext(projectContext)
-                                      │  (sanitize the snapshot, drop the
-                                      │   client's geometry, derive
-                                      │   geometry from the sanitized
-                                      │   snapshot - src/engine/ai/)
-                                      ▼
-                                new OpenAIProvider({apiKey, fetch})
-                                      │  (existing, unmodified logic -
-                                      │   see src/engine/ai/providers/)
-                                      ▼
-                                provider.interpret(request)  ───────▶  Chat Completions API
-                                      │                       ◀───────  structured JSON
-                     ◀──────────      │
-{commands, notes}                relays the response
-                                  exactly as returned -
-                                  no re-validation, no
-                                  reshaping, no execution
+Browser (holds only the user's own session tokens)
+   │  Authorization: Bearer <access token>
+   ▼
+createServer()  ── checks the token with the AuthService on EVERY request ──┐
+   │                                                                          │
+   ├─ /api/auth/*       → AuthService                                         │
+   │                        SupabaseAuthService → Supabase Auth (anon key)   │
+   │                        InMemoryAuthService → memory                     │
+   ├─ /api/projects     → ProjectStore.forUser(user, token)                  │
+   │                        SupabaseProjectStore → PostgREST, anon key + the │
+   │                                               user's token → Row Level  │
+   │                                               Security                  │
+   │                        InMemoryProjectStore → memory, filtered by owner │
+   └─ /api/ai/interpret → parseAIProjectContext() → OpenAIProvider (OPENAI_API_KEY)
+                          relays { commands, notes } - no execution
 ```
 
 `CommandExecutor` is never imported here, and neither is
-`AICommandPipeline` - this server has no concept of "executing" a
-command at all. Structural validation (is this a real command shape,
-object type, action?) and domain validation (invalid dimensions, etc.)
-both still happen exactly where they always have: client-side, inside
-`AICommandPipeline.run()`, which is what actually calls
-`CommandExecutor.execute()`. This backend is a transparent relay for
-one step - `AIProvider.interpret()` - with the API key kept out of the
-client. **`CommandExecutor` remains the only mutation path** because
-nothing new was inserted between a provider and it; this server sits
-entirely *before* that pipeline, not inside it.
+`AICommandPipeline` - this server has no concept of "executing" a command.
+Structural and domain validation of AI output still happen client-side,
+inside `AICommandPipeline.run()`, which is what calls
+`CommandExecutor.execute()`. **`CommandExecutor` remains the only mutation
+path.**
 
-This milestone does not add a frontend consumer of this endpoint (no
-`BackendAIProvider`, no AI chat UI) - see "Not included yet" below.
+Everything is injected: `createServer()` takes the AI provider, the
+`AuthService` and the `ProjectStore`, and every outbound transport (to
+OpenAI, to Supabase) is an injected `fetch`. `server.ts` wires the real
+ones; the tests wire test doubles, so no test can reach a real service.
 
 ## Security posture
 
-- `OPENAI_API_KEY` is read in exactly one place: `src/server.ts`, at
-  startup, via `process.env.OPENAI_API_KEY`. The server refuses to
-  start (prints a clear message, exits with a non-zero code) if it's
-  missing or blank. Nothing else in this backend - or anywhere in the
-  frontend - reads this variable.
-- CORS is restricted to a single configurable origin
-  (`FRONTEND_ORIGIN`, default `http://localhost:5173`) rather than `*`
-  - only that origin's browser code can call this endpoint from a page.
-- Request bodies are capped at 1MB (`413` beyond that) - basic,
-  dependency-free protection against an unbounded body, independent of
-  the point below. The frontend's request includes every pairwise
-  geometry relationship, about 360 bytes each. A project of about 75
-  objects therefore exceeds this cap (see `src/engine/ai/README.md`
-  "Geometry in the AI context").
-- **Client-supplied geometry is never trusted.** The provider only ever
-  sees geometry this server derived itself, from the snapshot it has just
-  validated and sanitized (`parseAIProjectContext()` in
-  `src/engine/ai/aiProjectContext.ts`). `verify.ts` sends fabricated
-  geometry and checks that the real `OpenAIProvider`'s request carries
-  the server-derived values instead.
-- **This endpoint has no authentication of its own in this milestone.**
-  Anything that can reach it (on whatever network it's deployed to) can
-  make it call OpenAI and spend the configured account's quota. That is
-  an accepted, explicitly-scoped-out tradeoff for this milestone (confirmed
-  with the requester before implementation) - **a real deployment beyond
-  local development MUST add its own access control** (an API key/shared
-  secret header checked before calling the provider, a session/auth
-  check, a gateway in front of it, etc.) before being reachable from
-  anywhere untrusted. `CreateServerOptions`/`handleRequest` in
-  `src/createServer.ts` is exactly where such a check would go - one
-  early rejection before `options.provider.interpret(...)` is ever
-  called.
+- **Secrets are read in one place.** `src/server.ts` is the only file that
+  reads `process.env`; it hands it to `readServerConfig()`
+  (`src/config.ts`). Nothing in the frontend reads a secret, and no secret
+  is ever sent to the browser or echoed in an error message.
+- **No service-role key.** The backend uses the Supabase project's anon
+  (publishable) key only. It refuses to start if `SUPABASE_ANON_KEY` holds
+  a service-role or secret key. Data requests carry the signed-in user's
+  own token, so Row Level Security decides what they can touch - the
+  backend never has a key that bypasses it.
+- **Identity comes from the token, checked on every request.** The server
+  never trusts a user id from a request body. A missing, malformed,
+  non-Bearer, expired or revoked token gets `401 { error, code:
+  "unauthorized" }` (with `WWW-Authenticate: Bearer`) before any storage
+  or AI call.
+- **Ownership is enforced by the database.** The `projects` table's
+  policies allow a user to select, insert, update and delete only rows
+  whose `user_id` is their own (`auth.uid()`); the anon role has no access
+  at all. A trigger stamps timestamps and prevents moving a project to
+  another user. In memory, `InMemoryProjectRepository` applies the same
+  rule. Another user's project answers exactly like a missing one (`404`).
+- **The AI endpoint requires a signed-in user**, so an anonymous caller
+  can't spend the OpenAI quota.
+- **Tokens stay out of logs and caches.** Failures are logged by name and
+  message only - never headers or bodies - and every response carries
+  `Cache-Control: no-store`.
+- **Client-supplied geometry is never trusted.** The provider only sees
+  geometry this server derived itself from the snapshot it has just
+  validated and sanitized (`parseAIProjectContext()`).
+- CORS is restricted to one configurable origin (`FRONTEND_ORIGIN`). That
+  is not authentication; the token check is.
+- Request bodies are capped at 1 MB (16 KB for auth routes) - `413`
+  beyond that.
 
 ## Running it
 
@@ -106,125 +90,125 @@ This milestone does not add a frontend consumer of this endpoint (no
 cd backend
 npm install
 cp .env.example .env
-# edit .env and set a real OPENAI_API_KEY
+# edit .env: set OPENAI_API_KEY, and choose account storage (below)
 npm start        # or: npm run dev (restarts on file changes)
 ```
 
-`--env-file` is a stable Node.js flag (18.20+/20.6+) - no `dotenv`
-dependency needed, consistent with the root project's own
-zero-unnecessary-dependency approach.
+The server refuses to start until account storage is chosen - it never
+assumes Supabase is configured:
 
-## Running it without an OpenAI key (mock mode)
+- **Supabase:** set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (see "Supabase
+  setup").
+- **Memory:** set `LOCAL_AUTH=memory`. Accounts and projects last until the
+  server stops - for local development only.
+
+`--env-file` is a stable Node.js flag (18.20+/20.6+) - no `dotenv`
+dependency needed.
+
+## Supabase setup
+
+1. Create a Supabase project. In **Authentication → Providers**, keep
+   **Email** enabled. With **Confirm email** on, a new account must click
+   the emailed link before signing in (the app says so); with it off, sign
+   up signs straight in.
+2. Create the `projects` table, its policies and trigger: run
+   `supabase/migrations/20260910000000_create_projects.sql` in the SQL
+   editor (or `supabase db push` from this directory with the Supabase
+   CLI). It is safe to run again.
+3. From **Project Settings → API**, copy the project URL and the **anon /
+   publishable** key into `.env` as `SUPABASE_URL` and
+   `SUPABASE_ANON_KEY`. Do **not** use the service-role / secret key.
+
+The table:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` | primary key, `gen_random_uuid()` |
+| `user_id` | `uuid` | `references auth.users on delete cascade`, default `auth.uid()` |
+| `name` | `text` | 1-120 characters |
+| `document` | `jsonb` | the `ProjectDocument` - checked to be `{ version, objects[], assemblies[] }`, at most 5 MB |
+| `object_count`, `assembly_count` | `integer` | generated from the document, for the project list |
+| `created_at`, `updated_at` | `timestamptz` | stamped by the database |
+
+## Running it without keys (mock mode)
 
 ```bash
 cd backend
 npm install
-npm run mock     # no .env, no API key needed
+npm run mock     # no .env, no API key, no Supabase needed
 ```
 
-`mockBackend.ts` starts the **same** `createServer()` this server's real
-entry point uses - same routing, CORS, validation, and status codes -
-with the deterministic keyword-matching `MockAIProvider` in place of
-`OpenAIProvider`. No OpenAI request is ever made. This is what the
-frontend's browser smoke testing runs against: the app already defaults
-to `http://localhost:8787` (see the root `.env.example`'s
+`mockBackend.ts` starts the **same** `createServer()` - same routing, CORS,
+validation, authentication checks and status codes - with the
+deterministic keyword-matching `MockAIProvider` in place of
+`OpenAIProvider`, and accounts and projects in memory. No OpenAI or Supabase
+request is ever made. There are no built-in accounts: use **Sign in →
+Create an account** in the app. The app defaults to
+`http://localhost:8787` (see the root `.env.example`'s
 `VITE_AI_BACKEND_URL`), so `npm run mock` plus `npm run dev` at the root
-gives a fully working AI command bar with zero API cost.
+gives a fully working app with zero API cost.
 
-Instructions naming a wall, pillar, beam, slab, door, or window build
-real objects; anything else returns the provider's "could not map"
-notes, which exercises the command bar's notes and error states.
+An instruction to build a new house - for example "Build a simple 2-bedroom
+house on a 10m × 8m footprint." - returns the complete, deterministic house
+plan from `src/engine/ai/housePlan.ts`.
 
-An instruction to build a new house - for example "Build a simple
-2-bedroom house on a 10m × 8m footprint." - returns the complete,
-deterministic house plan from `src/engine/ai/housePlan.ts`: a slab,
-four perimeter walls, four corner pillars, a door, and two windows,
-placed clear of whatever the project already contains. The browser
-applies it as one undoable step (see `src/engine/ai/README.md`).
+## Endpoints
 
-## Endpoint
+Every `/api/projects` and `/api/ai/interpret` request needs
+`Authorization: Bearer <access token>`.
 
-### `POST /api/ai/interpret`
+### Accounts: `/api/auth`
 
-Request body:
+| Method and path | Body | Success | Refusals |
+|---|---|---|---|
+| `POST /api/auth/signup` | `{ email, password }` | `201 { session }`, or `202 { confirmationRequired: true, email }` when the email must be confirmed first | `400` invalid email or password (8-72 characters), `409` already registered |
+| `POST /api/auth/signin` | `{ email, password }` | `200 { session }` | `401 "Wrong email or password."` (the same for an unknown email), `401` email not confirmed |
+| `POST /api/auth/refresh` | `{ refreshToken }` | `200 { session }` | `401` the refresh token is no longer valid |
+| `POST /api/auth/signout` | - (Bearer) | `204` | `401` no token |
+| `GET /api/auth/session` | - (Bearer) | `200 { user: { id, email } }` | `401` |
 
-```json
-{
-  "instruction": "Create a wall and add a pillar",
-  "projectContext": {
-    "wallCount": 1, "pillarCount": 0, "beamCount": 0, "slabCount": 0,
-    "doorCount": 0, "windowCount": 0, "assemblyCount": 1,
-    "selectedObjectId": null,
-    "objects": [
-      {
-        "id": "wall-1", "type": "wall",
-        "position": { "x": 0, "y": 1.35, "z": 0 }, "rotation": 0,
-        "dimensions": { "height": 2.7, "length": 4, "thickness": 0.2 },
-        "material": "generic", "color": "#c9c9c9",
-        "assemblyIds": ["assembly-1"]
-      }
-    ],
-    "assemblies": [
-      { "id": "assembly-1", "name": "Ground Floor", "description": null, "objectIds": ["wall-1"] }
-    ]
-  },
-  "availableObjectTypes": ["wall", "pillar", "beam", "slab", "door", "window"]
-}
-```
-
-`availableObjectTypes` is optional - it defaults to
-`AI_SUPPORTED_OBJECT_TYPES` (the same default `AICommandPipeline.run()`
-itself uses) when omitted. `projectContext` must match
-`AIProjectSnapshot`'s shape exactly (see `src/engine/ai/types.ts`).
-
-The frontend also sends a `geometry` section inside `projectContext`
-(see `src/engine/ai/README.md` "Geometry in the AI context"). The
-server never reads it. It is dropped along with any other field the
-snapshot doesn't define, and replaced by geometry the server derives
-from the sanitized snapshot with the same `analyzeConstructionGeometry()`
-the frontend runs. A missing, malformed, or fabricated `geometry` is
-therefore never an error and never reaches the provider.
-
-Responses:
-
-| Status | When | Body |
-|---|---|---|
-| `200` | The provider returned a response | `{ "commands": [...], "notes"?: "..." }` - exactly what `OpenAIProvider.interpret()` returned, unvalidated |
-| `400` | Malformed/incomplete request body | `{ "error": "..." }` |
-| `413` | Request body over 1MB | `{ "error": "Request body too large." }` |
-| `502` | The provider call failed (bad key, OpenAI error, malformed OpenAI response, etc.) | `{ "error": "..." }` - the same clear, key-free messages `OpenAIProvider` already produces |
-| `500` | An unexpected bug in this server | `{ "error": "Internal server error." }` |
+A session is `{ accessToken, refreshToken, expiresAt (ms), user: { id,
+email } }`. `429` means rate limited, `502` that the identity provider
+couldn't be reached. Without an `AuthService`, these routes answer `501`.
 
 ### Projects: `/api/projects`
 
-Project storage for the frontend's Save and Open… (see
-`src/engine/project/README.md`). Projects are kept in an
-`InMemoryProjectRepository` - by both `npm start` and `npm run mock` -
-so they last as long as the server process. `createServer()` takes the
-repository as its `projectRepository` option; without one, these routes
-answer `501`.
-
 | Method and path | Body | Success |
 |---|---|---|
-| `GET /api/projects` | - | `200 { "projects": [{ id, name, createdAt, updatedAt, objectCount, assemblyCount }] }`, most recently updated first |
-| `POST /api/projects` | `{ "name": "...", "document": ProjectDocument }` | `201 { "project": { id, name, createdAt, updatedAt, document } }` |
+| `GET /api/projects` | - | `200 { "projects": [{ id, name, createdAt, updatedAt, objectCount, assemblyCount }] }` - the user's own, most recently updated first |
+| `POST /api/projects` | `{ "name": "...", "document": ProjectDocument }` | `201 { "project": { id, ownerId, name, createdAt, updatedAt, document } }` |
 | `GET /api/projects/:id` | - | `200 { "project": ... }`, or `404` |
 | `PUT /api/projects/:id` | `{ "name": "...", "document": ProjectDocument }` | `200 { "project": ... }`, or `404` |
+| `DELETE /api/projects/:id` | - | `204`, or `404` |
 
-Every body is validated with the shared `parseProjectInput()` before it
-is stored: the name must be non-empty (at most 120 characters), and the
-document must pass `parseProjectDocument()`. A rejected body gets `400 {
-"error": "..." }` naming the problem. A storage failure gets `500 {
-"error": "Project storage failed." }` with no internal details. There
-is no authentication yet - see "Security posture".
+Every body is validated with the shared `parseProjectInput()` before it is
+stored: the name must be non-empty (at most 120 characters), and the
+document must pass `parseProjectDocument()` - a rejected body gets `400 {
+"error": "..." }` naming the problem. Signed out or expired: `401`.
+Someone else's project: `404`, like a missing one. A storage failure:
+`500 { "error": "Project storage failed." }` with no internal details.
+Without a `ProjectStore`, these routes answer `501`.
 
-### `GET /health`
+### `POST /api/ai/interpret`
 
-Returns `200 { "status": "ok" }` - a liveness check, no provider call.
+Request body `{ instruction, projectContext, availableObjectTypes? }` -
+`projectContext` must match `AIProjectSnapshot` (see
+`src/engine/ai/types.ts`); a client `geometry` section is ignored and
+replaced by server-derived geometry.
 
-### `OPTIONS *`
+| Status | When | Body |
+|---|---|---|
+| `200` | The provider returned a response | `{ "commands": [...], "notes"?: "..." }` - exactly what the provider returned, unvalidated |
+| `400` | Malformed/incomplete request body | `{ "error": "..." }` |
+| `401` | Not signed in | `{ "error": "Sign in to use the AI assistant.", "code": "unauthorized" }` |
+| `413` | Request body over 1 MB | `{ "error": "Request body too large." }` |
+| `502` | The provider call failed | `{ "error": "..." }` - `OpenAIProvider`'s own key-free messages |
 
-CORS preflight - `204`, no body.
+### `GET /health` and `OPTIONS *`
+
+`/health` returns `200 { "status": "ok" }`. `OPTIONS` is the CORS
+preflight - `204`; it allows `GET, POST, PUT, DELETE` and the
+`Content-Type` and `Authorization` headers.
 
 ## Testing
 
@@ -234,40 +218,39 @@ npm install
 npm run verify
 ```
 
-`verify.ts` follows this project's established "no test framework,
-plain assertion helpers, run directly by Node" convention. Every check
-binds the real server to an ephemeral local port and talks to it over
-`127.0.0.1` with Node's built-in `fetch` - a real HTTP round-trip
-through this server's actual code, not a mock of Node's `http`
-primitives, but never anything beyond loopback. Whether a real OpenAI
-call could ever happen is controlled by what `AIProvider` each check
-injects:
+Three suites, all deterministic, all credential-free, none reaching past
+loopback:
 
-- Most checks use a hand-rolled, HTTP-free `AIProvider` stand-in - it
-  has no code path that could reach any network.
-- A handful construct a **real `OpenAIProvider`** (proving this backend
-  genuinely reuses the existing, tested OpenAI-calling logic end to end)
-  but always with a hand-rolled mock `fetch`, exactly like
-  `src/engine/ai/providers/verify.ts` - never the real global `fetch`,
-  never a real API key. Those checks additionally assert the mock was
-  called exactly once, as positive proof no extra (or real) request
-  happened.
+- `verify.ts` - routing, request validation, the AI proxy (a stub
+  provider, or a real `OpenAIProvider` with a mocked transport), and the
+  project routes through the real `HttpProjectRepository`.
+- `auth.verify.ts` - sign up, sign in, sign out, session restore, token
+  refresh and expiry through the real browser classes; 401s on every
+  route; ownership between users; the AI endpoint's sign-in requirement;
+  token-free logs; the Supabase adapters against a mocked transport and an
+  in-process fake Supabase (Auth + PostgREST with the migration's Row
+  Level Security rule); and the server configuration.
+- `persistence.verify.ts` - the complete house saved and reopened through
+  the real server, compared, then edited by hand and by AI with undo and
+  redo, and saved again (runs with `--experimental-transform-types`).
 
-This backend's tests are **not** wired into the root project's `npm run
-verify` - they need their own `npm install` first (a separate
-`node_modules`), which someone who has only ever run the root project's
-`npm install` won't have. Run them explicitly as shown above.
+No test talks to a real Supabase project. A credentialed integration test
+against a real (non-production) project would be a separate, opt-in suite -
+see "Not included yet".
+
+These suites are **not** part of the root project's `npm run verify` -
+they need this directory's own `npm install`.
 
 ## Not included yet
 
-- **No frontend consumer.** No code under `src/` or `src/ui/` calls
-  this endpoint. A future milestone would add a thin
-  `src/engine/ai/providers/BackendAIProvider.ts` (implements the
-  existing `AIProvider` interface, `fetch`es this endpoint) and only
-  *that* class would ever be constructed with a URL - never a key.
-- **No AI chat UI.** Unchanged from every prior AI milestone.
-- **No authentication on this endpoint.** See "Security posture" above.
-- **No deployment configuration.** This is a local/dev-runnable Node
-  process; hosting it (process manager, HTTPS termination, secrets
-  storage for `OPENAI_API_KEY`, the access control above) is a separate,
-  later concern.
+- **Social login, MFA, password reset, organisations, teams, roles, SSO,
+  billing.**
+- **Rate limiting of its own.** Supabase Auth rate-limits sign-in; the
+  in-memory service does not.
+- **Local JWT verification.** Each request's token is checked with
+  Supabase Auth (`/auth/v1/user`) - one extra round trip; verifying JWTs
+  locally against the project's signing keys would remove it.
+- **A credentialed integration suite** against a real, non-production
+  Supabase project.
+- **Deployment configuration.** Hosting this process (process manager,
+  HTTPS termination, secrets storage) is a separate concern.

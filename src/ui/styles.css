@@ -138,11 +138,14 @@ button {
   flex-shrink: 0;
 }
 
+/* The one header area that gives way when space runs short: the save
+   status truncates first, so the account control stays on screen. */
 .app-header__project {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .app-header__project-label {
@@ -152,6 +155,7 @@ button {
 /* The project name is an editable field that reads as a title until focused. */
 .app-header__project-name {
   width: 200px;
+  flex-shrink: 0;
   font: inherit;
   font-weight: 500;
   color: var(--color-text);
@@ -173,6 +177,7 @@ button {
 
 .app-header__save-status {
   max-width: 260px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -180,8 +185,10 @@ button {
   color: var(--color-text-muted);
 }
 
+.app-header__save-status--created,
 .app-header__save-status--saved,
-.app-header__save-status--opened {
+.app-header__save-status--opened,
+.app-header__save-status--deleted {
   color: var(--color-success);
 }
 
@@ -273,6 +280,131 @@ button {
   color: var(--color-text-muted);
 }
 
+.project-chooser__item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.project-chooser__sign-in {
+  padding: 0 16px 16px;
+}
+
+/* ---------- Sign in / Create account ---------- */
+
+.auth-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 110; /* above the project chooser, which can open it */
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.auth-dialog[hidden] {
+  display: none;
+}
+
+.auth-dialog__panel {
+  width: min(380px, calc(100vw - 32px));
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.auth-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.auth-dialog__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.auth-dialog__reason {
+  margin: 0;
+  padding: 12px 16px 0;
+  color: var(--color-text-muted);
+}
+
+.auth-dialog__form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 16px 16px;
+}
+
+.auth-dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auth-dialog__label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.auth-dialog__input {
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+
+.auth-dialog__input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.auth-dialog__message {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border-left: 3px solid var(--color-accent);
+  border-radius: 2px;
+}
+
+.auth-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.auth-dialog__link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-accent);
+  cursor: pointer;
+}
+
+.auth-dialog__link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.auth-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 16px;
+  border-top: 1px solid var(--color-border);
+}
+
 .app-header__search {
   flex: 1 1 auto;
   min-width: 120px;
@@ -299,9 +431,50 @@ button {
   flex-shrink: 0;
 }
 
-.app-header__profile {
-  font-weight: 600;
-  font-size: 11px;
+/* Account: "Sign in", or the signed-in email and "Sign out". */
+.app-header__account {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.app-header__account-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* Narrower desktops (1024-1365 px): the inert search field and icon
+   cluster, and the brand's wordmark, give way so New/Open/Save, the
+   project name and the account control all stay on screen. */
+@media (max-width: 1365px) {
+  .app-header__search,
+  .app-header__icons,
+  .app-header__brand-name {
+    display: none;
+  }
+
+  .app-header__account {
+    margin-left: auto;
+  }
+}
+
+@media (max-width: 1100px) {
+  .app-header__project-label {
+    display: none;
+  }
+
+  .app-header__project-name {
+    width: 160px;
+  }
+
+  .app-header__account-name {
+    max-width: 120px;
+  }
 }
 
 /* ---------- Shared toolbar buttons ---------- */
@@ -326,6 +499,11 @@ button {
 
 .toolbar-button--icon {
   padding: 6px 10px;
+}
+
+.toolbar-button--danger:hover:not(:disabled) {
+  border-color: #e5746b;
+  color: #e5746b;
 }
 
 .toolbar-button--primary {

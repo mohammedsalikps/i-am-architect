@@ -2,13 +2,19 @@ import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectChooser } from "./ui/projectChooser";
-import type { ProjectOpenResult } from "./ui/projectChooser";
+import type { ProjectDeleteResult, ProjectOpenResult } from "./ui/projectChooser";
+import { createAuthDialog } from "./ui/authDialog";
 import type { RibbonActions } from "./ui/ribbonTabs";
 import { clearProject, createProjectContext } from "./engine/project/ProjectContext";
 import { firstFreeSlot } from "./engine/project/placement";
 import { HttpProjectRepository } from "./engine/project/HttpProjectRepository";
+import type { ProjectFetch } from "./engine/project/HttpProjectRepository";
 import { ProjectPersistenceController } from "./engine/project/ProjectPersistenceController";
+import { AuthController } from "./engine/auth/AuthController";
+import type { SessionStorageLike } from "./engine/auth/AuthController";
+import { HttpAuthClient } from "./engine/auth/HttpAuthClient";
 import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
+import type { BackendFetch } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
 import { getElementKind } from "./engine/elements/catalog";
 import type { ElementCategory } from "./engine/elements/catalog";
@@ -65,15 +71,46 @@ const {
 // an explicit, documented absolute default.
 const BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:8787";
 
+/** window.localStorage - or, where the browser refuses it (some privacy modes), a map that lasts for this page only. */
+function sessionStore(): SessionStorageLike {
+  try {
+    return window.localStorage;
+  } catch {
+    const memory = new Map<string, string>();
+    return {
+      getItem: (key) => memory.get(key) ?? null,
+      setItem: (key, value) => {
+        memory.set(key, value);
+      },
+      removeItem: (key) => {
+        memory.delete(key);
+      }
+    };
+  }
+}
+
+// Who is signed in. The browser keeps only the user's own session tokens
+// (in localStorage, so a reload stays signed in) - never a Supabase or
+// OpenAI key; the backend checks the token on every request. See
+// src/engine/auth/ and backend/README.md "Security posture". Every fetch
+// below is wrapped in an arrow function (not passed as a bare `fetch`
+// reference) so it's always invoked with the correct `this` - some
+// environments throw on a detached `fetch` reference.
+const auth = new AuthController({
+  client: new HttpAuthClient({ baseUrl: BACKEND_URL, fetch: (url, init) => fetch(url, init) }),
+  storage: sessionStore()
+});
+const authDialog = createAuthDialog({ auth });
+
 // BackendAIProvider never reads an environment variable or global
 // fetch itself (see its own docs) - both are supplied explicitly here,
-// the one place in the running app that constructs it. Wrapped in an
-// arrow function (not passed as a bare `fetch` reference) so it's
-// always invoked with the correct `this` - some environments throw on
-// a detached `fetch` reference.
+// the one place in the running app that constructs it. The transport is
+// the real fetch wrapped by auth.authorize(), which adds the signed-in
+// user's token (refreshing it when needed): the backend only answers AI
+// requests from a signed-in user.
 const aiProvider = new BackendAIProvider({
   baseUrl: BACKEND_URL,
-  fetch: (url, init) => fetch(url, init)
+  fetch: auth.authorize((url: string, init: Parameters<BackendFetch>[1]) => fetch(url, init))
 });
 
 // Constructed once, here, from the SAME shared commandExecutor every
@@ -100,18 +137,27 @@ const aiService = new AIService({
   }
 });
 
-/** Wired into the command bar's "AI Prompt" tab (see ui/commandBar.ts) - the only path from a typed instruction to AICommandPipeline. */
-function submitAiInstruction(instruction: string): Promise<AIPipelineResult> {
+/**
+ * Wired into the command bar's "AI Prompt" tab (see ui/commandBar.ts) - the
+ * only path from a typed instruction to AICommandPipeline. Signed out, the
+ * user is asked to sign in first; if they decline, the backend refuses the
+ * request and the command bar shows why.
+ */
+async function submitAiInstruction(instruction: string): Promise<AIPipelineResult> {
+  if (!auth.isSignedIn()) {
+    await authDialog.open("Sign in to use the AI assistant.");
+  }
   return aiService.submit(instruction);
 }
 
 // Project storage goes through the backend's /api/projects routes - the
 // browser holds no storage credential of any kind (see
-// src/engine/project/README.md). Same injected-transport rule as
-// BackendAIProvider above.
+// src/engine/project/README.md). Same injected, token-adding transport as
+// BackendAIProvider above: the backend stores and returns only the
+// signed-in user's projects.
 const projectRepository = new HttpProjectRepository({
   baseUrl: BACKEND_URL,
-  fetch: (url, init) => fetch(url, init)
+  fetch: auth.authorize((url: string, init: Parameters<ProjectFetch>[1]) => fetch(url, init))
 });
 const persistence = new ProjectPersistenceController({ repository: projectRepository, project });
 
@@ -338,11 +384,13 @@ function modelHasContent(): boolean {
 
 /**
  * "New Project": empties the model - objects, assemblies, selection, and
- * undo history - and starts a new, unsaved "Untitled Project", through
- * clearProject() (see ProjectContext.ts). When there is anything to lose
- * the user confirms first.
+ * undo history - through clearProject() (see ProjectContext.ts), and
+ * starts a new "Untitled Project". Signed in, that project is created in
+ * the user's account straight away (empty, owned by them); signed out, it
+ * stays unsaved until they sign in and Save. Other saved projects are
+ * never touched. When there is anything to lose the user confirms first.
  */
-function newProject(): void {
+async function newProject(): Promise<void> {
   if (persistence.isBusy()) {
     return;
   }
@@ -351,12 +399,70 @@ function newProject(): void {
   }
   clearProject(project);
   persistence.reset();
+  if (auth.isSignedIn()) {
+    await persistence.createProject();
+  }
 }
 
-/** "Save": stores the model under the project's name - see ProjectPersistenceController.save(). Never an undo step. */
-function saveProject(): void {
-  void persistence.save();
+/**
+ * "Save": stores the model under the project's name - see
+ * ProjectPersistenceController.save(). Never an undo step. Saving needs an
+ * account: signed out - or when the session turns out to have expired -
+ * the user is asked to sign in, and the save goes ahead once they have.
+ */
+async function saveProject(): Promise<void> {
+  if (persistence.isBusy()) {
+    return;
+  }
+  if (!auth.isSignedIn() && !(await authDialog.open("Sign in to save your project."))) {
+    return;
+  }
+  const saved = await persistence.save();
+  if (!saved && persistence.getState().authRequired && (await authDialog.open("Your session expired - sign in again to save your project."))) {
+    await persistence.save();
+  }
 }
+
+/** Deletes one saved project from the chooser, after the user confirms. The workspace is never cleared. */
+async function deleteSavedProject(id: string, name: string): Promise<ProjectDeleteResult> {
+  if (!window.confirm(`Delete "${name}"? It will be removed from your saved projects. This can't be undone.`)) {
+    return { deleted: false };
+  }
+  const deleted = await persistence.deleteProject(id, name);
+  return deleted ? { deleted: true } : { deleted: false, error: persistence.getState().message ?? "The project could not be deleted." };
+}
+
+/**
+ * "Sign out": the workspace is cleared too, so the next person at this
+ * browser doesn't see the project - after a confirmation when there's
+ * anything to lose.
+ */
+async function signOut(): Promise<void> {
+  if (persistence.isBusy()) {
+    return;
+  }
+  if (modelHasContent() && !window.confirm("Sign out? The model in the workspace will be cleared - save first to keep it.")) {
+    return;
+  }
+  clearProject(project);
+  persistence.reset();
+  await auth.signOut();
+}
+
+// A project belongs to the account that saved it. If a different user
+// signs in (say, after a session expired), the open model becomes unsaved
+// for them - their Save creates a project of their own, never a write to
+// someone else's.
+let signedInUserId: string | null = null;
+auth.subscribe((state) => {
+  if (state.status !== "signed-in" || !state.user) {
+    return;
+  }
+  if (signedInUserId !== null && signedInUserId !== state.user.id) {
+    projectMeta.detach();
+  }
+  signedInUserId = state.user.id;
+});
 
 /**
  * Opens a saved project from the chooser, replacing the current model
@@ -373,7 +479,10 @@ async function openSavedProject(id: string, name: string): Promise<ProjectOpenRe
 
 const projectChooser = createProjectChooser({
   listProjects: () => persistence.listProjects(),
-  onOpen: openSavedProject
+  onOpen: openSavedProject,
+  onDelete: deleteSavedProject,
+  isSignedIn: () => auth.isSignedIn(),
+  onSignIn: () => authDialog.open("Sign in to see your saved projects.")
 });
 
 /**
@@ -446,13 +555,16 @@ const snapSettings = new SnapSettings();
 const shell = createAppShell({
   projectMeta,
   persistence,
+  auth,
+  onSignIn: () => void authDialog.open(),
+  onSignOut: () => void signOut(),
   onViewChange: (preset) => sceneManager.current?.setView(preset),
   ribbonActions,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
-  onNewProject: newProject,
+  onNewProject: () => void newProject(),
   onOpenProject: () => projectChooser.open(),
-  onSaveProject: saveProject,
+  onSaveProject: () => void saveProject(),
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   onSubmitAiInstruction: submitAiInstruction,
@@ -471,8 +583,8 @@ const shell = createAppShell({
 });
 
 appRoot.append(shell.root);
-// Outside the shell's six-row grid - it's a fixed overlay.
-document.body.append(projectChooser.element);
+// Outside the shell's six-row grid - they're fixed overlays.
+document.body.append(projectChooser.element, authDialog.element);
 
 sceneManager.current = new SceneManager(
   shell.viewportContainer,
@@ -489,3 +601,6 @@ sceneManager.current = new SceneManager(
   snapSettings
 );
 sceneManager.current.start();
+
+// Restore a stored session, if any, and confirm it with the backend.
+void auth.start();

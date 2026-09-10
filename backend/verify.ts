@@ -42,8 +42,11 @@ import type { OpenAIFetch, OpenAIHttpResponse } from "../src/engine/ai/providers
 import { BackendAIProvider } from "../src/engine/ai/providers/BackendAIProvider.ts";
 import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
 import { buildSimpleHousePlan } from "../src/engine/ai/housePlan.ts";
-import { InMemoryProjectRepository } from "../src/engine/project/InMemoryProjectRepository.ts";
+import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepository.ts";
+import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
 import { HttpProjectRepository } from "../src/engine/project/HttpProjectRepository.ts";
+import type { ProjectFetch } from "../src/engine/project/HttpProjectRepository.ts";
+import type { AuthSession } from "../src/engine/auth/types.ts";
 import { ProjectNotFoundError, ProjectValidationError } from "../src/engine/project/ProjectRepository.ts";
 import type { ProjectDocument } from "../src/engine/project/projectDocument.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../src/engine/ai/types.ts";
@@ -772,21 +775,49 @@ async function run(): Promise<void> {
     assemblies: [{ id: "assembly-1", name: "Ground Floor", objectIds: ["wall-3"], createdAt: 1, updatedAt: 2 }]
   };
   const noProvider = () => makeFakeProvider(() => ({ commands: [] }));
+  /** A server with sign-in and project storage in memory - what mockBackend.ts starts. */
+  const authedOptions = () => ({
+    provider: noProvider(),
+    frontendOrigin: FRONTEND_ORIGIN,
+    authService: new InMemoryAuthService(),
+    projectStore: new InMemoryProjectStore()
+  });
 
-  await check("the real HttpProjectRepository creates, reads, lists and saves projects through this real server", async () => {
-    const projectRepository = new InMemoryProjectRepository();
-    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository }, async (baseUrl) => {
-      const client = new HttpProjectRepository({ baseUrl, fetch: (url, init) => fetch(url, init) });
+  /**
+   * Signs a new user up through the real /api/auth/signup and returns their
+   * session, plus a transport that sends their token - what the browser's
+   * AuthController.authorize() does (auth.verify.ts runs the real one).
+   */
+  async function signUpThrough(baseUrl: string, email: string) {
+    const res = await fetch(`${baseUrl}/api/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "correct horse battery" })
+    });
+    assertEqual(res.status, 201, `signing up ${email}`);
+    const { session } = (await res.json()) as { session: AuthSession };
+    const authedFetch: ProjectFetch = (url, init) =>
+      fetch(url, { ...init, headers: { ...init.headers, Authorization: `Bearer ${session.accessToken}` } });
+    return { session, user: session.user, fetch: authedFetch };
+  }
+
+  await check("the real HttpProjectRepository creates, reads, lists, saves and deletes a signed-in user's projects through this real server", async () => {
+    const options = authedOptions();
+    await withServer(options, async (baseUrl) => {
+      const { user, fetch: authedFetch } = await signUpThrough(baseUrl, "owner@example.com");
+      const client = new HttpProjectRepository({ baseUrl, fetch: authedFetch });
+      const projectRepository = options.projectStore.forUser(user);
 
       const created = await client.create({ name: "My 2 Bedroom House", document: oneWallDocument });
       assertEqual(created.name, "My 2 Bedroom House", "name");
+      assertEqual(created.ownerId, user.id, "owned by the signed-in user");
       assertDeepEqual(created.document, oneWallDocument, "the document round-tripped unchanged");
       assertDeepEqual(await client.get(created.id), created, "read back");
 
       const saved = await client.save(created.id, { name: "Renamed", document: emptyDocument });
       assertEqual(saved.id, created.id, "the same project");
       assertEqual(saved.name, "Renamed", "renamed");
-      assertDeepEqual((await projectRepository.get(created.id))?.document, emptyDocument, "the server's repository holds the saved document");
+      assertDeepEqual((await projectRepository.get(created.id))?.document, emptyDocument, "the server's store holds the saved document");
 
       const list = await client.list();
       assertDeepEqual(
@@ -803,14 +834,31 @@ async function run(): Promise<void> {
         notFound = error instanceof ProjectNotFoundError;
       }
       assertTrue(notFound, "saving an unknown project is ProjectNotFoundError");
+
+      await client.delete(created.id);
+      assertEqual(await client.get(created.id), null, "deleted");
+      assertEqual((await projectRepository.list()).length, 0, "and gone from the server's store");
+      let deletedAgain = false;
+      try {
+        await client.delete(created.id);
+      } catch (error) {
+        deletedAgain = error instanceof ProjectNotFoundError;
+      }
+      assertTrue(deletedAgain, "deleting it again is ProjectNotFoundError");
     });
   });
 
   await check("POST and PUT /api/projects reject an invalid name or document with a clear 400 and store nothing", async () => {
-    const projectRepository = new InMemoryProjectRepository();
-    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository }, async (baseUrl) => {
+    const options = authedOptions();
+    await withServer(options, async (baseUrl) => {
+      const { user, session, fetch: authedFetch } = await signUpThrough(baseUrl, "validation@example.com");
+      const projectRepository = options.projectStore.forUser(user);
       const send = (method: string, path: string, body: string) =>
-        fetch(`${baseUrl}${path}`, { method, headers: { "Content-Type": "application/json" }, body });
+        fetch(`${baseUrl}${path}`, {
+          method,
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.accessToken}` },
+          body
+        });
       const wall = oneWallDocument.objects[0];
       const cases: [unknown, string][] = [
         [{ name: "", document: emptyDocument }, "non-empty"],
@@ -836,7 +884,7 @@ async function run(): Promise<void> {
 
       let rejected = false;
       try {
-        await new HttpProjectRepository({ baseUrl, fetch: (url, init) => fetch(url, init) }).create({
+        await new HttpProjectRepository({ baseUrl, fetch: authedFetch }).create({
           name: "X",
           document: { version: 2 } as unknown as ProjectDocument
         });
@@ -847,17 +895,25 @@ async function run(): Promise<void> {
     });
   });
 
-  await check("project routes: 404 for an unknown or malformed id, 405 for other methods, CORS allows GET and PUT, 501 without a repository", async () => {
-    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository: new InMemoryProjectRepository() }, async (baseUrl) => {
-      assertEqual((await fetch(`${baseUrl}/api/projects/nope`)).status, 404, "unknown id");
-      assertEqual((await fetch(`${baseUrl}/api/projects/${encodeURIComponent("../etc/passwd")}`)).status, 404, "malformed id");
-      assertEqual((await fetch(`${baseUrl}/api/projects`, { method: "DELETE" })).status, 405, "DELETE isn't offered");
+  await check("project routes: 401 when signed out, 404 for an unknown or malformed id, 405 for other methods, CORS allows DELETE and Authorization, 501 without storage", async () => {
+    await withServer(authedOptions(), async (baseUrl) => {
+      const signedOut = await fetch(`${baseUrl}/api/projects`);
+      assertEqual(signedOut.status, 401, "signed out");
+      assertEqual(((await signedOut.json()) as { code: string }).code, "unauthorized", "with a machine-readable code");
+      const { session } = await signUpThrough(baseUrl, "routes@example.com");
+      const headers = { Authorization: `Bearer ${session.accessToken}` };
+      assertEqual((await fetch(`${baseUrl}/api/projects/nope`, { headers })).status, 404, "unknown id");
+      assertEqual((await fetch(`${baseUrl}/api/projects/${encodeURIComponent("../etc/passwd")}`, { headers })).status, 404, "malformed id");
+      assertEqual((await fetch(`${baseUrl}/api/projects`, { method: "DELETE", headers })).status, 405, "DELETE on the whole collection isn't offered");
+      assertEqual((await fetch(`${baseUrl}/api/projects/nope`, { method: "PATCH", headers })).status, 405, "PATCH isn't offered");
       const preflight = await fetch(`${baseUrl}/api/projects`, { method: "OPTIONS" });
       const methods = preflight.headers.get("access-control-allow-methods") ?? "";
-      assertTrue(methods.includes("GET") && methods.includes("PUT"), `CORS allows GET and PUT, got "${methods}"`);
+      assertTrue(["GET", "POST", "PUT", "DELETE"].every((method) => methods.includes(method)), `CORS allows GET, POST, PUT and DELETE, got "${methods}"`);
+      const allowed = preflight.headers.get("access-control-allow-headers") ?? "";
+      assertTrue(allowed.includes("Authorization"), `CORS allows the Authorization header, got "${allowed}"`);
     });
     await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
-      assertEqual((await fetch(`${baseUrl}/api/projects`)).status, 501, "no repository configured");
+      assertEqual((await fetch(`${baseUrl}/api/projects`)).status, 501, "no storage configured");
     });
   });
 

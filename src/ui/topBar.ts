@@ -3,13 +3,18 @@ import { MAX_PROJECT_NAME_LENGTH } from "../engine/project/projectDocument";
 import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
+import type { AuthController } from "../engine/auth/AuthController";
 
 export type TopBarOptions = {
   projectMeta: ProjectMetaStore;
   persistence: ProjectPersistenceController;
+  /** Who is signed in - shown at the right of the bar, with Sign in / Sign out. */
+  auth: AuthController;
   onNewProject: () => void;
   onOpenProject: () => void;
   onSaveProject: () => void;
+  onSignIn: () => void;
+  onSignOut: () => void;
   onUndo: () => void;
   onRedo: () => void;
   history: HistoryManager;
@@ -17,16 +22,18 @@ export type TopBarOptions = {
 
 /**
  * Title bar: branding, a quick-access cluster (New Project/Open/Save/
- * Undo/Redo), the project's name and save status, a search field, and a
- * notifications/settings/profile icon cluster.
+ * Undo/Redo), the project's name and save status, a search field, a
+ * notifications/settings icon cluster, and the account control.
  *
- * "New Project" empties the model (see main.ts's newProject), "Open…"
+ * "New Project" starts an empty project (see main.ts's newProject), "Open…"
  * shows the project chooser (ui/projectChooser.ts), and "Save" saves the
  * model through ProjectPersistenceController. The name is an ordinary
  * text field: it renames the project on Enter or blur, and a blank name
- * is reverted. Neither renaming nor saving is an undo step. Search and
- * the icon cluster stay disabled (styled-but-inert, the same pattern used
- * elsewhere) rather than clickable no-ops.
+ * is reverted. Neither renaming nor saving is an undo step. The account
+ * control shows "Sign in" when signed out, and the user's email with
+ * "Sign out" when signed in. Search and the icon cluster stay disabled
+ * (styled-but-inert, the same pattern used elsewhere) rather than
+ * clickable no-ops.
  */
 export function createTopBar(options: TopBarOptions): HTMLElement {
   const branding = el("div", { className: "app-header__brand" }, [
@@ -107,11 +114,12 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     attrs: { role: "status", "aria-live": "polite" }
   });
   options.persistence.subscribe((state) => {
-    const busy = state.status === "saving" || state.status === "opening";
+    const busy = options.persistence.isBusy();
     saveButton.disabled = busy;
     openButton.disabled = busy;
     newProjectButton.disabled = busy;
     saveButton.textContent = state.status === "saving" ? "Saving…" : "Save";
+    newProjectButton.textContent = state.status === "creating" ? "Creating…" : "New Project";
     saveStatus.textContent = state.message ?? "";
     saveStatus.title = state.message ?? "";
     saveStatus.className = `app-header__save-status app-header__save-status--${state.status}`;
@@ -138,19 +146,39 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
       className: "toolbar-button toolbar-button--icon",
       text: "⚙", // gear
       attrs: { type: "button", disabled: "true", title: "Coming soon", "aria-label": "Settings" }
-    }),
-    el("button", {
-      className: "toolbar-button toolbar-button--icon app-header__profile",
-      text: "iA",
-      attrs: { type: "button", disabled: "true", title: "Coming soon", "aria-label": "Profile" }
     })
   ]);
+
+  const accountName = el("span", { className: "app-header__account-name" });
+  const signInButton = el("button", {
+    className: "toolbar-button toolbar-button--primary",
+    text: "Sign in",
+    attrs: { type: "button", title: "Sign in to save and open projects" }
+  });
+  signInButton.addEventListener("click", options.onSignIn);
+  const signOutButton = el("button", { className: "toolbar-button", text: "Sign out", attrs: { type: "button" } });
+  signOutButton.addEventListener("click", options.onSignOut);
+  const account = el("div", { className: "app-header__account", attrs: { role: "group", "aria-label": "Account" } }, [
+    accountName,
+    signInButton,
+    signOutButton
+  ]);
+  options.auth.subscribe((state) => {
+    const email = state.status === "signed-in" ? (state.user?.email ?? "") : "";
+    accountName.textContent = state.status === "restoring" ? "Checking sign-in…" : email;
+    accountName.title = email ? `Signed in as ${email}` : "";
+    accountName.hidden = accountName.textContent === "";
+    signInButton.hidden = state.status === "signed-in" || state.status === "restoring";
+    signInButton.disabled = state.status === "working";
+    signOutButton.hidden = state.status !== "signed-in";
+  });
 
   return el("header", { className: "app-header" }, [
     branding,
     quickAccess,
     projectArea,
     search,
-    iconCluster
+    iconCluster,
+    account
   ]);
 }

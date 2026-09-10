@@ -8,7 +8,7 @@
     "start": "node --env-file=.env src/server.ts",
     "dev": "node --env-file=.env --watch src/server.ts",
     "mock": "node mockBackend.ts",
-    "verify": "node verify.ts"
+    "verify": "node verify.ts && node auth.verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types persistence.verify.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

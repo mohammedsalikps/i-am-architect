@@ -1,18 +1,25 @@
 import { createServer } from "./src/createServer.ts";
+import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
 import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
-import { InMemoryProjectRepository } from "../src/engine/project/InMemoryProjectRepository.ts";
+import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepository.ts";
 
 /**
- * A keyless stand-in for the real AI proxy backend, for frontend
- * development and browser testing without an OpenAI account.
+ * A keyless stand-in for the real backend, for frontend development and
+ * browser testing without an OpenAI account or a Supabase project.
  *
  * This is NOT a reimplementation of the server: it starts the very same
  * `createServer()` the production entry point does (src/server.ts), with
- * the same routing, CORS, request validation, and status codes. The only
- * difference is which AIProvider sits behind it - the deterministic,
- * keyword-matching MockAIProvider instead of OpenAIProvider - so no
- * OPENAI_API_KEY is needed and no OpenAI request is ever made. Projects
- * are stored in memory, exactly as the real server stores them today.
+ * the same routing, CORS, request validation, authentication checks, and
+ * status codes. The differences are only in what sits behind it:
+ *
+ * - the deterministic, keyword-matching MockAIProvider instead of
+ *   OpenAIProvider - so no OPENAI_API_KEY is needed and no OpenAI request
+ *   is ever made;
+ * - accounts and projects in memory (InMemoryAuthService,
+ *   InMemoryProjectStore) instead of Supabase - the same thing the real
+ *   server does with LOCAL_AUTH=memory. There are no built-in accounts:
+ *   create one with "Create account" in the app. Everything is gone when
+ *   this process stops.
  *
  * Run it with:
  *   npm run mock
@@ -34,12 +41,13 @@ const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 const server = createServer({
   provider: new MockAIProvider(),
   frontendOrigin,
-  projectRepository: new InMemoryProjectRepository()
+  authService: new InMemoryAuthService(),
+  projectStore: new InMemoryProjectStore()
 });
 
 server.listen(port, () => {
-  console.log(`MOCK AI proxy backend listening on http://localhost:${port}`);
+  console.log(`MOCK backend listening on http://localhost:${port}`);
   console.log(`Accepting requests from origin: ${frontendOrigin}`);
   console.log("No OpenAI key is used and no OpenAI request is made - responses are deterministic keyword matches.");
-  console.log("Projects are stored in memory - they last until this server stops.");
+  console.log("Accounts and projects are kept in memory - they last until this server stops.");
 });

@@ -22,12 +22,12 @@ import type { AIProviderRequest, AIProviderResponse } from "../types";
  * response into real mutations, exclusively through `CommandExecutor` -
  * this class has no reference to either and cannot reach them.
  *
- * No secret of any kind lives in this file: it sends no Authorization
- * header and has no concept of an API key - `OPENAI_API_KEY` is read
- * exactly once, server-side, in `backend/src/server.ts` (see
- * `backend/README.md` "Security posture"). The backend endpoint itself
- * has no authentication of its own in this milestone either, so there
- * is nothing for this class to attach even if it wanted to.
+ * No secret of any kind lives in this file, and it has no concept of an
+ * API key - `OPENAI_API_KEY` is read only server-side (see
+ * `backend/README.md` "Security posture"). The backend only answers
+ * signed-in users: in the app, the injected transport is
+ * `AuthController.authorize(fetch)` (see src/main.ts), which adds the
+ * user's own session token. This class never sees or builds that header.
  */
 
 /**
@@ -90,6 +90,19 @@ async function safeText(response: BackendHttpResponse): Promise<string> {
   } catch {
     return "<no response body>";
   }
+}
+
+/** The backend's own `{ "error": "..." }` message when the body is one (e.g. "Sign in to use the AI assistant."), otherwise the body as-is. */
+function errorDetail(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed === "object" && parsed !== null && typeof (parsed as { error?: unknown }).error === "string") {
+      return (parsed as { error: string }).error;
+    }
+  } catch {
+    // Not JSON - the text itself is the detail.
+  }
+  return body;
 }
 
 export class BackendAIProvider implements AIProvider {
@@ -156,9 +169,9 @@ export class BackendAIProvider implements AIProvider {
     }
 
     if (!httpResponse.ok) {
-      // Error 2 of 4: the request reached the backend but it rejected/failed it (400/413/502/500 - see backend/README.md).
+      // Error 2 of 4: the request reached the backend but it rejected/failed it (400/401/413/502/500 - see backend/README.md).
       const errorBody = await safeText(httpResponse);
-      throw new Error(`Backend request failed with status ${httpResponse.status}: ${errorBody}`);
+      throw new Error(`Backend request failed with status ${httpResponse.status}: ${errorDetail(errorBody)}`);
     }
 
     let payload: unknown;

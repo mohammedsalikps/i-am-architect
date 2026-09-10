@@ -1,6 +1,6 @@
 // Explicit .ts extension on this value import lets Node run this file
 // directly (the verify suites do). Harmless for Vite.
-import { ProjectNotFoundError, ProjectValidationError } from "./ProjectRepository.ts";
+import { ProjectAuthError, ProjectNotFoundError, ProjectValidationError } from "./ProjectRepository.ts";
 import type { ProjectInput, ProjectRecord, ProjectRepository, ProjectSummary } from "./ProjectRepository";
 import type { ProjectDocument } from "./projectDocument";
 
@@ -10,7 +10,9 @@ import type { ProjectDocument } from "./projectDocument";
  * credential of any kind - storage, and any storage secret, lives behind
  * the backend. Like BackendAIProvider, it never reads an environment
  * variable or a global `fetch`: both the base URL and the transport are
- * injected (main.ts supplies the real ones, tests supply mocks).
+ * injected. In the app, the transport is the signed-in user's
+ * AuthController.authorize(fetch) - which adds their session token - so
+ * the server knows whose projects these are; tests supply mocks.
  *
  * It only checks the envelope of what the server sends. A loaded
  * document is validated in full by loadProject() before it can touch the
@@ -25,7 +27,7 @@ export interface ProjectHttpResponse {
 
 export type ProjectFetch = (
   url: string,
-  init: { method: "GET" | "POST" | "PUT"; headers: Record<string, string>; body?: string; signal?: AbortSignal }
+  init: { method: "GET" | "POST" | "PUT" | "DELETE"; headers: Record<string, string>; body?: string; signal?: AbortSignal }
 ) => Promise<ProjectHttpResponse>;
 
 export interface HttpProjectRepositoryOptions {
@@ -56,6 +58,7 @@ function parseRecord(value: unknown): ProjectRecord {
   if (
     !isPlainObject(value) ||
     typeof value.id !== "string" ||
+    typeof value.ownerId !== "string" ||
     typeof value.name !== "string" ||
     typeof value.createdAt !== "string" ||
     typeof value.updatedAt !== "string" ||
@@ -65,6 +68,7 @@ function parseRecord(value: unknown): ProjectRecord {
   }
   return {
     id: value.id,
+    ownerId: value.ownerId,
     name: value.name,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
@@ -121,7 +125,7 @@ export class HttpProjectRepository implements ProjectRepository {
     if (status === 400) {
       throw new ProjectValidationError(errorText(payload));
     }
-    throw new Error(`The project server responded with status ${status}: ${errorText(payload)}`);
+    throw this.failure(status, payload);
   }
 
   async save(id: string, input: ProjectInput): Promise<ProjectRecord> {
@@ -135,7 +139,7 @@ export class HttpProjectRepository implements ProjectRepository {
     if (status === 400) {
       throw new ProjectValidationError(errorText(payload));
     }
-    throw new Error(`The project server responded with status ${status}: ${errorText(payload)}`);
+    throw this.failure(status, payload);
   }
 
   async get(id: string): Promise<ProjectRecord | null> {
@@ -146,13 +150,13 @@ export class HttpProjectRepository implements ProjectRepository {
     if (status === 404) {
       return null;
     }
-    throw new Error(`The project server responded with status ${status}: ${errorText(payload)}`);
+    throw this.failure(status, payload);
   }
 
   async list(): Promise<ProjectSummary[]> {
     const { status, payload } = await this.request("GET", PROJECTS_PATH);
     if (status !== 200) {
-      throw new Error(`The project server responded with status ${status}: ${errorText(payload)}`);
+      throw this.failure(status, payload);
     }
     if (!isPlainObject(payload) || !Array.isArray(payload.projects)) {
       throw new Error("The project server sent a malformed project list.");
@@ -160,7 +164,26 @@ export class HttpProjectRepository implements ProjectRepository {
     return payload.projects.map(parseSummary);
   }
 
-  private async request(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
+  async delete(id: string): Promise<void> {
+    const { status, payload } = await this.request("DELETE", `${PROJECTS_PATH}/${encodeURIComponent(id)}`);
+    if (status === 204 || status === 200) {
+      return;
+    }
+    if (status === 404) {
+      throw new ProjectNotFoundError(id);
+    }
+    throw this.failure(status, payload);
+  }
+
+  /** Not signed in / session expired -> ProjectAuthError; anything else -> an error naming the status. */
+  private failure(status: number, payload: unknown): Error {
+    if (status === 401 || status === 403) {
+      return new ProjectAuthError(isPlainObject(payload) && typeof payload.error === "string" ? payload.error : undefined);
+    }
+    return new Error(`The project server responded with status ${status}: ${errorText(payload)}`);
+  }
+
+  private async request(method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -182,11 +205,13 @@ export class HttpProjectRepository implements ProjectRepository {
     }
 
     let payload: unknown = null;
-    try {
-      payload = await response.json();
-    } catch {
-      if (response.ok) {
-        throw new Error("The project server sent a response that is not JSON.");
+    if (response.status !== 204) {
+      try {
+        payload = await response.json();
+      } catch {
+        if (response.ok) {
+          throw new Error("The project server sent a response that is not JSON.");
+        }
       }
     }
     return { status: response.status, payload };

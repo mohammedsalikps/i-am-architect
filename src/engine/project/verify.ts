@@ -24,13 +24,17 @@ import { clearProject, createProjectContext, loadProject, serializeProject } fro
 import type { PersistableProject, ProjectContext } from "./ProjectContext.ts";
 import { PROJECT_DOCUMENT_VERSION, parseProjectDocument } from "./projectDocument.ts";
 import type { ProjectDocument } from "./projectDocument.ts";
-import { InMemoryProjectRepository } from "./InMemoryProjectRepository.ts";
+import { InMemoryProjectRepository, InMemoryProjectStore } from "./InMemoryProjectRepository.ts";
 import { HttpProjectRepository } from "./HttpProjectRepository.ts";
 import type { ProjectFetch, ProjectHttpResponse } from "./HttpProjectRepository.ts";
-import { ProjectNotFoundError, ProjectValidationError } from "./ProjectRepository.ts";
+import { ProjectAuthError, ProjectNotFoundError, ProjectValidationError } from "./ProjectRepository.ts";
 import type { ProjectInput, ProjectRecord, ProjectRepository, ProjectSummary } from "./ProjectRepository.ts";
 import { ProjectPersistenceController } from "./ProjectPersistenceController.ts";
 import { DEFAULT_PROJECT_NAME } from "./ProjectMetaStore.ts";
+import { buildCompleteHouse } from "../testing/completeHouse.ts";
+import { ELEMENT_KINDS } from "../elements/catalog.ts";
+import { buildAIProjectSnapshot } from "../ai/types.ts";
+import { analyzeConstructionGeometry } from "../ai/geometry/analyzeConstructionGeometry.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -103,6 +107,34 @@ function modelJson(context: PersistableProject): string {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** Every object in all seven stores. */
+function allObjects(context: PersistableProject) {
+  return [
+    ...context.wallStore.getAll(),
+    ...context.pillarStore.getAll(),
+    ...context.beamStore.getAll(),
+    ...context.slabStore.getAll(),
+    ...context.doorStore.getAll(),
+    ...context.windowStore.getAll(),
+    ...context.elementStore.getAll()
+  ];
+}
+
+/** Like modelJson, but with elements too - the whole model. */
+function fullModelJson(context: PersistableProject): string {
+  return JSON.stringify({ objects: allObjects(context), assemblies: context.assemblyStore.getAll() });
+}
+
+/** One object's record in a document, by id - for reading or tampering with. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function recordIn(document: unknown, id: string): Record<string, any> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const objects = (document as { objects: Record<string, any>[] }).objects;
+  const record = objects.find((object) => object.id === id);
+  assertTrue(record, `the document has ${id}`);
+  return record;
 }
 
 /** A clock that moves one second per call, and sequential ids - deterministic repositories for tests. */
@@ -586,7 +618,8 @@ async function run(): Promise<void> {
       },
       save: (id, input) => inner.save(id, input),
       get: (id) => inner.get(id),
-      list: () => inner.list()
+      list: () => inner.list(),
+      delete: (id) => inner.delete(id)
     };
     const controller = new ProjectPersistenceController({ repository: slowRepository, project: context });
 
@@ -611,7 +644,10 @@ async function run(): Promise<void> {
         throw new Error("unreachable");
       },
       get: async () => null,
-      list: async () => []
+      list: async () => [],
+      delete: async () => {
+        throw new Error("unreachable");
+      }
     };
     const controller = new ProjectPersistenceController({ repository: failing, project: context });
 
@@ -663,6 +699,7 @@ async function run(): Promise<void> {
     const before = modelJson(context);
     const corrupt: ProjectRecord = {
       id: "corrupt",
+      ownerId: "local",
       name: "Corrupt",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -676,7 +713,10 @@ async function run(): Promise<void> {
         throw new Error("not used");
       },
       get: async (id) => (id === "corrupt" ? corrupt : null),
-      list: async () => []
+      list: async () => [],
+      delete: async () => {
+        throw new Error("not used");
+      }
     };
     const controller = new ProjectPersistenceController({ repository, project: context });
 
@@ -703,7 +743,14 @@ async function run(): Promise<void> {
 
   await check("HttpProjectRepository speaks the /api/projects contract", async () => {
     const document = serializeProject(createProjectContext());
-    const record: ProjectRecord = { id: "p1", name: "Shed", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", document };
+    const record: ProjectRecord = {
+      id: "p1",
+      ownerId: "user-1",
+      name: "Shed",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      document
+    };
     const fetchImpl = mockFetch((call) => {
       if (call.method === "GET" && call.url.endsWith("/api/projects")) {
         return jsonResponse(200, { projects: [{ id: "p1", name: "Shed", createdAt: record.createdAt, updatedAt: record.updatedAt, objectCount: 0, assemblyCount: 0 }] });
@@ -781,6 +828,307 @@ async function run(): Promise<void> {
       })(),
       "a base URL is required"
     );
+  });
+
+  // --- The complete house: every type, every field, every relationship ---
+
+  const houseContext = createProjectContext();
+  const house = buildCompleteHouse(houseContext);
+  const houseDocument = serializeProject(houseContext);
+
+  await check("the complete house serializes every object type and every element kind - each object exactly as its store holds it, and nothing transient", () => {
+    assertEqual(houseDocument.version, PROJECT_DOCUMENT_VERSION, "the document carries its version");
+    assertSameJson(
+      [...new Set(houseDocument.objects.map((object) => object.type))].sort(),
+      ["beam", "door", "element", "pillar", "slab", "wall", "window"],
+      "all seven object types"
+    );
+    const savedKinds = new Set(houseDocument.objects.map((object) => (object as { kind?: string }).kind).filter(Boolean));
+    for (const definition of ELEMENT_KINDS) {
+      assertTrue(savedKinds.has(definition.kind), `a ${definition.kind} is saved`);
+    }
+
+    const stored = allObjects(houseContext);
+    assertEqual(houseDocument.objects.length, stored.length, "every object, and no more");
+    for (const object of stored) {
+      assertSameJson(recordIn(houseDocument, object.id), object, `${object.id}: id, type, kind, label, transform, dimensions, material, color, params, host and connections - as stored`);
+    }
+    assertSameJson(houseDocument.assemblies, clone(houseContext.assemblyStore.getAll()), "every assembly");
+
+    const json = JSON.stringify(houseDocument);
+    for (const key of ["mesh", "selected", "selection", "history", "undo", "redo"]) {
+      assertTrue(!json.includes(`"${key}"`), `nothing transient is saved (no "${key}")`);
+    }
+    assertTrue(parseProjectDocument(JSON.parse(json)).ok, "and the document is valid");
+  });
+
+  await check("hosts and connections are saved as references by id, both ways, and the loaded house is identical - relationships, assembly and geometry included", () => {
+    const door = recordIn(houseDocument, house.hostedDoor);
+    assertEqual(door.hostId, house.frontWall, "the door names its wall");
+    assertEqual(door.hostPlacement?.offset, 3, "and where in it it sits");
+    const hostedWindow = recordIn(houseDocument, house.hostedWindow);
+    assertEqual(hostedWindow.hostId, house.sideWall, "the window names its wall");
+    assertEqual(hostedWindow.hostPlacement?.offset, -1.5, "offset");
+    assertTrue(hostedWindow.hostPlacement?.sill > 0, "and sill height");
+    const links = (id: string) => ((recordIn(houseDocument, id).connections ?? []) as { objectId: string }[]).map((connection) => connection.objectId);
+    for (const [a, b] of [house.supply, house.drain, house.conduit, house.cable]) {
+      assertTrue(links(a).includes(b) && links(b).includes(a), `${a} and ${b} are connected both ways`);
+    }
+
+    const target = createProjectContext();
+    const result = loadProject(target, clone(houseDocument));
+    assertTrue(result.ok, `the house loads: ${result.ok ? "" : result.error}`);
+    assertEqual(fullModelJson(target), fullModelJson(houseContext), "every object and assembly is back, ids included");
+    assertEqual(target.doorStore.get(house.hostedDoor)?.hostId, house.frontWall, "the door is back in its wall");
+    assertSameJson(
+      house.supply.map((id) => target.elementStore.get(id)),
+      house.supply.map((id) => houseContext.elementStore.get(id)),
+      "the connected supply run is restored with its connections"
+    );
+    assertSameJson(target.assemblyStore.get(house.assembly)?.objectIds, [house.rooms.Bathroom, ...house.fixtures], "the assembly's members");
+    assertSameJson(
+      analyzeConstructionGeometry(buildAIProjectSnapshot(target)),
+      analyzeConstructionGeometry(buildAIProjectSnapshot(houseContext)),
+      "the same derived geometry"
+    );
+    assertEqual(target.history.canUndo(), false, "no history after the load");
+    assertEqual(target.selectionStore.get(), null, "nothing selected");
+  });
+
+  await check("after loading the complete house, editing works: moving a wall carries its hosted openings, and undo/redo restore each state exactly", () => {
+    const target = createProjectContext();
+    assertTrue(loadProject(target, clone(houseDocument)).ok, "loaded");
+    const loaded = fullModelJson(target);
+    const wall = target.wallStore.get(house.frontWall);
+    const door = target.doorStore.get(house.hostedDoor);
+    assertTrue(wall && door, "the front wall and its door");
+
+    execute(target, {
+      type: "update_object",
+      objectId: house.frontWall,
+      changes: { position: { x: wall.position.x + 0.5, y: wall.position.y, z: wall.position.z } }
+    });
+    const moved = target.doorStore.get(house.hostedDoor);
+    assertTrue(Math.abs((moved?.position.x ?? Number.NaN) - (door.position.x + 0.5)) < 1e-9, "the door moved with its wall");
+    assertSameJson(moved?.hostPlacement, door.hostPlacement, "and kept its place in it");
+    const edited = fullModelJson(target);
+
+    target.history.undo();
+    assertEqual(fullModelJson(target), loaded, "undo restores the loaded house exactly");
+    assertEqual(target.history.canUndo(), false, "and the load itself is not an undo step");
+    target.history.redo();
+    assertEqual(fullModelJson(target), edited, "redo replays the move");
+  });
+
+  await check("a broken host, connection, element kind, or version is rejected - and the current model is left exactly as it was", () => {
+    const pillarId = houseDocument.objects.find((object) => object.type === "pillar")?.id ?? "";
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cases: [string, (document: Record<string, any>) => void][] = [
+      ["no version", (document) => delete document.version],
+      ["a version that is a string", (document) => (document.version = "1")],
+      ["a door hosted in a wall that doesn't exist", (document) => (recordIn(document, house.hostedDoor).hostId = "wall-999999")],
+      ["a door hosted in a pillar", (document) => (recordIn(document, house.hostedDoor).hostId = pillarId)],
+      ["a placement on a free-standing opening", (document) => (recordIn(document, house.hostedWindow).hostId = null)],
+      ["an opening past the end of its wall", (document) => (recordIn(document, house.hostedDoor).hostPlacement = { offset: 50, sill: 0 })],
+      [
+        "a connection to an object that doesn't exist",
+        (document) => (recordIn(document, house.supply[0]).connections = [{ endpoint: "end", objectId: "element-999999", objectEndpoint: "start" }])
+      ],
+      ["an unknown element kind", (document) => (recordIn(document, house.fixtures[0]).kind = "hovercraft")]
+    ];
+    const context = createProjectContext();
+    buildSampleProject(context);
+    const before = modelJson(context);
+
+    for (const [name, mutate] of cases) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const document = clone(houseDocument) as unknown as Record<string, any>;
+      mutate(document);
+      assertTrue(!parseProjectDocument(document).ok, `${name}: rejected by the validator`);
+      const result = loadProject(context, document);
+      assertTrue(!result.ok, `${name}: the load fails`);
+      assertEqual(modelJson(context), before, `${name}: the current model is untouched`);
+    }
+
+    // An opening saved before placements were stored has a hostId but no
+    // hostPlacement: rather than rejected, its placement is worked out from
+    // where it stands in its wall.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const older = clone(houseDocument) as unknown as Record<string, any>;
+    delete recordIn(older, house.hostedWindow).hostPlacement;
+    const reparsed = parseProjectDocument(older);
+    assertTrue(reparsed.ok, `an opening without a stored placement is accepted: ${reparsed.ok ? "" : reparsed.error}`);
+    const derived = recordIn(reparsed.document, house.hostedWindow).hostPlacement;
+    const saved = recordIn(houseDocument, house.hostedWindow).hostPlacement;
+    assertTrue(
+      Math.abs(derived.offset - saved.offset) < 1e-9 && Math.abs(derived.sill - saved.sill) < 1e-9,
+      `and its placement is re-derived from its position: ${JSON.stringify(derived)} vs ${JSON.stringify(saved)}`
+    );
+  });
+
+  // --- Ownership, create and delete ---
+
+  await check("InMemoryProjectStore: each user reaches only their own projects - another user's is indistinguishable from a missing one", async () => {
+    let id = 0;
+    const store = new InMemoryProjectStore({ newId: () => `project-${++id}` });
+    const alice = store.forUser({ id: "user-alice" });
+    const bob = store.forUser({ id: "user-bob" });
+    const document = serializeProject(createProjectContext());
+
+    const aliceProject = await alice.create({ name: "Alice's House", document });
+    assertEqual(aliceProject.ownerId, "user-alice", "owned by Alice");
+    const bobProject = await bob.create({ name: "Bob's Shed", document });
+    assertEqual(bobProject.ownerId, "user-bob", "owned by Bob");
+
+    assertSameJson((await alice.list()).map((summary) => summary.name), ["Alice's House"], "Alice lists only hers");
+    assertSameJson((await bob.list()).map((summary) => summary.name), ["Bob's Shed"], "Bob lists only his");
+    assertEqual(await bob.get(aliceProject.id), null, "Bob can't read Alice's project");
+    await assertRejects(
+      () => bob.save(aliceProject.id, { name: "Mine now", document }),
+      (error) => error instanceof ProjectNotFoundError,
+      "Bob can't overwrite it"
+    );
+    await assertRejects(() => bob.delete(aliceProject.id), (error) => error instanceof ProjectNotFoundError, "or delete it");
+    assertSameJson(await alice.get(aliceProject.id), aliceProject, "Alice's project is untouched");
+  });
+
+  await check("InMemoryProjectRepository.delete removes one project and leaves the others; a missing project is ProjectNotFoundError", async () => {
+    const repository = testRepository();
+    const document = serializeProject(createProjectContext());
+    const keep = await repository.create({ name: "Keep", document });
+    const remove = await repository.create({ name: "Remove", document });
+
+    await repository.delete(remove.id);
+    assertEqual(await repository.get(remove.id), null, "gone");
+    assertSameJson((await repository.list()).map((summary) => summary.id), [keep.id], "the other project remains");
+    await assertRejects(() => repository.delete(remove.id), (error) => error instanceof ProjectNotFoundError, "deleting it again");
+  });
+
+  await check("New Project + createProject: a new, empty Untitled Project gets its own stored identity - other saved projects are never touched", async () => {
+    const repository = testRepository();
+    const existing = await repository.create({ name: "Existing", document: validDocument });
+    const context = createProjectContext();
+    buildSampleProject(context);
+    const controller = new ProjectPersistenceController({ repository, project: context });
+
+    clearProject(context);
+    assertTrue(await controller.createProject(), "created");
+
+    const meta = context.projectMeta.get();
+    assertEqual(meta.name, DEFAULT_PROJECT_NAME, 'named "Untitled Project"');
+    assertTrue(meta.id !== null && meta.id !== existing.id, "with a new id");
+    const stored = await repository.get(meta.id ?? "");
+    assertSameJson(stored?.document, { version: 1, objects: [], assemblies: [] }, "stored as an empty document");
+    assertEqual(stored?.ownerId, "local", "owned by the repository's user");
+    assertEqual(meta.createdAt, stored?.createdAt, "the workspace knows when it was created");
+    assertSameJson(await repository.get(existing.id), existing, "the existing project is untouched");
+    assertEqual((await repository.list()).length, 2, "both are stored");
+    assertEqual(controller.getState().status, "created", "state");
+    assertEqual(controller.getState().message, `Created "${DEFAULT_PROJECT_NAME}".`, "message");
+    assertEqual(context.history.canUndo(), false, "creating is not an undo step");
+  });
+
+  await check("deleteProject: deleting another project leaves the workspace alone; deleting the open one makes it unsaved, never clears it", async () => {
+    const repository = testRepository();
+    const context = createProjectContext();
+    const sample = buildSampleProject(context);
+    const controller = new ProjectPersistenceController({ repository, project: context });
+    context.projectMeta.rename("Current");
+    assertTrue(await controller.save(), "saved");
+    const currentId = context.projectMeta.get().id ?? "";
+    const other = await repository.create({ name: "Other", document: validDocument });
+    context.selectionStore.select(sample.wall);
+    const before = modelJson(context);
+
+    assertTrue(await controller.deleteProject(other.id, "Other"), "deleted the other project");
+    assertEqual(controller.getState().message, 'Deleted "Other".', "message");
+    assertEqual(context.projectMeta.get().id, currentId, "the open project keeps its identity");
+
+    assertTrue(await controller.deleteProject(currentId, "Current"), "deleted the open project");
+    assertSameJson(context.projectMeta.get(), { id: null, name: "Current", createdAt: null, updatedAt: null }, "now unsaved, with the same name");
+    assertEqual(modelJson(context), before, "the model is untouched");
+    assertEqual(context.selectionStore.get(), sample.wall, "and so is the selection");
+    assertTrue(context.history.canUndo(), "and the undo history");
+    assertEqual((await repository.list()).length, 0, "both are gone from storage");
+
+    assertTrue(await controller.save(), "Save stores it again");
+    assertTrue(context.projectMeta.get().id !== currentId, "as a new project");
+  });
+
+  await check("a signed-out or expired session sets authRequired on every operation, so the UI can ask the user to sign in", async () => {
+    const context = createProjectContext();
+    buildSampleProject(context);
+    const denied = async (): Promise<never> => {
+      throw new ProjectAuthError();
+    };
+    const repository: ProjectRepository = { create: denied, save: denied, get: denied, list: denied, delete: denied };
+    const controller = new ProjectPersistenceController({ repository, project: context });
+    const before = modelJson(context);
+
+    assertEqual(await controller.save(), false, "save refused");
+    assertEqual(controller.getState().authRequired, true, "authRequired after save");
+    assertEqual(controller.getState().message, "Save failed: Sign in to save and open projects.", "message");
+    assertEqual(await controller.open("p1"), false, "open refused");
+    assertEqual(controller.getState().authRequired, true, "authRequired after open");
+    assertEqual(await controller.createProject(), false, "create refused");
+    assertEqual(controller.getState().authRequired, true, "authRequired after create");
+    assertEqual(await controller.deleteProject("p1", "X"), false, "delete refused");
+    assertEqual(controller.getState().authRequired, true, "authRequired after delete");
+    await assertRejects(() => controller.listProjects(), (error) => error instanceof ProjectAuthError, "listing surfaces the auth error to the chooser");
+    assertEqual(modelJson(context), before, "the model is untouched throughout");
+    assertEqual(context.projectMeta.get().id, null, "and still unsaved");
+
+    const unreachable: ProjectRepository = {
+      ...repository,
+      create: async () => {
+        throw new Error("Could not reach the project server: connection refused");
+      }
+    };
+    const other = new ProjectPersistenceController({ repository: unreachable, project: context });
+    assertEqual(await other.save(), false, "a network failure");
+    assertEqual(other.getState().authRequired, false, "doesn't ask for sign-in");
+  });
+
+  await check("HttpProjectRepository deletes, and maps 401 to ProjectAuthError on every operation", async () => {
+    const document = serializeProject(createProjectContext());
+    const deleting = mockFetch((call) =>
+      call.url.endsWith("/p1")
+        ? {
+            ok: true,
+            status: 204,
+            json: async () => {
+              throw new Error("a 204 has no body");
+            }
+          }
+        : jsonResponse(404, { error: "No saved project." })
+    );
+    const repository = new HttpProjectRepository({ baseUrl: "http://localhost:8787", fetch: deleting });
+    await repository.delete("p1");
+    await assertRejects(() => repository.delete("p2"), (error) => error instanceof ProjectNotFoundError, "404 -> ProjectNotFoundError");
+    assertSameJson(
+      deleting.calls.map((call) => `${call.method} ${call.url}`),
+      ["DELETE http://localhost:8787/api/projects/p1", "DELETE http://localhost:8787/api/projects/p2"],
+      "DELETE requests"
+    );
+
+    const signedOut = new HttpProjectRepository({
+      baseUrl: "http://localhost:8787",
+      fetch: mockFetch(() => jsonResponse(401, { error: "Your session expired - sign in again.", code: "unauthorized" }))
+    });
+    const operations: [string, () => Promise<unknown>][] = [
+      ["create", () => signedOut.create({ name: "X", document })],
+      ["save", () => signedOut.save("p1", { name: "X", document })],
+      ["get", () => signedOut.get("p1")],
+      ["list", () => signedOut.list()],
+      ["delete", () => signedOut.delete("p1")]
+    ];
+    for (const [name, operation] of operations) {
+      await assertRejects(
+        operation,
+        (error) => error instanceof ProjectAuthError && error.message === "Your session expired - sign in again.",
+        `${name}: 401 -> ProjectAuthError with the server's message`
+      );
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -23,12 +23,19 @@ import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
+import type { AuthController } from "../engine/auth/AuthController";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
   projectMeta: ProjectMetaStore;
   /** Save/Open state, rendered by the top bar - see ProjectPersistenceController. */
   persistence: ProjectPersistenceController;
+  /** Who is signed in - rendered by the top bar's account control. */
+  auth: AuthController;
+  /** Shows the sign-in dialog - see ui/authDialog.ts. */
+  onSignIn: () => void;
+  /** Signs out - see main.ts's signOut. */
+  onSignOut: () => void;
   onViewChange: (preset: ViewPreset) => void;
   /** What every ribbon tool does - see ribbonTabs.ts and main.ts. */
   ribbonActions: RibbonActions;
@@ -100,9 +107,12 @@ export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
     projectMeta: options.projectMeta,
     persistence: options.persistence,
+    auth: options.auth,
     onNewProject: options.onNewProject,
     onOpenProject: options.onOpenProject,
     onSaveProject: options.onSaveProject,
+    onSignIn: options.onSignIn,
+    onSignOut: options.onSignOut,
     onUndo: options.onUndo,
     onRedo: options.onRedo,
     history: options.history
