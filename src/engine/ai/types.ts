@@ -146,8 +146,10 @@ export interface AIProjectSnapshotSource {
  * same text before a trailing number, that number decides; otherwise
  * plain code-unit order does. Written out by hand rather than using
  * localeCompare so the result can't vary with the runtime's locale data.
+ * Exported so geometry/analyzeConstructionGeometry.ts orders objects
+ * exactly the way the snapshot does.
  */
-function compareIds(a: string, b: string): number {
+export function compareIds(a: string, b: string): number {
   const matchA = /^(.*?)(\d+)$/.exec(a);
   const matchB = /^(.*?)(\d+)$/.exec(b);
   if (matchA && matchB && matchA[1] === matchB[1]) {

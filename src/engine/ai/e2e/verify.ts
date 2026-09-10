@@ -43,6 +43,8 @@ import { BackendAIProvider } from "../providers/BackendAIProvider.ts";
 import { createMockBackend } from "./mockBackend.ts";
 import { MockAIProvider } from "../MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
+import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
+import type { ConstructionGeometryAnalysis } from "../geometry/types.ts";
 import type { MockBackend, MockBackendHandler } from "./mockBackend.ts";
 import type { WallData } from "../../wall/types.ts";
 import type { PillarData } from "../../pillar/types.ts";
@@ -104,6 +106,24 @@ function makeDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void }
     resolve = res;
   });
   return { promise, resolve };
+}
+
+/**
+ * The relationship between two objects, plus the directional facts for
+ * `first` relative to `second` - mirrored when the analysis stored the
+ * pair the other way round (it always orders a pair by id).
+ */
+function relationBetween(analysis: ConstructionGeometryAnalysis, first: string, second: string) {
+  const pair = analysis.relationships.find(
+    (relationship) => (relationship.a === first && relationship.b === second) || (relationship.a === second && relationship.b === first)
+  );
+  assertTrue(pair, `no relationship between ${first} and ${second}`);
+  const r = pair.aRelativeToB;
+  const firstRelativeToSecond =
+    pair.a === first
+      ? r
+      : { leftOf: r.rightOf, rightOf: r.leftOf, inFrontOf: r.behind, behind: r.inFrontOf, above: r.below, below: r.above };
+  return { pair, firstRelativeToSecond };
 }
 
 // --- Source scanning (requirements: no secret in frontend code or fixtures; harness never writes to a store) ---
@@ -844,6 +864,114 @@ async function run(): Promise<void> {
     assertSameJson(app.context.wallStore.get(wallId), original, "wall untouched");
     app.context.history.undo();
     assertEqual(app.context.wallStore.getAll().length, 0, "no update entry was recorded");
+  });
+
+  // --- Construction geometry analysis over the real model ---
+  // Real ProjectContext -> real stores (via CommandExecutor) -> the real
+  // snapshot builder -> analyzeConstructionGeometry(). Expected values are
+  // worked out by hand from the dimensions and positions given here.
+
+  function addThroughExecutor(context: ProjectContext, command: unknown): string {
+    const result = context.commandExecutor.execute(command);
+    assertTrue(result.success && typeof result.objectId === "string", `setup command failed: ${JSON.stringify(result)}`);
+    return result.objectId as string;
+  }
+
+  function buildGeometryModel(): { context: ProjectContext; wallA: string; wallB: string; pillar: string; beam: string } {
+    const context = createProjectContext();
+    // Two 4 m walls along X, grounded (y = height/2) by the real store rule.
+    const wallA = addThroughExecutor(context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 0, z: 0 } } });
+    const wallB = addThroughExecutor(context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 6, z: 0 } } });
+    // A pillar between the walls and 2 m in front of them.
+    const pillar = addThroughExecutor(context, {
+      type: "pillar.add",
+      pillar: { width: 0.4, depth: 0.4, height: 3, position: { x: 3, z: 2 } }
+    });
+    // A beam resting on top of the walls' height, turned 90 degrees so its 4 m length runs along Z.
+    const beam = addThroughExecutor(context, {
+      type: "beam.add",
+      beam: { length: 4, width: 0.3, height: 0.4, rotation: Math.PI / 2, position: { x: 3, y: 3.2, z: 0 } }
+    });
+    return { context, wallA, wallB, pillar, beam };
+  }
+
+  await check("geometry analysis of a real ProjectContext snapshot gives the expected boxes and relationships", () => {
+    const { context, wallA, wallB, pillar, beam } = buildGeometryModel();
+    const snapshot = buildAIProjectSnapshot(context);
+    const snapshotJson = JSON.stringify(snapshot);
+
+    const analysis = analyzeConstructionGeometry(snapshot);
+
+    assertEqual(JSON.stringify(snapshot), snapshotJson, "the snapshot is unchanged by the analysis");
+    assertEqual(analysis.invalidObjects.length, 0, "objects from the real stores are all valid");
+    assertSameJson(
+      analysis.objects.map((object) => object.id),
+      snapshot.objects.map((object) => object.id),
+      "objects come out in the snapshot's id order"
+    );
+    assertEqual(analysis.relationships.length, 6, "one relationship per pair of four objects");
+
+    const geometryOf = (id: string) => {
+      const found = analysis.objects.find((object) => object.id === id);
+      assertTrue(found, `no geometry for ${id}`);
+      return found;
+    };
+    assertSameJson(geometryOf(wallA).aabb, { min: { x: -2, y: 0, z: -0.1 }, max: { x: 2, y: 3, z: 0.1 } }, "wall A box");
+    assertSameJson(geometryOf(wallB).aabb, { min: { x: 4, y: 0, z: -0.1 }, max: { x: 8, y: 3, z: 0.1 } }, "wall B box");
+    assertSameJson(geometryOf(pillar).aabb, { min: { x: 2.8, y: 0, z: 1.8 }, max: { x: 3.2, y: 3, z: 2.2 } }, "pillar box");
+    // Rotated: the beam's length is on Z and its width on X. Unrotated it
+    // would span x 1..5 and overlap both walls on X.
+    assertSameJson(geometryOf(beam).aabb, { min: { x: 2.85, y: 3, z: -2 }, max: { x: 3.15, y: 3.4, z: 2 } }, "rotated beam box");
+    assertSameJson(geometryOf(beam).size, { x: 0.3, y: 0.4, z: 4 }, "rotated beam size");
+
+    const walls = relationBetween(analysis, wallA, wallB);
+    assertSameJson(walls.firstRelativeToSecond, { leftOf: true, rightOf: false, inFrontOf: false, behind: false, above: false, below: false }, "wall A relative to wall B");
+    assertSameJson(walls.pair.overlap, { x: false, y: true, z: true, aabb: false }, "wall A / wall B overlap");
+    assertSameJson(walls.pair.gap, { x: 2, y: 0, z: 0 }, "2 m of clear space between the walls");
+    assertEqual(walls.pair.centerDistance, 6, "wall centers are 6 m apart");
+    assertEqual(walls.pair.horizontalDistance, 6, "all of it horizontal");
+    assertEqual(walls.pair.verticalDistance, 0, "same height");
+
+    const pillarToWallA = relationBetween(analysis, pillar, wallA);
+    assertSameJson(pillarToWallA.firstRelativeToSecond, { leftOf: false, rightOf: true, inFrontOf: true, behind: false, above: false, below: false }, "pillar relative to wall A");
+    assertSameJson(pillarToWallA.pair.gap, { x: 0.8, y: 0, z: 1.7 }, "pillar / wall A gap");
+    assertEqual(pillarToWallA.pair.horizontalDistance, 3.605551275, "sqrt(3^2 + 2^2), rounded to 9 places");
+
+    const pillarToWallB = relationBetween(analysis, pillar, wallB);
+    assertSameJson(pillarToWallB.firstRelativeToSecond, { leftOf: true, rightOf: false, inFrontOf: true, behind: false, above: false, below: false }, "pillar relative to wall B");
+
+    const beamToWallA = relationBetween(analysis, beam, wallA);
+    assertSameJson(beamToWallA.firstRelativeToSecond, { leftOf: false, rightOf: true, inFrontOf: false, behind: false, above: true, below: false }, "beam relative to wall A");
+    assertSameJson(beamToWallA.pair.overlap, { x: false, y: false, z: true, aabb: false }, "beam sits on wall A's height (touching, not overlapping)");
+    assertEqual(beamToWallA.pair.verticalDistance, 1.7, "beam center 3.2 vs wall center 1.5");
+
+    const beamToWallB = relationBetween(analysis, beam, wallB);
+    assertSameJson(beamToWallB.firstRelativeToSecond, { leftOf: true, rightOf: false, inFrontOf: false, behind: false, above: true, below: false }, "beam relative to wall B");
+
+    const beamToPillar = relationBetween(analysis, beam, pillar);
+    assertSameJson(beamToPillar.firstRelativeToSecond, { leftOf: false, rightOf: false, inFrontOf: false, behind: false, above: true, below: false }, "beam directly above the pillar - no false horizontal relation");
+    assertSameJson(beamToPillar.pair.overlap, { x: true, y: false, z: true, aabb: false }, "beam / pillar overlap on X and Z only");
+  });
+
+  await check("re-analysing after a real update_object rotation reflects the object's new box", () => {
+    const { context, wallA, beam } = buildGeometryModel();
+    const before = analyzeConstructionGeometry(buildAIProjectSnapshot(context));
+
+    const result = context.commandExecutor.execute({ type: "update_object", objectId: beam, changes: { rotation: 0 } });
+    assertTrue(result.success, `update_object failed: ${JSON.stringify(result)}`);
+    const after = analyzeConstructionGeometry(buildAIProjectSnapshot(context));
+
+    assertSameJson(
+      after.objects.find((object) => object.id === beam)?.aabb,
+      { min: { x: 1, y: 3, z: -0.15 }, max: { x: 5, y: 3.4, z: 0.15 } },
+      "unrotated beam spans x 1..5"
+    );
+    assertEqual(relationBetween(before, beam, wallA).pair.overlap.x, false, "rotated: no X overlap with wall A");
+    assertEqual(relationBetween(after, beam, wallA).pair.overlap.x, true, "unrotated: overlaps wall A on X");
+    assertEqual(relationBetween(after, beam, wallA).firstRelativeToSecond.rightOf, false, "no longer entirely right of wall A");
+
+    context.history.undo();
+    assertSameJson(analyzeConstructionGeometry(buildAIProjectSnapshot(context)), before, "undo restores the original analysis exactly");
   });
 
   // --- Secrets and harness discipline ---

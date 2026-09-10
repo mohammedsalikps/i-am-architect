@@ -24,6 +24,98 @@ module ever makes a real network call (see "Verification approach").
 | `providers/verify.ts` | Node-runnable unit verification for `OpenAIProvider`, entirely against a mocked transport. |
 | `AICommandPipeline.ts` | Orchestrates one instruction end-to-end: validate input → call provider → validate output → execute via `CommandExecutor`. |
 | `verify.ts` | Node-runnable unit verification for `MockAIProvider`/`AICommandPipeline`/`buildAIProjectSnapshot()` (`npm run verify` includes this and `providers/verify.ts`). |
+| `geometry/analyzeConstructionGeometry.ts` | `analyzeConstructionGeometry()` - pure, deterministic bounding boxes and pairwise spatial facts derived from an `AIProjectSnapshot`. Not sent to any provider yet - see "Construction geometry analysis". |
+| `geometry/verify.ts` | Node-runnable unit verification for the geometry analyzer. |
+
+## Construction geometry analysis
+
+`analyzeConstructionGeometry(snapshot)` (in `geometry/`) turns an
+`AIProjectSnapshot` into plain geometric facts a later milestone can
+use for spatial reasoning. It reads only the snapshot - no stores,
+Three.js, DOM, providers, or `CommandExecutor` - never modifies it, and
+returns fresh JSON-safe data with no timestamps, so the same snapshot
+always yields byte-identical output.
+
+**What it returns.**
+
+- `objects`: one entry per object, sorted by id (the same `compareIds`
+  order as the snapshot). Each entry has its id, type, center, dimensions,
+  rotation, and axis-aligned bounding box (`aabb.min`/`aabb.max`, plus
+  `size`).
+- `relationships`: one entry per pair of objects, `a` before `b` in id
+  order. Each entry has the center delta (b minus a), the 3D,
+  horizontal (X/Z), and vertical (Y) center distances, per-axis and
+  whole-box `overlap` flags, per-axis `gap`, and where a's box lies
+  relative to b's (`aRelativeToB`).
+- `invalidObjects`: any object whose geometry can't be derived.
+
+**Coordinates.** The coordinates are the app's own, unchanged:
+
+- World X, Y, Z in meters, with +Y up.
+- `position` is the center of the object's bounding volume.
+- `rotation` is radians around the vertical Y axis, applied the way the
+  mesh builders apply it (Three.js `rotation.y`).
+
+"Left", "right", "in front of", and "behind" are named from the app's
+**Front** view preset (camera at +Z looking toward −Z):
+
+| Term | Meaning |
+|---|---|
+| `leftOf` | entirely at smaller X |
+| `rightOf` | entirely at larger X |
+| `inFrontOf` | entirely at larger Z (toward that camera) |
+| `behind` | entirely at smaller Z |
+| `above` | entirely at larger Y |
+| `below` | entirely at smaller Y |
+
+These terms refer to world axes. They don't depend on which way an
+object faces.
+
+**AABB meaning.** Each type's dimensions map to its local axes exactly
+as its mesh builder sizes its `BoxGeometry`. `geometry/verify.ts` reads
+the builders' source to keep the two in step.
+
+| Type | Local X | Local Y | Local Z |
+|---|---|---|---|
+| wall | length | height | thickness |
+| pillar | width | height | depth |
+| beam | length | height | width |
+| slab | length | thickness | width |
+| door, window | width | height | thickness |
+
+The box is rotated around its center by `rotation`, and the AABB is the
+smallest world-axis-aligned box that contains it. At 90° a wall's length
+therefore runs along Z. An AABB is exact for unrotated objects and
+over-covers rotated ones; it isn't the object's true footprint.
+
+A box's projection onto an axis "overlaps" another's only if they share
+some length. Touching faces don't overlap, and a box that touches
+another's face still counts as entirely on that side.
+
+**Precision.** Every derived number is rounded to 9 decimal places
+(`GEOMETRY_DECIMALS`). This stops floating-point noise, such as
+`cos(π/2)` not being exactly 0, from turning touching boxes into
+overlapping ones. It also makes a rotation and the same rotation plus
+any number of full turns give identical boxes.
+
+**Invalid input.** An object with an unknown type, a non-finite position
+or rotation, or a dimension that is missing, zero, or negative isn't
+given a box. It is listed in `invalidObjects`, with the same field names
+and messages its validator uses, and left out of `relationships`.
+Snapshots built from the real stores never contain such objects, because
+the stores already reject them.
+
+**What it deliberately doesn't do yet.**
+
+- The analysis isn't sent to any provider or included in the OpenAI
+  prompt.
+- No command uses it.
+- No placement relative to other objects, alignment, connection,
+  snapping, collision resolution, rooms, or planning.
+- It has no notion of an object's true (rotated) footprint, of wall
+  hosting, or of openings.
+- Relationships cover every pair, so they grow as n(n−1)/2. Whatever
+  later sends them to a model will need to choose which to include.
 
 ## Data flow
 
