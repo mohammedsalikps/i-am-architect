@@ -1,10 +1,10 @@
 # Deployment
 
 How to run i am Architect outside localhost: a real Supabase project for
-accounts and projects, the backend on an HTTPS host, the frontend on
-Vercel. No credential appears anywhere in this repository - every value
-below is something you paste into a dashboard, a gitignored `.env` file,
-or a host's secret store.
+accounts and projects, the backend on Fly.io, the frontend on Vercel. No
+credential appears anywhere in this repository - every value below is
+something you paste into a dashboard, a gitignored `.env` file, or a host's
+secret store.
 
 ```
 Browser ──HTTPS──▶ Frontend (Vercel, static files)
@@ -24,7 +24,7 @@ host only.
 | Backend | `npm run mock` | `npm start` in `backend/` | Fly.io app, e.g. `iarchitect-backend-staging` | a separate Fly.io app |
 | Accounts & projects | in memory | a **staging** Supabase project | the **staging** Supabase project | a separate **production** Supabase project |
 | AI | MockAIProvider (no key) | OpenAI | OpenAI | OpenAI |
-| Frontend | `npm run dev` | `npm run dev` | Vercel (preview or its own project) | Vercel production |
+| Frontend | `npm run dev` | `npm run dev` | a Vercel project, e.g. `iarchitect-staging` | a separate Vercel project (or domain) |
 
 Keep staging and production fully separate: separate Supabase projects,
 separate backend apps, separate secrets. The real-infrastructure tests only
@@ -34,21 +34,24 @@ ever run against staging, and refuse to run unless you confirm that.
 
 1. At https://supabase.com, create a project named e.g. `iarchitect-staging`.
    Pick a strong database password and store it in your password manager -
-   the app never needs it.
+   the app never needs it. Note the **region** you pick: the backend should
+   run near it (step 2 of the hosted deployment).
 2. **Authentication → Providers → Email**: enabled.
 3. **Authentication → Sign In / Providers → Email → Confirm email**:
    - production: keep **on** (new accounts confirm by email);
    - staging: either keep it on and create test accounts in the dashboard
-     with **Auto Confirm User** (step 5), or turn it off for staging only.
-     Never weaken the production project.
-4. **Authentication → URL Configuration → Site URL**: the deployed frontend
-   URL (e.g. `https://iarchitect-staging.vercel.app`), so confirmation
-   emails link back to the app.
-5. **Authentication → Users → Add user → Create new user**, with **Auto
+     with **Auto Confirm User** (step 4), or turn it off for staging only.
+     Never weaken the production project. Supabase's built-in email sender
+     allows only a few messages per hour - configure your own SMTP
+     provider before relying on sign-up emails.
+4. **Authentication → Users → Add user → Create new user**, with **Auto
    Confirm User**, twice: test users A and B for the real-infrastructure
    tests. Use addresses you control and passwords used nowhere else.
 
-### Run the migration
+(The Auth **URL Configuration** - Site URL and redirect URLs - is set once
+the frontend URL is known: step 8 of the hosted deployment.)
+
+### Run the migrations
 
 In **SQL Editor → New query**, run each file in
 `backend/supabase/migrations/` in filename order - paste the whole file,
@@ -59,11 +62,12 @@ run it, then the next:
 2. `20260911000000_projects_document_check.sql` - replaces the document
    constraint so a document missing `version`, `objects` or `assemblies`
    is refused (the first version let a missing key through, because a CHECK
-   that evaluates to NULL passes).
+   that evaluates to NULL passes). One atomic, idempotent statement: if the
+   tightened constraint is already live it changes nothing.
 
 (Or, with the Supabase CLI: `supabase link --project-ref <ref>` then
 `supabase db push` from `backend/`, which applies them in order.) Both are
-idempotent - running one again changes nothing.
+safe to run again.
 
 ### Verify the database
 
@@ -87,7 +91,7 @@ If the SQL editor answers a migration with a generic dashboard error such as
 "Backend error! Retry your query", don't assume it failed: that message comes
 from the dashboard, not from PostgreSQL (a real failure shows a PostgreSQL
 error code). Run `verify_projects.sql` and read checks 4 and 8 - they show
-whether the migration is live. Both migrations are safe to run again anyway.
+whether the migration is live.
 
 ### Rows that break the document envelope
 
@@ -125,9 +129,9 @@ Then run the migration again.
 
 ### Keys
 
-**Project Settings → API**: copy the **Project URL** and the **anon /
-publishable** key. Never copy the service-role / secret key anywhere - the
-backend refuses to start with one.
+**Project Settings → API**: the **Project URL** and the **anon /
+publishable** key are what the backend needs. Never copy the service-role /
+secret key anywhere - the backend refuses to start with one.
 
 ## 2. Configure and test locally against staging
 
@@ -160,79 +164,150 @@ deletes projects owned by the two test users, named `[integration …]`.
 These tests are **not** part of `npm run verify` - that stays deterministic
 and credential-free, so CI never depends on anyone's Supabase account.
 
-## 3. Deploy the backend (Fly.io)
+## 3. Hosted deployment, in order
 
-The backend is a persistent Node service (`backend/src/server.ts`), so it
-runs as a container rather than as serverless functions. `Dockerfile` (repo
-root - the backend imports the shared engine in `src/engine/`) builds it
-with Node 24, which runs the TypeScript directly: no build step, no runtime
-dependencies, no secret in the image. `fly.toml` forces HTTPS and checks
-`/health`.
+The backend URL is baked into the frontend at build time, and the backend
+only accepts the frontend's exact origin - so each side needs the other's
+URL. Choosing both names first makes both URLs known before anything is
+created.
+
+### Step 1 - Choose the Fly.io and Vercel names
+
+| | Name (example) | URL it gives |
+|---|---|---|
+| Fly.io app (backend) | `iarchitect-backend-staging` | `https://iarchitect-backend-staging.fly.dev` |
+| Vercel project (frontend) | `iarchitect-staging` | `https://iarchitect-staging.vercel.app` |
+
+Fly app names are global - if yours is taken, pick another and put it in
+`fly.toml`'s `app = ...`. A Vercel project's production domain is normally
+`https://<project>.vercel.app`; Vercel adds a suffix when that domain is
+taken, so the frontend URL is only final in step 5.
+
+### Step 2 - Determine the Supabase staging region
+
+The backend checks every request's token with Supabase and reads and writes
+projects there, so it should run in the Fly.io region nearest the database.
+Find the region in **Supabase → Project Settings → General**, and set
+`fly.toml`'s `primary_region` accordingly:
+
+| Supabase (AWS) region | Fly.io region |
+|---|---|
+| `us-east-1` N. Virginia | `iad` |
+| `us-east-2` Ohio | `ord` |
+| `us-west-1` N. California, `us-west-2` Oregon | `sjc` |
+| `ca-central-1` Canada | `yyz` |
+| `sa-east-1` São Paulo | `gru` |
+| `eu-west-1` Ireland, `eu-west-2` London | `lhr` |
+| `eu-west-3` Paris | `cdg` |
+| `eu-central-1` Frankfurt, `eu-central-2` Zurich | `fra` |
+| `eu-north-1` Stockholm | `arn` |
+| `ap-south-1` Mumbai | `bom` |
+| `ap-southeast-1` Singapore | `sin` |
+| `ap-southeast-2` Sydney | `syd` |
+| `ap-northeast-1` Tokyo, `ap-northeast-2` Seoul | `nrt` |
+
+(`fly platform regions` lists Fly's current regions.)
+
+### Step 3 - Configure Fly.io
 
 ```bash
 # once: install flyctl (https://fly.io/docs/flyctl/install/) and sign in
 fly auth login
 
-# once: create the app (edit the app name in fly.toml first)
+# create the app (no deployment yet) - the name from step 1, as in fly.toml
 fly apps create iarchitect-backend-staging
 
-# secrets - you type these; they are stored encrypted by Fly, never in the repo
-fly secrets set OPENAI_API_KEY=... SUPABASE_URL=https://<ref>.supabase.co SUPABASE_ANON_KEY=...
-fly secrets set FRONTEND_ORIGIN=https://<your-frontend>.vercel.app
-
-fly deploy
-curl https://iarchitect-backend-staging.fly.dev/health     # {"status":"ok"}
+# secrets - you type these; Fly stores them encrypted, never in the repo.
+# --stage stores them without starting anything yet.
+fly secrets set --stage -a iarchitect-backend-staging \
+  OPENAI_API_KEY=... \
+  SUPABASE_URL=https://<ref>.supabase.co \
+  SUPABASE_ANON_KEY=... \
+  FRONTEND_ORIGIN=https://iarchitect-staging.vercel.app
 ```
 
-Any other Docker host with HTTPS works the same way (Railway: `railway up`
-uses the same Dockerfile; Render and Cloud Run too) - set the same
-variables in its secret store.
+`FRONTEND_ORIGIN` is the frontend URL planned in step 1; step 7 corrects it
+if Vercel assigns a different one.
 
-### Backend environment variables
-
-| Variable | Required | Example | Notes |
-|---|---|---|---|
-| `OPENAI_API_KEY` | yes | - | Secret. Backend only. |
-| `SUPABASE_URL` | yes (hosted) | `https://abcdefgh.supabase.co` | |
-| `SUPABASE_ANON_KEY` | yes (hosted) | - | The anon/publishable key. A service-role/secret key is refused. |
-| `FRONTEND_ORIGIN` | yes (hosted) | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. Add `http://localhost:5173` only on staging if you develop against it. No wildcards, no paths; non-local origins must be https. |
-| `NODE_ENV` | set by the Dockerfile | `production` | In production, `LOCAL_AUTH=memory` is refused. |
-| `PORT` | set by the Dockerfile | `8787` | |
-| `LOCAL_AUTH` | local only | `memory` | In-memory accounts for development. Never on a host. |
-
-### Logs
-
-`fly logs` shows one JSON line per request - time, method, route (project
-ids replaced by `:id`), operation (`projects.save`, `auth.signin`,
-`ai.interpret`...), status, duration, whether the caller was signed in
-(`user` / `none` / `invalid` / `unverified`), and a short failure reason.
-Never a token, password, email address, or document. Failures of Supabase
-or OpenAI are logged by error name and message.
-
-## 4. Deploy the frontend (Vercel)
-
-The frontend is a static Vite build. `vercel.json` sets the build and
-security headers; the production build adds a Content-Security-Policy that
-only lets the page talk to itself and the backend.
+### Step 4 - Deploy the backend
 
 ```bash
-npm i -g vercel        # or use npx vercel
-vercel login
-vercel link            # creates a Vercel project for this folder (.vercel/ is gitignored)
-vercel env add VITE_AI_BACKEND_URL production    # value: https://iarchitect-backend-staging.fly.dev
-vercel deploy --prod
+fly deploy
+curl https://iarchitect-backend-staging.fly.dev/health     # {"status":"ok"}
+fly logs
 ```
 
-`VITE_AI_BACKEND_URL` is the only frontend variable. It is **not** a secret
-(the browser must know where the backend is). A hosted build fails if it
-is missing or not `https://` - so a deployment can never quietly point at
-localhost.
+`Dockerfile` (repo root - the backend imports the shared engine in
+`src/engine/`) builds the backend with Node 24, which runs the TypeScript
+directly: no build step, no runtime dependencies, no secret in the image
+(`.dockerignore` keeps every `.env` file out of the upload). `fly.toml`
+forces HTTPS, sets `NODE_ENV=production`, and checks `/health` every 30 s.
 
-Then set the backend's `FRONTEND_ORIGIN` to the exact production URL Vercel
-printed (`fly secrets set FRONTEND_ORIGIN=...` redeploys). Vercel preview
-deployments have other URLs; they are refused by CORS unless you add them.
+### Step 5 - Obtain and confirm the frontend URL
 
-## 5. Verify the deployment
+Create the Vercel project - preferably by importing the GitHub repository
+(**Vercel → Add New → Project → Import** `i-am-architect`), which uploads only
+committed files. Name it as chosen in step 1 and, on the configuration screen,
+**before** the first deployment, do step 6. (Or with the CLI: `vercel login`,
+then `vercel link` in the repo root, which creates the project without
+deploying; `.vercelignore` keeps `backend/`, every `.env` file and other
+local-only files out of any CLI upload.)
+
+Read the project's production domain in **Settings → Domains** - that exact
+URL is the frontend origin.
+
+### Step 6 - Configure Vercel
+
+Add ONE environment variable, for **both Production and Preview**:
+
+| Variable | Value | Environments |
+|---|---|---|
+| `VITE_AI_BACKEND_URL` | `https://iarchitect-backend-staging.fly.dev` | Production **and** Preview |
+
+(CLI: `vercel env add VITE_AI_BACKEND_URL production`, then
+`vercel env add VITE_AI_BACKEND_URL preview`.) It is not a secret - the
+browser must know where the backend is. It is read at **build** time:
+changing it takes a new deployment.
+
+Every Vercel build - Production and Preview - runs the same checks, so a
+build fails if the variable is missing or isn't `https://`. That is
+deliberate: a deployment can never quietly point at localhost. The
+production build's Content-Security-Policy allows network requests only to
+the site itself and this backend.
+
+Then deploy production: from the import screen, or `vercel deploy --prod`
+(CLI). `vercel.json` sets `npm ci` + `npm run build`, the `dist` output, and
+security headers.
+
+**Preview deployments** are served from other URLs (one per branch or
+commit). The backend accepts only the exact origins in `FRONTEND_ORIGIN`, so
+a preview's requests are refused (403) - by design. To try one preview
+against the staging backend, add that preview's exact URL to
+`FRONTEND_ORIGIN` (comma-separated) and remove it afterwards - never a
+wildcard.
+
+### Step 7 - Set the backend's exact FRONTEND_ORIGIN
+
+If the production URL from step 5 differs from the one planned in step 1:
+
+```bash
+fly secrets set -a iarchitect-backend-staging FRONTEND_ORIGIN=https://<the exact production URL>
+```
+
+(Setting a secret restarts the backend with it.) The value is an exact
+origin: `https://`, the host, no path, no trailing slash.
+
+### Step 8 - Configure the Supabase Auth URL settings
+
+**Supabase → Authentication → URL Configuration**:
+
+- **Site URL**: the exact frontend production URL;
+- **Redirect URLs**: the same URL.
+
+Confirmation emails then link back to the deployed app instead of the
+default local address.
+
+### Step 9 - Run the deployed smoke tests
 
 ```bash
 cd backend
@@ -249,7 +324,38 @@ path with undo/redo, and sign-out.
 Then use the deployed site itself: sign in, build, save, reload, open, edit,
 undo/redo, AI, save, sign out, sign back in, open, delete.
 
-## CORS and HTTPS
+## Reference
+
+### Backend environment (Fly.io)
+
+| Variable | Where | Example | Notes |
+|---|---|---|---|
+| `OPENAI_API_KEY` | Fly secret | - | Secret. Backend only. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
+| `SUPABASE_URL` | Fly secret | `https://abcdefgh.supabase.co` | |
+| `SUPABASE_ANON_KEY` | Fly secret | - | The anon/publishable key. A service-role/secret key is refused. |
+| `FRONTEND_ORIGIN` | Fly secret | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. No wildcards, no paths; non-local origins must be https. |
+| `NODE_ENV` | `fly.toml` / Dockerfile | `production` | In production, `LOCAL_AUTH=memory` is refused. |
+| `PORT` | `fly.toml` / Dockerfile | `8787` | |
+| `LOCAL_AUTH` | local only | `memory` | In-memory accounts for development. Never on a host. |
+
+Never on Fly.io, Vercel or anywhere else: the Supabase service-role/secret
+key or the database password.
+
+### Frontend environment (Vercel)
+
+Only `VITE_AI_BACKEND_URL`, for Production and Preview (step 6). Never the
+OpenAI key, anything Supabase, or `FRONTEND_ORIGIN`.
+
+### Logs
+
+`fly logs` shows one JSON line per request - time, method, route (project
+ids replaced by `:id`), operation (`projects.save`, `auth.signin`,
+`ai.interpret`...), status, duration, whether the caller was signed in
+(`user` / `none` / `invalid` / `unverified`), and a short failure reason.
+Never a token, password, email address, or document. Failures of Supabase
+or OpenAI are logged by error name and message.
+
+### CORS and HTTPS
 
 - The backend answers browser requests only from `FRONTEND_ORIGIN`'s exact
   origins; any other `Origin` gets **403** before routing, authentication or
@@ -275,15 +381,18 @@ undo/redo, AI, save, sign out, sign back in, open, delete.
 `*.example` templates (all gitignored), Supabase service-role/secret keys,
 OpenAI keys, database passwords, access tokens. Before a commit, scan the
 staged changes (`git diff --cached`) for key-shaped strings. The
-production bundle is checked by `npm run test:deployed`.
+production bundle is checked by `npm run test:deployed`. `.dockerignore`
+(Fly.io) and `.vercelignore` (Vercel CLI) keep local secret files out of
+hosting uploads.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Backend exits at start: "No account storage is configured" | `SUPABASE_URL`/`SUPABASE_ANON_KEY` not set on the host. |
+| Backend exits at start: "No account storage is configured" | `SUPABASE_URL`/`SUPABASE_ANON_KEY` not set as Fly secrets. |
 | "SUPABASE_ANON_KEY holds a service-role (secret) key" | The wrong key was copied - use the anon/publishable one. |
-| Browser console: CORS error, backend log `origin not allowed` | `FRONTEND_ORIGIN` doesn't list the exact frontend origin (scheme, host, port, no trailing path). |
+| Vercel build fails: "Set VITE_AI_BACKEND_URL … for the preview environment" | The variable is set for Production only - add it for Preview too (step 6). |
+| Browser console: CORS error, backend log `origin not allowed` | `FRONTEND_ORIGIN` doesn't list the exact frontend origin (scheme, host, port, no trailing path) - or it's a Preview URL (by design). |
 | Sign-in says "Confirm your email address first" | Email confirmation is on and the account isn't confirmed - confirm it, or create it with Auto Confirm (staging). |
 | Save/Open say "temporarily unavailable" (503) | The backend can't reach Supabase - check the project is running (free projects pause when idle). |
 | AI says "Backend request failed with status 502" | OpenAI refused or failed - check the key and the account's quota. |

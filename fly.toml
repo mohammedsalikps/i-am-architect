@@ -2,7 +2,11 @@
 # The app name is yours to choose - change it before `fly launch --copy-config`
 # / `fly deploy`. No secret belongs in this file: set them with `fly secrets set`.
 app = "iarchitect-backend-staging"
-primary_region = "iad"
+# Next to the staging Supabase project, which is in AWS ap-southeast-2 (Sydney):
+# the backend checks every request's token with Supabase and stores projects
+# there. Match a production app to its own Supabase project's region
+# (DEPLOYMENT.md, step 2).
+primary_region = "syd"
 
 [build]
   dockerfile = "Dockerfile"

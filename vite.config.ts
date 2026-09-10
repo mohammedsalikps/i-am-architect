@@ -47,14 +47,22 @@ export default defineConfig(({ mode }) => {
     throw new Error(`VITE_AI_BACKEND_URL is not a valid URL: "${backendUrl}".`);
   }
 
-  // A hosted build (Vercel sets VERCEL=1) must name its backend, over HTTPS -
-  // otherwise the deployed app would quietly try to reach localhost.
+  // A hosted build must name its backend, over HTTPS - otherwise the deployed
+  // app would quietly try to reach localhost. Vercel sets VERCEL=1 on EVERY
+  // build, Production and Preview alike, so the variable must be set for
+  // both environments (DEPLOYMENT.md "Configure Vercel"). A Preview build
+  // gets the same backend URL; the backend still refuses the preview's own
+  // origin unless it is listed exactly in FRONTEND_ORIGIN.
   if (process.env.VERCEL) {
+    const environment = process.env.VERCEL_ENV ?? "current";
     if (!env.VITE_AI_BACKEND_URL) {
-      throw new Error("Set VITE_AI_BACKEND_URL (the deployed backend's https:// URL) in the hosting project's environment variables.");
+      throw new Error(
+        `Set VITE_AI_BACKEND_URL (the deployed backend's https:// URL) in the Vercel project's environment variables for the ` +
+          `${environment} environment - it is required for both Production and Preview.`
+      );
     }
     if (!backendUrl.startsWith("https://")) {
-      throw new Error("VITE_AI_BACKEND_URL must be an https:// URL for a hosted build.");
+      throw new Error(`VITE_AI_BACKEND_URL must be an https:// URL for a hosted build (${environment} environment).`);
     }
   }
 

@@ -1,0 +1,37 @@
+# What a Vercel CLI upload (`vercel deploy`) must never include.
+#
+# The CLI uploads the working directory - which also holds gitignored local
+# files such as backend/.env and backend/.env.integration. (Vercel's GitHub
+# import uploads only committed files, which contain no secrets; this file
+# protects the CLI path too.) Same syntax as .gitignore; a leading / means
+# "at the project root".
+#
+# The frontend build (`npm ci` + `npm run build` = `tsc --noEmit && vite
+# build`) needs only these, and none of them is excluded below:
+#   package.json, package-lock.json, index.html, vite.config.ts,
+#   tsconfig.json, vercel.json, and all of src/ (tsc checks every file in it).
+
+# Environment and secret files, in any directory. VITE_AI_BACKEND_URL comes
+# from the Vercel project's environment variables, never from a file.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# The backend is a separate service (Fly.io), with its own local secrets.
+/backend
+
+# Backend container and hosting configuration, and deployment docs.
+/Dockerfile
+/.dockerignore
+/fly.toml
+/DEPLOYMENT.md
+
+# Local tool state, build output, dependencies, hosting-CLI state, logs.
+/.claude
+/dist
+/node_modules
+/.vercel
+/.fly
+/.railway
+*.log
