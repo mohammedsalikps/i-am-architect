@@ -7,6 +7,7 @@ import { AICommandPipeline } from "./AICommandPipeline.ts";
 import type { CommandExecutorLike } from "./AICommandPipeline";
 import { buildAIProjectSnapshot } from "./types.ts";
 import type { AIProjectSnapshotSource, AIPipelineResult } from "./types";
+import type { HistoryGroupLike } from "../commands/executeCommandBatch";
 
 export interface AIServiceOptions {
   /** Real usage passes a real provider (e.g. BackendAIProvider - see providers/); tests pass a fake/mock. */
@@ -19,6 +20,15 @@ export interface AIServiceOptions {
    * one, with no special-casing anywhere.
    */
   commandExecutor: CommandExecutorLike;
+  /**
+   * The SAME shared HistoryManager every manual action records into
+   * (ProjectContext.history). With it, a whole AI response is recorded as
+   * ONE undo step, and a response that fails part-way is rolled back (see
+   * commands/executeCommandBatch.ts). Only its group methods are used.
+   * Optional so unit tests can run without one; the running app always
+   * passes it.
+   */
+  history?: HistoryGroupLike;
   /**
    * Anything with the same shape as ProjectContext's stores/
    * selectionStore (see AIProjectSnapshotSource) - a live ProjectContext
@@ -41,11 +51,11 @@ export interface AIServiceOptions {
  * see AiPromptController for that. It is also mutation-free BY
  * CONSTRUCTION, not just by convention: it holds no *Store reference at
  * all, only a CommandExecutorLike (a narrow `{ execute(input):
- * CommandResult }` shape - see AICommandPipeline.ts) and a snapshot
- * SOURCE (read-only `getAll()`/`get()` methods, per
- * AIProjectSnapshotSource) - the only thing this class can ever do is
- * call `this.pipeline.run(...)`, which itself only ever mutates through
- * `commandExecutor.execute()`.
+ * CommandResult }` shape - see AICommandPipeline.ts), an optional history
+ * group handle it passes straight to the pipeline, and a snapshot SOURCE
+ * (read-only `getAll()`/`get()` methods, per AIProjectSnapshotSource) -
+ * the only thing this class can ever do is call `this.pipeline.run(...)`,
+ * which itself only ever mutates through `commandExecutor.execute()`.
  */
 export class AIService {
   // Plain field declarations + assignment in the constructor body,
@@ -57,7 +67,7 @@ export class AIService {
   private readonly snapshotSource: AIProjectSnapshotSource;
 
   constructor(options: AIServiceOptions) {
-    this.pipeline = new AICommandPipeline(options.provider, options.commandExecutor);
+    this.pipeline = new AICommandPipeline(options.provider, options.commandExecutor, options.history);
     this.snapshotSource = options.snapshotSource;
   }
 

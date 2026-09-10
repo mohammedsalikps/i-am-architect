@@ -71,6 +71,9 @@ const aiProvider = new BackendAIProvider({
 const aiService = new AIService({
   provider: aiProvider,
   commandExecutor,
+  // The same shared history: a whole AI response is ONE undo step, and a
+  // response that fails part-way is rolled back rather than half-applied.
+  history,
   snapshotSource: { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, assemblyStore, selectionStore }
 });
 

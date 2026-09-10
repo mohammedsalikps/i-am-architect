@@ -64,6 +64,31 @@ Every `execute()` call returns a `CommandResult` -
 same "structured result, not an exception" approach `validateWall`
 already uses for normal invalid input.
 
+## Several commands as one step (`executeCommandBatch.ts`)
+
+`executeCommandBatch(executor, commands, history?)` runs a list of
+commands as ONE all-or-nothing, undoable operation. It adds no new
+mutation path: every command still goes through `executor.execute()`.
+
+- **One undo entry.** With a `history` (the shared `HistoryManager`),
+  the batch runs inside one of `HistoryManager`'s existing groups, the
+  same mechanism a mouse drag uses. One Undo removes everything the
+  batch did, and one Redo brings it back.
+- **All or nothing.** The first failing command stops the batch and
+  cancels the group. `HistoryManager` undoes everything the batch had
+  already done, so the model is exactly as it was and the undo/redo
+  stacks are untouched.
+- **What rollback relies on.** Every mutation must be recorded in
+  `history`. That holds for every construction-object command, since
+  they all go through the `*HistoryController` classes. Assembly
+  commands aren't recorded, so a batch containing them can't be fully
+  rolled back.
+- **Busy history.** If a group is already open (a drag in progress),
+  nothing runs and the result says why. Groups don't nest.
+
+`AICommandPipeline` uses this to apply a whole AI response, such as a
+12-object house, as one step (see `src/engine/ai/README.md`).
+
 ## Extending this for a future object type
 
 Add that type's command interfaces to `types.ts` (namespaced, e.g.

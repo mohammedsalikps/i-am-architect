@@ -5,6 +5,7 @@ import type { PillarData, PillarId } from "./types";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { ObjectRegistry, type RegistryListener } from "../objects/ObjectRegistry.ts";
 import { validatePillar, type PillarValidationResult } from "./validatePillar.ts";
+import { keepBaseY } from "../objects/grounding.ts";
 
 export type PillarStoreListener = RegistryListener<PillarData>;
 
@@ -19,8 +20,8 @@ function notFound(id: PillarId): PillarValidationResult {
  * PillarStore adds two pillar-specific rules a generic registry
  * deliberately doesn't know about:
  *
- * - Keeping a pillar's base resting on the ground when its height
- *   changes (same grounding rule as a wall's).
+ * - Keeping a pillar's base where it is (on the ground, or on a slab)
+ *   when its height changes - the same rule as a wall's.
  * - Rejecting a duplicate pillar id on add() - like AssemblyStore.add(),
  *   a generic registry has no "this id must not already exist" concept,
  *   only "add replaces whatever's there." (Wall ids never needed this
@@ -64,9 +65,9 @@ export class PillarStore {
    * and override one field, e.g. `{ ...pillar.dimensions, height: 3 }`.
    *
    * If dimensions.height changes without an explicit `position`, the
-   * pillar's base is kept resting on the ground by recomputing
-   * position.y before validating/delegating - the same rule
-   * WallStore.update() applies.
+   * pillar's base is kept where it was (on the ground, or on the slab it
+   * stands on) by recomputing position.y before validating/delegating -
+   * the same rule WallStore.update() applies (see objects/grounding.ts).
    *
    * Returns an invalid result (and leaves the store untouched) if `id`
    * doesn't exist, or if the merged pillar would fail validation.
@@ -78,10 +79,11 @@ export class PillarStore {
     }
 
     let effectiveChanges = changes;
-    if (changes.dimensions?.height !== undefined && changes.position === undefined) {
+    const height = changes.dimensions?.height;
+    if (height !== undefined && height !== existing.dimensions.height && changes.position === undefined) {
       effectiveChanges = {
         ...changes,
-        position: { ...existing.position, y: changes.dimensions.height / 2 }
+        position: { ...existing.position, y: keepBaseY(existing.position.y, existing.dimensions.height, height) }
       };
     }
 

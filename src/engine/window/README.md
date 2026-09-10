@@ -73,9 +73,12 @@ rotation" rule every other object type follows:
 
 Same rule as every sibling type: if `dimensions.height` changes
 without an explicit `position` also being supplied,
-`WindowStore.update()` recomputes `position.y = height / 2` before
-validating, keeping the window's base resting on the construction
-plane. Position Y stays editable in the UI (same choice every sibling
+`WindowStore.update()` recomputes `position.y` before validating so
+the window's base stays where it was (see `objects/grounding.ts`): a
+window on the construction plane stays on it (`y = height / 2`, as
+before), and a window on its sill stays on its sill instead of dropping
+to the ground. An edit that leaves the height unchanged leaves
+`position.y` alone. Position Y stays editable in the UI (same choice every sibling
 type's panel made) - a window would realistically sit higher off the
 ground than its default, so this matters more for window than for most
 siblings.

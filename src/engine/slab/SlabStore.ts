@@ -5,6 +5,7 @@ import type { SlabData, SlabId } from "./types";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { ObjectRegistry, type RegistryListener } from "../objects/ObjectRegistry.ts";
 import { validateSlab, type SlabValidationResult } from "./validateSlab.ts";
+import { keepBaseY } from "../objects/grounding.ts";
 
 export type SlabStoreListener = RegistryListener<SlabData>;
 
@@ -19,10 +20,10 @@ function notFound(id: SlabId): SlabValidationResult {
  * only your own rules" reasoning). SlabStore adds two slab-specific
  * rules a generic registry deliberately doesn't know about:
  *
- * - Keeping a slab's base resting on the ground when its thickness
- *   changes (the same grounding rule as a wall's height, a pillar's
- *   height, or a beam's height - here it's `thickness` that plays that
- *   role, since a slab is a flat horizontal element).
+ * - Keeping a slab's base where it is when its thickness changes (the
+ *   same rule as a wall's height, a pillar's height, or a beam's height -
+ *   here it's `thickness` that plays that role, since a slab is a flat
+ *   horizontal element).
  * - Rejecting a duplicate slab id on add() - like PillarStore.add()/
  *   BeamStore.add(), a generic registry has no "this id must not
  *   already exist" concept, only "add replaces whatever's there."
@@ -62,10 +63,11 @@ export class SlabStore {
    * and override one field, e.g. `{ ...slab.dimensions, thickness: 0.3 }`.
    *
    * If dimensions.thickness changes without an explicit `position`,
-   * the slab's base is kept resting on the ground by recomputing
-   * position.y before validating/delegating - the same rule
+   * the slab's base is kept where it was (on the ground, or wherever it
+   * was raised to) by recomputing position.y before
+   * validating/delegating - the same rule
    * WallStore.update()/PillarStore.update()/BeamStore.update() apply
-   * to their own height field.
+   * to their own height field (see objects/grounding.ts).
    *
    * Returns an invalid result (and leaves the store untouched) if `id`
    * doesn't exist, or if the merged slab would fail validation.
@@ -77,10 +79,11 @@ export class SlabStore {
     }
 
     let effectiveChanges = changes;
-    if (changes.dimensions?.thickness !== undefined && changes.position === undefined) {
+    const thickness = changes.dimensions?.thickness;
+    if (thickness !== undefined && thickness !== existing.dimensions.thickness && changes.position === undefined) {
       effectiveChanges = {
         ...changes,
-        position: { ...existing.position, y: changes.dimensions.thickness / 2 }
+        position: { ...existing.position, y: keepBaseY(existing.position.y, existing.dimensions.thickness, thickness) }
       };
     }
 

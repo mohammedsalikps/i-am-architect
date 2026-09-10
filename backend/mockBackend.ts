@@ -18,9 +18,12 @@ import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
  * Then point the frontend at it the usual way (it already defaults to
  * http://localhost:8787 - see the root .env.example's
  * VITE_AI_BACKEND_URL). Instructions naming a wall, pillar, beam, slab,
- * door, or window will build real objects in the app; anything else
- * comes back with the provider's "could not map" notes, which is a
- * useful way to exercise the command bar's notes and error states.
+ * door, or window will build real objects in the app, and an instruction
+ * to build a house ("Build a simple 2-bedroom house on a 10m × 8m
+ * footprint.") gets the complete house plan (see
+ * src/engine/ai/housePlan.ts). Anything else comes back with the
+ * provider's "could not map" notes, which is a useful way to exercise
+ * the command bar's notes and error states.
  */
 
 const port = Number(process.env.PORT ?? 8787);

@@ -135,6 +135,13 @@ Instructions naming a wall, pillar, beam, slab, door, or window build
 real objects; anything else returns the provider's "could not map"
 notes, which exercises the command bar's notes and error states.
 
+An instruction to build a new house - for example "Build a simple
+2-bedroom house on a 10m × 8m footprint." - returns the complete,
+deterministic house plan from `src/engine/ai/housePlan.ts`: a slab,
+four perimeter walls, four corner pillars, a door, and two windows,
+placed clear of whatever the project already contains. The browser
+applies it as one undoable step (see `src/engine/ai/README.md`).
+
 ## Endpoint
 
 ### `POST /api/ai/interpret`

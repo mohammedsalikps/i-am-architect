@@ -72,8 +72,10 @@ rotation" rule the other object types follow:
 
 Same rule as a wall/pillar/beam: if `dimensions.height` changes
 without an explicit `position` also being supplied, `DoorStore.update()`
-recomputes `position.y = height / 2` before validating, keeping the
-door's base resting on the construction plane. Position Y stays
+recomputes `position.y` before validating so the door's base stays
+where it was (see `objects/grounding.ts`) - on the construction plane
+(`y = height / 2`, as before) or on the slab it stands on. An edit that
+leaves the height unchanged leaves `position.y` alone. Position Y stays
 editable in the UI (same choice every sibling type's panel made).
 
 ## History

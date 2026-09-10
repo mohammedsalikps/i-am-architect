@@ -5,6 +5,8 @@ import type { AIProvider } from "./AIProvider";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
 import { buildAIProjectContext } from "./aiProjectContext.ts";
+import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
+import type { HistoryGroupLike } from "../commands/executeCommandBatch";
 import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectSnapshot } from "./types";
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
@@ -22,6 +24,13 @@ import type { CommandResult } from "../commands/types";
 export interface CommandExecutorLike {
   execute(input: unknown): CommandResult;
 }
+
+/**
+ * The most commands one provider response may contain. A simple house is
+ * 12; this leaves room for far larger plans while bounding how much an
+ * untrusted response can make the application do.
+ */
+export const MAX_COMMANDS_PER_RESPONSE = 200;
 
 const SUPPORTED_ACTIONS: readonly string[] = ["add", "update", "delete", "duplicate"];
 
@@ -119,21 +128,21 @@ function validateCommandShape(
  *
  *  1. Reject an empty instruction outright - the provider is never
  *     called for one.
- *  2. Call the provider, then structurally validate every command it
+ *  2. Call the provider, then structurally validate EVERY command it
  *     returned (malformed shape, unsupported object type, unsupported
- *     command type) before anything is executed.
- *  3. Execute each structurally-valid command through CommandExecutor
- *     (which applies its own domain validation - e.g. invalid
- *     dimensions - exactly the same way it does for UI-issued
- *     commands), one at a time, in order.
+ *     command type). If any one is invalid, nothing is executed.
+ *  3. Execute the whole response through CommandExecutor (which applies
+ *     its own domain validation - e.g. invalid dimensions - exactly the
+ *     same way it does for UI-issued commands) as one all-or-nothing
+ *     batch: see commands/executeCommandBatch.ts.
  *
- * A command that fails validation - structural or domain - never stops
- * the other commands in the same response: every command in
- * `response.commands` is always attempted (multiple commands in one
- * response is a supported case, not just a single-command happy path),
- * and the aggregate `success` is true only if every one of them
- * succeeded. This mirrors how a partially-valid multi-step user action
- * should behave: report exactly what worked and what didn't, per command.
+ * A response is therefore applied completely or not at all. A plan such
+ * as a 12-object house never leaves half a house behind: a command the
+ * stores reject rolls back every command before it. With a `history`
+ * (the running app always passes the shared HistoryManager), the applied
+ * response is ONE undo entry, so one Undo removes everything it built and
+ * one Redo brings it back. Without one - only unit tests do this - the
+ * batch still stops at the first failure, but nothing can be rolled back.
  */
 export class AICommandPipeline {
   // Plain field declarations + assignment in the constructor body,
@@ -144,10 +153,13 @@ export class AICommandPipeline {
   // erasable syntax is supported).
   private readonly provider: AIProvider;
   private readonly commandExecutor: CommandExecutorLike;
+  /** Only its group methods are used - to make a response one undo entry and to roll a failed one back. Never a store. */
+  private readonly history: HistoryGroupLike | undefined;
 
-  constructor(provider: AIProvider, commandExecutor: CommandExecutorLike) {
+  constructor(provider: AIProvider, commandExecutor: CommandExecutorLike, history?: HistoryGroupLike) {
     this.provider = provider;
     this.commandExecutor = commandExecutor;
+    this.history = history;
   }
 
   /**
@@ -207,7 +219,10 @@ export class AICommandPipeline {
       };
     }
 
-    if (response.commands.length === 0) {
+    const commands: unknown[] = response.commands;
+    const notes = response.notes;
+
+    if (commands.length === 0) {
       return {
         success: false,
         instruction,
@@ -215,35 +230,95 @@ export class AICommandPipeline {
         errors: [
           {
             stage: "provider",
-            message: response.notes ?? "Provider produced no recognizable commands for this instruction."
+            message: notes ?? "Provider produced no recognizable commands for this instruction."
           }
         ],
-        notes: response.notes
+        notes
       };
     }
 
-    const outcomes: AICommandOutcome[] = [];
-    const errors: AIPipelineError[] = [];
+    if (commands.length > MAX_COMMANDS_PER_RESPONSE) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [
+          {
+            stage: "provider",
+            message: `Provider returned ${commands.length} commands; one response may contain at most ${MAX_COMMANDS_PER_RESPONSE}.`
+          }
+        ],
+        notes
+      };
+    }
 
-    response.commands.forEach((rawCommand, index) => {
-      const shapeError = validateCommandShape(rawCommand, availableObjectTypes, projectContext);
-      if (shapeError) {
-        errors.push({ stage: "validation", message: shapeError, commandIndex: index });
-        outcomes.push({ command: rawCommand, result: { success: false, message: shapeError } });
-        return;
-      }
+    // 1. Validate the whole response before anything runs.
+    const shapeErrors = commands.map((rawCommand) => validateCommandShape(rawCommand, availableObjectTypes, projectContext));
+    const firstInvalid = shapeErrors.findIndex((shapeError) => shapeError !== null);
+    if (firstInvalid !== -1) {
+      const errors: AIPipelineError[] = [];
+      const outcomes: AICommandOutcome[] = commands.map((command, index) => {
+        const shapeError = shapeErrors[index];
+        if (shapeError) {
+          errors.push({ stage: "validation", message: shapeError, commandIndex: index });
+          return { command, result: { success: false, message: shapeError } };
+        }
+        return {
+          command,
+          result: { success: false, message: `Not executed: command ${firstInvalid + 1} of this response is invalid, so none of it was run.` }
+        };
+      });
+      return { success: false, instruction, outcomes, errors, notes };
+    }
 
-      const result = this.commandExecutor.execute(rawCommand);
-      outcomes.push({ command: rawCommand, result });
-      if (!result.success) {
-        errors.push({
-          stage: "execution",
-          message: result.message ?? "Command execution failed.",
-          commandIndex: index
-        });
+    // 2. Execute the whole response as one all-or-nothing, undoable batch.
+    const batch = executeCommandBatch(this.commandExecutor, commands, this.history);
+
+    if (batch.success) {
+      return {
+        success: true,
+        instruction,
+        outcomes: commands.map((command, index) => ({ command, result: batch.results[index] })),
+        errors: [],
+        notes
+      };
+    }
+
+    if (batch.failedIndex === undefined) {
+      // The batch couldn't start (another edit was in progress) - nothing ran.
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "execution", message: batch.message ?? "The commands could not be executed." }],
+        notes
+      };
+    }
+
+    const failedIndex = batch.failedIndex;
+    const failed = batch.results[failedIndex];
+    const rolledBack = this.history !== undefined;
+    const outcomes: AICommandOutcome[] = commands.map((command, index) => {
+      if (index === failedIndex) {
+        return { command, result: failed };
       }
+      if (index < failedIndex) {
+        return {
+          command,
+          result: rolledBack
+            ? { success: false, message: `Rolled back: command ${failedIndex + 1} failed, so nothing from this response was kept.` }
+            : batch.results[index]
+        };
+      }
+      return { command, result: { success: false, message: `Not executed: command ${failedIndex + 1} failed.` } };
     });
 
-    return { success: errors.length === 0, instruction, outcomes, errors, notes: response.notes };
+    return {
+      success: false,
+      instruction,
+      outcomes,
+      errors: [{ stage: "execution", message: failed.message ?? "Command execution failed.", commandIndex: failedIndex }],
+      notes
+    };
   }
 }

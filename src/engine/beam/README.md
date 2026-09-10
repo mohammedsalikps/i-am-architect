@@ -72,8 +72,10 @@ requirement (no arbitrary 3D rotation, no quaternion editing):
 
 Same rule as a wall or pillar: if `dimensions.height` changes without
 an explicit `position` also being supplied, `BeamStore.update()`
-recomputes `position.y = height / 2` before validating, keeping the
-beam's base resting on the construction plane. Unlike a wall's Position
+recomputes `position.y` before validating so the beam's base stays
+where it was (see `objects/grounding.ts`) - on the construction plane
+(`y = height / 2`, as before) or wherever it was raised to. An edit
+that leaves the height unchanged leaves `position.y` alone. Unlike a wall's Position
 Y (read-only in the UI), a beam's Position Y stays editable - the same
 choice pillar's property panel already made, so a beam can be raised
 off the ground (e.g. modeling a floor beam) when that's actually

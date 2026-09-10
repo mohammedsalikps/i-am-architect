@@ -5,6 +5,7 @@ import type { WallData, WallId } from "./types";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { ObjectRegistry, type RegistryListener } from "../objects/ObjectRegistry.ts";
 import { validateWall, type WallValidationResult } from "./validateWall.ts";
+import { keepBaseY } from "../objects/grounding.ts";
 
 export type WallStoreListener = RegistryListener<WallData>;
 
@@ -18,7 +19,8 @@ function notFound(id: WallId): WallValidationResult {
  * a private ObjectRegistry<WallData>. WallStore adds the wall-specific
  * behavior a generic registry deliberately doesn't know about:
  *
- * - Keeping a wall's base resting on the ground when its height changes.
+ * - Keeping a wall's base where it is - on the ground, or on the slab it
+ *   stands on - when its height changes.
  * - Validating (see validateWall.ts) before every write, rejecting
  *   invalid data without touching the registry - so an invalid write
  *   never stores anything, never notifies subscribers, and never
@@ -57,9 +59,11 @@ export class WallStore {
    * `{ ...wall.dimensions, height: 3 }`.
    *
    * If dimensions.height changes without an explicit `position`, the
-   * wall's base is kept resting on the ground by recomputing
-   * position.y before validating/delegating - this is the one
-   * wall-specific rule that lives here rather than in ObjectRegistry.
+   * wall's base is kept where it was by recomputing position.y before
+   * validating/delegating (see objects/grounding.ts): a wall resting on
+   * the ground stays on the ground, and one standing on a slab stays on
+   * the slab. This is the one wall-specific rule that lives here rather
+   * than in ObjectRegistry.
    *
    * Returns an invalid result (and leaves the store untouched) if `id`
    * doesn't exist, or if the merged wall would fail validation.
@@ -71,10 +75,11 @@ export class WallStore {
     }
 
     let effectiveChanges = changes;
-    if (changes.dimensions?.height !== undefined && changes.position === undefined) {
+    const height = changes.dimensions?.height;
+    if (height !== undefined && height !== existing.dimensions.height && changes.position === undefined) {
       effectiveChanges = {
         ...changes,
-        position: { ...existing.position, y: changes.dimensions.height / 2 }
+        position: { ...existing.position, y: keepBaseY(existing.position.y, existing.dimensions.height, height) }
       };
     }
 

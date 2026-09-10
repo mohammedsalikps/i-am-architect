@@ -73,7 +73,8 @@ function summarizeResult(result: AIPipelineResult): string {
     return `${pluralize(total, "command")} executed.`;
   }
 
-  const firstErrorMessage = result.errors[0]?.message ?? "Unknown error.";
+  const firstError = result.errors[0];
+  const firstErrorMessage = firstError?.message ?? "Unknown error.";
   if (total === 0) {
     // Nothing was ever attempted - an input-stage or provider-stage failure (e.g. empty instruction, provider unreachable).
     return firstErrorMessage;
@@ -81,9 +82,15 @@ function summarizeResult(result: AIPipelineResult): string {
 
   const succeeded = result.outcomes.filter((outcome) => outcome.result.success).length;
   if (succeeded > 0) {
+    // Only a pipeline without a history can leave part of a response applied - the running app always passes one.
     return `${pluralize(succeeded, "command")} of ${total} succeeded. ${firstErrorMessage}`;
   }
-  return firstErrorMessage;
+  if (total === 1) {
+    return firstErrorMessage;
+  }
+  // A multi-command response is all-or-nothing: no outcome succeeded, so nothing it asked for was applied.
+  const where = firstError?.commandIndex === undefined ? "" : `Command ${firstError.commandIndex + 1} of ${total} failed: `;
+  return `${where}${firstErrorMessage} Nothing was changed.`;
 }
 
 export class AiPromptController {

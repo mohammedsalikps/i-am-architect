@@ -72,8 +72,11 @@ instead of throwing. When `valid` is `false`:
 
 Same rule as a wall: if `dimensions.height` changes without an
 explicit `position` also being supplied, `PillarStore.update()`
-recomputes `position.y = height / 2` before validating, keeping the
-pillar's base resting on the construction plane.
+recomputes `position.y` before validating so the pillar's base stays
+where it was (see `objects/grounding.ts`). A pillar on the construction
+plane stays on it (`y = height / 2`, as before); one standing on a slab
+stays on the slab. An edit that leaves the height unchanged leaves
+`position.y` alone.
 
 ## History
 

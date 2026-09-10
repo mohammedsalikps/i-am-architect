@@ -2,6 +2,11 @@ import type { AIProvider } from "./AIProvider";
 import type { AIContextObject, AIProviderRequest, AIProviderResponse } from "./types";
 import type { ObjectType } from "../objects/types";
 import type { Command } from "../commands/types";
+// Explicit .ts extension on this value import lets Node run this file
+// directly (ai/verify.ts, backend/mockBackend.ts) - see
+// allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
+import { DEFAULT_HOUSE_FOOTPRINT, HOUSE_FOOTPRINT_LIMITS, buildSimpleHousePlan, findHouseCenter } from "./housePlan.ts";
+import type { HouseFootprint } from "./housePlan";
 
 interface KeywordCommand {
   objectType: ObjectType;
@@ -144,41 +149,138 @@ function toUpdateCommand(
   }
 }
 
+// --- A whole house (see housePlan.ts) ---
+
+const BUILD_VERB = /\b(?:build|create|design|make|construct|generate|draw)\b/i;
+const HOUSE_NOUN = /\b(?:house|home|bungalow|cottage)\b/i;
+/** Words between the verb and "house" that name one construction object: "build a wall next to the house" asks for a wall. */
+const OBJECT_NOUN = /\b(?:walls?|pillars?|beams?|slabs?|doors?|windows?)\b/i;
+/** A new house is introduced with an indefinite article: "build a house", "build me a small cottage" - not "make the house walls taller". */
+const INDEFINITE = /^(?:me\s+|us\s+)?(?:a|an|one)\b/i;
+const MAX_WORDS_BEFORE_HOUSE = 6;
+
+/** "Build a simple 2-bedroom house ..." - a build verb whose object is a new house. */
+function asksForHouse(instruction: string): boolean {
+  const verb = BUILD_VERB.exec(instruction);
+  if (!verb) {
+    return false;
+  }
+  const rest = instruction.slice(verb.index + verb[0].length);
+  const noun = HOUSE_NOUN.exec(rest);
+  if (!noun) {
+    return false;
+  }
+  const between = rest.slice(0, noun.index).trim();
+  return (
+    INDEFINITE.test(between) &&
+    between.split(/\s+/).length <= MAX_WORDS_BEFORE_HOUSE &&
+    !OBJECT_NOUN.test(between)
+  );
+}
+
+/** "10m × 8m", "10 x 8", "12.5 by 9 metres" - length along X first, then width along Z. */
+const FOOTPRINT = new RegExp(String.raw`${NUMBER}${METERS}\s*(?:x|×|\*|by)\s*${NUMBER}${METERS}`, "i");
+
+function readFootprint(instruction: string): HouseFootprint | null {
+  const match = FOOTPRINT.exec(instruction);
+  return match ? { length: Number(match[1]), width: Number(match[2]) } : null;
+}
+
+/** Every type the house plan uses. */
+const HOUSE_OBJECT_TYPES: readonly ObjectType[] = ["slab", "wall", "pillar", "door", "window"];
+
 /**
- * Deterministic stand-in for a real LLM-backed provider (OpenAI/Gemini/
- * Claude - none of which are wired up yet, see ai/README.md). Matches
- * whole-word object-type keywords ("wall", "pillar", "beam", "slab",
- * "door", "window") against each clause of the instruction and emits
- * one "<type>.add" command per recognized clause, in the order the
- * clauses appear, with default dimensions.
+ * The house plan for this request, placed clear of whatever the context's
+ * geometry section says is already there - or no commands and a note
+ * explaining why not.
+ */
+function planHouse(request: AIProviderRequest): AIProviderResponse {
+  const missing = HOUSE_OBJECT_TYPES.filter((type) => !request.availableObjectTypes.includes(type));
+  if (missing.length > 0) {
+    return {
+      commands: [],
+      notes: `A house needs ${missing.join(", ")}, which ${missing.length === 1 ? "isn't" : "aren't"} available in this context - no house was planned.`
+    };
+  }
+
+  const requested = readFootprint(request.instruction);
+  const footprint = requested ?? DEFAULT_HOUSE_FOOTPRINT;
+  const { min, max } = HOUSE_FOOTPRINT_LIMITS;
+  const fits = (side: number) => side >= min && side <= max;
+  if (!fits(footprint.length) || !fits(footprint.width)) {
+    return {
+      commands: [],
+      notes: `A ${footprint.length} m × ${footprint.width} m footprint is outside what the house plan supports (each side ${min}-${max} m) - no house was planned.`
+    };
+  }
+
+  const occupied = (request.projectContext.geometry?.objects ?? []).map((object) => object.aabb);
+  const center = findHouseCenter(footprint, occupied);
+  const commands = buildSimpleHousePlan({ ...footprint, center });
+
+  const where =
+    center.x === 0 && center.z === 0 ? "centered on the origin" : `centered at x = ${center.x}, z = ${center.z}, clear of the existing objects`;
+  const notes = [
+    `Planned a simple ${footprint.length} m × ${footprint.width} m house ${where}: 1 slab, 4 perimeter walls between 4 corner pillars, 1 front door and 2 windows (${commands.length} commands).`
+  ];
+  if (!requested) {
+    notes.push(`No footprint was given, so the default ${DEFAULT_HOUSE_FOOTPRINT.length} m × ${DEFAULT_HOUSE_FOOTPRINT.width} m was used.`);
+  }
+  notes.push("Rooms aren't separate objects yet, so no interior walls were placed.");
+  return { commands, notes: notes.join(" ") };
+}
+
+/**
+ * Deterministic stand-in for a real LLM-backed provider. No network, no
+ * randomness: the same request always gets the same response.
+ *
+ * **A whole house.** An instruction asking to build a new house ("Build a
+ * simple 2-bedroom house on a 10m × 8m footprint") gets the complete plan
+ * from housePlan.ts - slab, perimeter walls, corner pillars, a door, and
+ * two windows, as one ordered list of `<type>.add` commands with explicit
+ * positions and rotations. The footprint is read from the instruction
+ * ("10m × 8m", "10 x 8", "10 by 8 metres") and defaults to 10 m × 8 m.
+ * The plan goes on the origin when that's free; otherwise the context's
+ * geometry section decides where it goes, clear of every existing object.
+ * Rooms aren't objects, so none are modeled - the notes say so.
+ *
+ * **Single objects.** Otherwise it matches whole-word object-type keywords
+ * ("wall", "pillar", "beam", "slab", "door", "window") against each clause
+ * of the instruction and emits one "<type>.add" command per recognized
+ * clause, in the order the clauses appear, with default dimensions.
  *
  * A clause whose object type isn't in `request.availableObjectTypes` is
  * treated the same as an unrecognized clause - it's reported back via
  * `notes`, not silently produced as a command AICommandPipeline would
  * then have to reject.
  *
- * It also edits existing objects. Four explicit phrasings are recognized
- * and turned into `update_object` commands, checked against the object
- * as `request.projectContext` describes it: "Make wall-1 5 meters long",
- * "Change wall-1 height to 3.2 meters", "Rotate wall-1 by 90 degrees"
- * (or "to"), and "Move wall-1 to X=2". A clause that asks for an edit is
- * never treated as an add: an unknown id, or a dimension the object
- * doesn't have, produces no command and a note instead.
+ * **Edits.** Four explicit phrasings are recognized and turned into
+ * `update_object` commands, checked against the object as
+ * `request.projectContext` describes it: "Make wall-1 5 meters long",
+ * "Change wall-1 height to 3.2 meters", "Rotate wall-1 by 90 degrees" (or
+ * "to"), and "Move wall-1 to X=2". A clause that asks for an edit is never
+ * treated as an add: an unknown id, or a dimension the object doesn't
+ * have, produces no command and a note instead.
  *
- * And it reads the project context for notes: when the instruction names
- * an existing object by id, the notes list each such object with its
- * type. When it names two or more, the notes also carry each named pair's
- * relationship from the context's geometry section, as the exact JSON the
- * analysis produced - uninterpreted, and never turned into a command. The
- * context is only ever read, never modified.
+ * **Notes from the context.** When the instruction names an existing
+ * object by id, the notes list each such object with its type. When it
+ * names two or more, the notes also carry each named pair's relationship
+ * from the context's geometry section, as the exact JSON the analysis
+ * produced - uninterpreted, and never turned into a command. The context
+ * is only ever read, never modified.
  *
- * There is no free-text dimension parsing for adds, no delete or
- * duplicate, and no spatial reasoning. That's a deliberate limitation of
- * this deterministic mock, not of AICommandPipeline or the AIProvider
- * interface - see ai/README.md "Limitations".
+ * There is no free-text dimension parsing for single adds, no delete or
+ * duplicate, and no planning beyond the one house layout. That's a
+ * deliberate limitation of this deterministic mock, not of
+ * AICommandPipeline or the AIProvider interface - see ai/README.md
+ * "Limitations".
  */
 export class MockAIProvider implements AIProvider {
   interpret(request: AIProviderRequest): AIProviderResponse {
+    if (asksForHouse(request.instruction)) {
+      return planHouse(request);
+    }
+
     const clauses = splitIntoClauses(request.instruction);
     const commands: Command[] = [];
     const unrecognized: string[] = [];

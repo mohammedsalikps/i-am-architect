@@ -40,6 +40,8 @@ import type { CreateServerOptions } from "./src/createServer.ts";
 import { OpenAIProvider } from "../src/engine/ai/providers/OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "../src/engine/ai/providers/OpenAIProvider.ts";
 import { BackendAIProvider } from "../src/engine/ai/providers/BackendAIProvider.ts";
+import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
+import { buildSimpleHousePlan } from "../src/engine/ai/housePlan.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../src/engine/ai/types.ts";
 import { buildAIProjectContext } from "../src/engine/ai/aiProjectContext.ts";
 import { analyzeConstructionGeometry } from "../src/engine/ai/geometry/analyzeConstructionGeometry.ts";
@@ -716,6 +718,33 @@ async function run(): Promise<void> {
 
       assertTrue(message.includes("400"), `expected a 400 to surface, got "${message}"`);
       assertEqual(provider.calls.length, 0, "the server never reached its provider");
+    });
+  });
+
+  // --- A whole house plan through the real server ---
+
+  await check("the real server relays a complete multi-command house plan unchanged - from the keyless MockAIProvider mockBackend.ts runs", async () => {
+    // Exactly the combination `npm run mock` starts: the real createServer()
+    // with MockAIProvider behind it. No OpenAI code is involved.
+    await withServer({ provider: new MockAIProvider(), frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const backendProvider = new BackendAIProvider({ baseUrl, fetch: (url, init) => fetch(url, init) });
+
+      const response = await backendProvider.interpret({
+        instruction: "Build a simple 2-bedroom house on a 10m × 8m footprint.",
+        projectContext: validContext,
+        availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+      });
+
+      // validSnapshot's wall-1 sits on the origin (x -2..2), and the server
+      // derives geometry from the snapshot it sanitized - so the plan moves
+      // clear of it, to x = 8.5.
+      assertDeepEqual(
+        response.commands,
+        buildSimpleHousePlan({ length: 10, width: 8, center: { x: 8.5, z: 0 } }),
+        "the 12-command plan, placed clear of the existing wall, relayed unchanged"
+      );
+      assertEqual(response.commands.length, 12, "12 commands");
+      assertTrue(response.notes?.includes("clear of the existing objects"), "the provider's notes are relayed too");
     });
   });
 

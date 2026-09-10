@@ -19,7 +19,8 @@ module ever makes a real network call (see "Verification approach").
 | `types.ts` | Shared request/response/result types, `AI_SUPPORTED_OBJECT_TYPES`, and `buildAIProjectSnapshot()` - the only place store data enters the AI layer, as a plain, deterministic snapshot of the current model. |
 | `parseProjectSnapshot.ts` | `parseAIProjectSnapshot()` - validates an untrusted incoming snapshot and returns a sanitized copy. Shared by the backend and the E2E mock backend. |
 | `AIProvider.ts` | The `AIProvider` interface every provider (mock or real) implements. |
-| `MockAIProvider.ts` | A deterministic, keyword-matching `AIProvider` - no network calls, no randomness. |
+| `MockAIProvider.ts` | A deterministic, keyword-matching `AIProvider` - no network calls, no randomness. Answers a house instruction with the plan from `housePlan.ts`. |
+| `housePlan.ts` | `buildSimpleHousePlan()` - the deterministic 12-command plan for a simple house, and `findHouseCenter()` - where it goes so it clears existing objects. See "AI house builder". |
 | `providers/OpenAIProvider.ts` | A real, OpenAI-backed `AIProvider` - structured JSON output, injected API key and HTTP transport. See "Security boundary". |
 | `providers/verify.ts` | Node-runnable unit verification for `OpenAIProvider`, entirely against a mocked transport. |
 | `AICommandPipeline.ts` | Orchestrates one instruction end-to-end: validate input → call provider → validate output → execute via `CommandExecutor`. |
@@ -132,10 +133,14 @@ AIProvider.interpret({ instruction, projectContext, availableObjectTypes })
       │  2. provider returns { commands: unknown[] }
       ▼
 per-command structural validation (shape / object type / command type)
-      │  3. reject malformed / unsupported entries, keep the rest
+      │  3. one malformed / unsupported entry rejects the WHOLE response - nothing runs
+      ▼
+executeCommandBatch(commands, history)   one history group: all or nothing
+      │
       ▼
 CommandExecutor.execute(command)   ← the ONLY mutation path
-      │  4. domain validation (e.g. invalid dimensions), history, stores
+      │  4. domain validation (e.g. invalid dimensions), history, stores;
+      │     the first failure rolls back every command before it
       ▼
 AIPipelineResult { success, outcomes[], errors[] }
 ```
@@ -180,12 +185,17 @@ AIPipelineResult { success, outcomes[], errors[] }
   store's validator - never duplicated here - so there is exactly one
   place that decides what a valid wall/pillar/beam/slab/door/window
   looks like.
-- **Multi-command responses, partial success.** `response.commands` may
-  contain any number of commands; every one is attempted in order
-  regardless of whether an earlier one failed, and each gets its own
-  `AICommandOutcome`. `AIPipelineResult.success` is `true` only when
-  every command succeeded - a caller can still inspect `outcomes`/`errors`
-  to see exactly which ones did.
+- **Multi-command responses, all or nothing.** `response.commands` may
+  contain many commands - a whole house is one response - up to
+  `MAX_COMMANDS_PER_RESPONSE` (200). The pipeline first validates every
+  command's shape, and one invalid entry rejects the whole response
+  before anything runs. It then executes the list through
+  `executeCommandBatch()` (`src/engine/commands/`): in order, stopping
+  at the first command `CommandExecutor` rejects and rolling back every
+  command before it. A response is applied completely or not at all -
+  never half a house. Each command still gets its own
+  `AICommandOutcome`, saying whether it ran, failed, was rolled back, or
+  wasn't run.
 - **Sync or async, provider's choice.** `AIProvider.interpret()` may
   return `AIProviderResponse` directly (`MockAIProvider` does - it needs
   nothing async) or a `Promise<AIProviderResponse>` (`OpenAIProvider`
@@ -196,12 +206,16 @@ AIPipelineResult { success, outcomes[], errors[] }
   `Promise<AIPipelineResult>` instead of `AIPipelineResult` directly) -
   every other piece of the pipeline (structural validation, error
   staging, `CommandExecutorLike`) is unchanged.
-- **Shared undo/redo, unchanged.** Every command the pipeline executes
-  goes through `CommandExecutor` exactly like a UI-issued command, so it
-  is recorded on the same shared `HistoryManager` (see
-  `src/engine/project/ProjectContext.ts`) - undo/redo works identically
-  whether a command came from a button click or an AI instruction, with
-  no AI-specific history code anywhere.
+- **Shared undo/redo - one step per response.** Every command the
+  pipeline executes goes through `CommandExecutor` exactly like a
+  UI-issued command, so it is recorded on the same shared
+  `HistoryManager` (see `src/engine/project/ProjectContext.ts`). The
+  pipeline is also handed that `HistoryManager` - only its group
+  methods, through `AIService`'s `history` option - and records a whole
+  response as ONE entry. One Undo removes an entire AI-built house, one
+  Redo brings it back, and manual edits before and after it interleave
+  normally. The only history mechanism involved is `HistoryManager`'s
+  existing groups.
 
 ## Geometry in the AI context
 
@@ -282,6 +296,67 @@ stores (ProjectContext)
   or planning. The prompt still tells the model to refuse
   relative-placement requests.
 
+## AI house builder
+
+One instruction can produce a whole, editable house - AI + CAD, not AI
+instead of CAD. The AI only ever returns command data; the existing
+engine builds the objects.
+
+```
+"Build a simple 2-bedroom house on a 10m × 8m footprint."
+  → AIService.submit()        fresh snapshot + derived geometry
+  → provider                  MockAIProvider, or BackendAIProvider → backend → OpenAIProvider
+  → 12 "<type>.add" commands  explicit dimensions, positions, rotations
+  → AICommandPipeline         validate all 12, then one all-or-nothing batch
+  → CommandExecutor → stores  real walls, pillars, slab, door, windows
+  → HistoryManager            ONE undo entry for the whole house
+```
+
+- **The plan.** `buildSimpleHousePlan()` in `housePlan.ts` is the
+  reference layout, in the engine's own coordinates. On an L × W
+  footprint (L along X, W along Z) it has:
+  - one L × W slab, 0.2 m thick, on the ground;
+  - four 0.4 × 0.4 m corner pillars standing on the slab;
+  - four 0.2 m perimeter walls standing on the slab, running pillar to
+    pillar, with the side walls turned 90°;
+  - a door on the front (+Z) wall's outside face;
+  - two windows with a 0.9 m sill, on the back and right walls' outside
+    faces.
+
+  Parts meet face to face, so the geometry analysis finds no
+  overlapping pair. Openings sit on the walls' outside faces because
+  there is no wall hosting.
+- **Placement from the context.** The plan goes on the origin when that
+  is free. Otherwise `findHouseCenter()` reads the context's geometry
+  and moves the plan clear of every existing object, and the provider's
+  notes say where it went.
+- **Mock and real model.** `MockAIProvider` recognizes an instruction
+  to build a new house ("build a … house/home/cottage"), reads the
+  footprint ("10m × 8m", "12 x 9", "10 by 8 metres"; default 10 × 8,
+  sides 4-40 m), and returns the plan. `OpenAIProvider`'s schema now
+  gives every `<type>.add` an optional `position`. Its prompt now says:
+  - commands are data executed by the construction engine, never code;
+  - the coordinate and axis conventions;
+  - the engine assigns ids;
+  - how to build coherent geometry;
+  - the same house layout the mock returns.
+- **Atomic, one undo step.** See "Multi-command responses, all or
+  nothing" and "Shared undo/redo" above. A plan with one bad part is
+  rejected whole, and nothing is left behind.
+- **Editable afterwards.** The objects are ordinary objects. When an
+  object's height changes, the stores keep its base where it was (see
+  `objects/grounding.ts`), so editing a wall that stands on the slab
+  keeps it on the slab instead of sinking it to the ground.
+- **What it doesn't do.**
+  - Rooms aren't objects, so there are no interior walls; the notes say
+    so.
+  - Openings aren't cut into walls.
+  - There is no roof.
+  - Nothing is saved.
+  - A real model's plan isn't guaranteed to match the reference layout.
+    It is validated exactly like any other response, and a malformed or
+    invalid one fails whole.
+
 ## Security boundary - why `OpenAIProvider` is never constructed with a real key today
 
 This application is currently a **pure client-side Vite SPA** - `npm run
@@ -349,11 +424,17 @@ same store-backed `*HistoryLike` stub pattern already established there.
 `verify.ts` covers: `MockAIProvider` output for every example
 instruction, single- and multi-command execution, malformed/non-array
 provider output, unsupported object types, unsupported command types,
-an empty instruction, command-level failure propagation (one bad
-command in a batch doesn't block the others), undo/redo compatibility
-(a pipeline-issued command undoes/redoes exactly like a directly-issued
-one), and a structural check that an `AICommandPipeline` instance holds
-no store reference at all - only a provider and a `CommandExecutorLike`.
+an empty instruction, all-or-nothing batches (one bad command stops the
+response; with a history, everything before it is rolled back and a
+successful response is one undo entry), the house plan (pinned
+coordinates, no overlapping parts, footprint parsing, placement clear of
+existing objects), undo/redo compatibility (a pipeline-issued command
+undoes/redoes exactly like a directly-issued one), and a structural
+check that an `AICommandPipeline` instance holds no store reference at
+all - only a provider, a `CommandExecutorLike`, and an optional history
+group handle. The end-to-end suite (`e2e/verify.ts`) builds the house
+through the real `ProjectContext` and checks the objects, the geometry,
+one-step undo/redo, rollback of bad plans, and editability.
 
 `providers/verify.ts` covers `OpenAIProvider` specifically: request
 shaping (method, headers, structured `response_format`, the raw
@@ -379,10 +460,12 @@ as positive proof no extra (or real) request happened.**
   construction state, plus the dimensions, position axes, rotation,
   material, or color to change. CommandExecutor resolves the id and runs
   that type's existing update, so validation and undo/redo are the same
-  as a UI edit, and an unknown id is an error - never a new object. The
-  model can't place objects relative to one another, align or connect
-  them, delete or duplicate them, or plan geometry; those need a later
-  geometry milestone. `MockAIProvider` understands four edit phrasings:
+  as a UI edit, and an unknown id is an error - never a new object. New
+  objects can carry an explicit position, so the model can lay out a
+  multi-object plan such as a house (see "AI house builder"), but it
+  can't delete or duplicate objects, and there is no snapping,
+  alignment, or collision resolution - a plan is coherent only because
+  its coordinates are. `MockAIProvider` understands four edit phrasings:
   "Make wall-1 5 meters long", "Change wall-1 height to 3.2 meters",
   "Rotate wall-1 by 90 degrees" (or "to"), and "Move wall-1 to X=2".
 - **What the model sees.** `OpenAIProvider` sends the full context: the
@@ -399,11 +482,10 @@ as positive proof no extra (or real) request happened.**
   materials) that shouldn't carry the app's own authority. It is
   projected field by field, so nothing beyond the snapshot's defined
   fields is ever sent, and the same snapshot always produces the same
-  request. The command schema is unchanged, though: the model can still
-  only produce `<type>.add` commands, which carry no position. So it can
-  read an existing object's dimensions (e.g. "as tall as wall-7"), but
-  it cannot place a new object relative to one, edit one, or plan
-  geometry. `MockAIProvider` also reads the context: it notes any
+  request. The model can read an existing object's dimensions and
+  position (e.g. "as tall as wall-7"), edit it with `update_object`, and
+  give new objects explicit positions - enough to plan a house around
+  what is already there (see "AI house builder"). `MockAIProvider` also reads the context: it notes any
   existing object the instruction names by id.
 - **`MockAIProvider`'s language understanding is still limited.** It
   only recognizes "create/add a `<type>`" style clauses via whole-word

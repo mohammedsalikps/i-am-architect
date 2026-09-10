@@ -45,6 +45,12 @@ import { AiPromptController } from "../AiPromptController.ts";
 import { BackendAIProvider } from "../providers/BackendAIProvider.ts";
 import { createMockBackend } from "./mockBackend.ts";
 import { MockAIProvider } from "../MockAIProvider.ts";
+import { buildSimpleHousePlan } from "../housePlan.ts";
+import { validateWall } from "../../wall/validateWall.ts";
+import { validatePillar } from "../../pillar/validatePillar.ts";
+import { validateSlab } from "../../slab/validateSlab.ts";
+import { validateDoor } from "../../door/validateDoor.ts";
+import { validateWindow } from "../../window/validateWindow.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
 import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
 import { buildAIProjectContext } from "../aiProjectContext.ts";
@@ -94,6 +100,7 @@ function wireApp(handler: MockBackendHandler): WiredApp {
   const service = new AIService({
     provider,
     commandExecutor: context.commandExecutor,
+    history: context.history,
     snapshotSource: context
   });
   const controller = new AiPromptController((instruction) => service.submit(instruction));
@@ -332,7 +339,7 @@ async function run(): Promise<void> {
     assertIncludes(app.controller.getState().message, "validation failed", "controller message");
   });
 
-  await check("in a mixed batch, the valid command is applied and the invalid one is rejected", async () => {
+  await check("a mixed batch is rejected whole - the valid command is not applied either", async () => {
     const app = wireApp(
       alwaysReply([
         { type: "wall.add", wall: {} },
@@ -342,10 +349,14 @@ async function run(): Promise<void> {
 
     await app.controller.submit("Add a wall and a roof");
 
-    assertEqual(app.context.wallStore.getAll().length, 1, "the valid wall should exist");
-    assertTrue(app.context.history.canUndo(), "the valid wall should still be undoable");
+    assertEqual(app.context.wallStore.getAll().length, 0, "the valid wall was not applied");
+    assertEqual(app.context.history.canUndo(), false, "nothing was recorded");
     assertEqual(app.controller.getState().status, "error", "the batch as a whole failed");
-    assertIncludes(app.controller.getState().message, "1 command of 2 succeeded", "controller message");
+    assertEqual(
+      app.controller.getState().message,
+      'Command 2 of 2 failed: Unsupported object type: "roof". Nothing was changed.',
+      "controller message"
+    );
   });
 
   // --- Scene/UI refresh signal ---
@@ -1470,6 +1481,301 @@ async function run(): Promise<void> {
     assertEqual(firstFreeSlot([slot(0), slot(1), slot(2)], slot), 3, "all taken: the next one");
     assertEqual(firstFreeSlot([{ x: 3, z: -4 }], slot), 0, "an object moved away frees its slot");
     assertEqual(firstFreeSlot([{ x: 0.3, z: -4.2 }], slot), 1, "one still sitting near its slot keeps it");
+  });
+
+  // --- AI house builder: natural language -> construction plan -> real, editable objects ---
+  // The mock backend here runs the real MockAIProvider on the request it
+  // received, exactly as backend/mockBackend.ts does. So every link is the
+  // real one: AiPromptController -> AIService -> AICommandPipeline ->
+  // BackendAIProvider -> the backend's HTTP contract -> MockAIProvider ->
+  // commands -> validation -> CommandExecutor -> stores and history.
+
+  const HOUSE_PROMPT = "Build a simple 2-bedroom house on a 10m × 8m footprint.";
+
+  /** Answers like `npm run mock`: the real MockAIProvider interprets what the server received. */
+  const mockProviderBackend: MockBackendHandler = (request) => {
+    const response = new MockAIProvider().interpret({
+      instruction: request.instruction,
+      projectContext: request.projectContext,
+      availableObjectTypes: (request.availableObjectTypes ?? AI_SUPPORTED_OBJECT_TYPES) as typeof AI_SUPPORTED_OBJECT_TYPES
+    });
+    return response.notes === undefined
+      ? { kind: "ok", commands: response.commands }
+      : { kind: "ok", commands: response.commands, notes: response.notes };
+  };
+
+  const overlappingPairs = (geometry: ConstructionGeometryAnalysis) =>
+    geometry.relationships.filter((pair) => pair.overlap.aabb).map((pair) => `${pair.a}/${pair.b}`);
+
+  await check("AI house: the prompt on an empty project builds 1 slab, 4 walls, 4 pillars, 1 door and 2 windows through the real UI path", async () => {
+    const app = wireApp(mockProviderBackend);
+
+    await app.controller.submit(HOUSE_PROMPT);
+
+    const state = app.controller.getState();
+    assertEqual(state.status, "success", "controller status");
+    assertEqual(state.message, "12 commands executed.", "controller message");
+    assertIncludes(state.notes, "10 m × 8 m house centered on the origin", "the provider's notes reach the UI");
+    assertEqual(app.backend.requests.length, 1, "one backend request");
+    assertEqual(app.backend.requests[0].instruction, HOUSE_PROMPT, "the prompt reached the backend verbatim");
+    assertEqual(app.context.slabStore.getAll().length, 1, "slab");
+    assertEqual(app.context.wallStore.getAll().length, 4, "walls");
+    assertEqual(app.context.pillarStore.getAll().length, 4, "pillars");
+    assertEqual(app.context.doorStore.getAll().length, 1, "door");
+    assertEqual(app.context.windowStore.getAll().length, 2, "windows");
+    assertEqual(app.context.beamStore.getAll().length, 0, "no beams");
+  });
+
+  await check("AI house: every object is real - unique typed ids, in its own store, selectable, valid by its type's own validator", async () => {
+    const app = wireApp(mockProviderBackend);
+    await app.controller.submit(HOUSE_PROMPT);
+
+    const snapshot = buildAIProjectSnapshot(app.context);
+    const ids = snapshot.objects.map((object) => object.id);
+    assertEqual(ids.length, 12, "12 objects in the project snapshot");
+    assertEqual(new Set(ids).size, 12, "12 unique ids");
+    for (const id of ids) {
+      const resolved = resolveConstructionObject(id, app.context);
+      assertTrue(resolved && id.startsWith(`${resolved.type}-`), `${id} lives in its own type's store`);
+      app.context.selectionStore.select(id);
+      assertEqual(app.context.selectionStore.get(), id, `${id} is selectable`);
+    }
+
+    const invalid = [
+      ...app.context.wallStore.getAll().filter((wall) => !validateWall(wall).valid),
+      ...app.context.pillarStore.getAll().filter((pillar) => !validatePillar(pillar).valid),
+      ...app.context.slabStore.getAll().filter((slab) => !validateSlab(slab).valid),
+      ...app.context.doorStore.getAll().filter((door) => !validateDoor(door).valid),
+      ...app.context.windowStore.getAll().filter((windowData) => !validateWindow(windowData).valid)
+    ].map((object) => object.id);
+    assertEqual(invalid.join(", "), "", "every object passes its type's validator");
+    assertTrue(parseAIProjectSnapshot(JSON.parse(JSON.stringify(snapshot))).ok, "and the snapshot passes the shared snapshot validator");
+  });
+
+  await check("AI house: geometry finds 0 invalid objects and no overlapping pair - a closed perimeter standing on the slab", async () => {
+    const app = wireApp(mockProviderBackend);
+    await app.controller.submit(HOUSE_PROMPT);
+
+    const geometry = analyzeConstructionGeometry(buildAIProjectSnapshot(app.context));
+    assertEqual(geometry.invalidObjects.length, 0, "no invalid objects");
+    assertEqual(geometry.relationships.length, 66, "12 * 11 / 2 pairs");
+    assertEqual(overlappingPairs(geometry).join(", "), "", "no two objects share any volume");
+
+    const boxes = (type: string) => geometry.objects.filter((object) => object.type === type).map((object) => object.aabb);
+    const box = (min: [number, number, number], max: [number, number, number]) => ({
+      min: { x: min[0], y: min[1], z: min[2] },
+      max: { x: max[0], y: max[1], z: max[2] }
+    });
+    assertSameJson(boxes("slab"), [box([-5, 0, -4], [5, 0.2, 4])], "the slab covers the 10 x 8 footprint");
+    assertSameJson(
+      boxes("pillar"),
+      [box([-5, 0.2, -4], [-4.6, 2.9, -3.6]), box([4.6, 0.2, -4], [5, 2.9, -3.6]), box([4.6, 0.2, 3.6], [5, 2.9, 4]), box([-5, 0.2, 3.6], [-4.6, 2.9, 4])],
+      "a pillar on each corner of the slab"
+    );
+    assertSameJson(
+      boxes("wall"),
+      [box([-4.6, 0.2, 3.8], [4.6, 2.9, 4]), box([-4.6, 0.2, -4], [4.6, 2.9, -3.8]), box([-5, 0.2, -3.6], [-4.8, 2.9, 3.6]), box([4.8, 0.2, -3.6], [5, 2.9, 3.6])],
+      "front, back, left and right walls run pillar to pillar on the slab's edges - the perimeter is closed"
+    );
+    assertSameJson(boxes("door"), [box([-0.45, 0.2, 4], [0.45, 2.3, 4.05])], "the door stands on the slab, on the front wall's outside face");
+    assertSameJson(
+      boxes("window"),
+      [box([-3.1, 1.1, -4.05], [-1.9, 2.3, -4]), box([5, 1.1, -2.6], [5.05, 2.3, -1.4])],
+      "the windows sit 0.9 m above the floor on the back and right walls' outside faces"
+    );
+  });
+
+  await check("AI house: ONE undo removes the whole AI-built house, ONE redo restores it exactly", async () => {
+    const app = wireApp(mockProviderBackend);
+    await app.controller.submit(HOUSE_PROMPT);
+    const built = objectsJson(app.context);
+
+    app.context.history.undo();
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, "one undo: the whole house is gone");
+    assertEqual(app.context.history.canUndo(), false, "the house was a single history entry");
+    assertEqual(app.context.selectionStore.get(), null, "nothing left selected");
+
+    app.context.history.redo();
+    assertEqual(objectsJson(app.context), built, "one redo: the same 12 objects - same ids, same values");
+    assertEqual(app.context.history.canRedo(), false, "nothing left to redo");
+  });
+
+  await check("AI house: generated walls are ordinary editable objects - AI and Properties-style edits keep them on the slab, one undo step each", async () => {
+    const app = wireApp(mockProviderBackend);
+    await app.controller.submit(HOUSE_PROMPT);
+    const frontWall = app.context.wallStore.getAll()[0];
+    assertEqual(frontWall.position.y, 1.55, "precondition: standing on the 0.2 m slab");
+
+    await app.controller.submit(`Make ${frontWall.id} 12 meters long`);
+    assertEqual(app.controller.getState().status, "success", "the AI edit ran");
+    assertEqual(app.context.wallStore.get(frontWall.id)?.dimensions.length, 12, "AI update_object resized the AI-built wall");
+    assertEqual(app.context.wallStore.get(frontWall.id)?.position.y, 1.55, "and it still stands on the slab");
+
+    // What the Properties panel's Height field sends: complete dimensions, no position.
+    const heightEdit = app.context.commandExecutor.execute({
+      type: "wall.update",
+      id: frontWall.id,
+      changes: { dimensions: { length: 12, height: 3, thickness: 0.2 } }
+    });
+    assertTrue(heightEdit.success, "Properties-style height edit");
+    assertEqual(app.context.wallStore.get(frontWall.id)?.position.y, 1.7, "a taller wall keeps its base on the slab (0.2 + 3 / 2)");
+
+    app.context.history.undo();
+    assertEqual(app.context.wallStore.get(frontWall.id)?.dimensions.height, 2.7, "undo reverts the height edit");
+    app.context.history.undo();
+    assertSameJson(app.context.wallStore.get(frontWall.id), frontWall, "undo reverts the AI edit - the wall is exactly as built");
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 12, "the rest of the house is untouched");
+    app.context.history.undo();
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, "the next undo removes the house");
+  });
+
+  await check("AI house: existing manual objects stay untouched - the house goes clear of them, and undo takes back only the house", async () => {
+    const app = wireApp(mockProviderBackend);
+    const manualWall = addThroughExecutor(app.context, { type: "wall.add", wall: { length: 6, position: { x: 0, z: 0 } } });
+    const manualPillar = addThroughExecutor(app.context, { type: "pillar.add", pillar: { position: { x: 3, z: 2 } } });
+    const manualBefore = objectsJson(app.context);
+
+    await app.controller.submit(HOUSE_PROMPT);
+
+    assertEqual(app.controller.getState().status, "success", "status");
+    assertIncludes(app.controller.getState().notes, "clear of the existing objects", "the notes say it moved aside");
+    const snapshot = buildAIProjectSnapshot(app.context);
+    assertEqual(snapshot.objects.length, 14, "2 manual + 12 AI objects");
+    assertSameJson(
+      snapshot.objects.filter((object) => object.id === manualWall || object.id === manualPillar),
+      JSON.parse(manualBefore),
+      "the manual objects are exactly as they were"
+    );
+    assertEqual(overlappingPairs(analyzeConstructionGeometry(snapshot)).join(", "), "", "the house overlaps nothing - not the manual objects, not itself");
+
+    app.context.history.undo();
+    assertEqual(objectsJson(app.context), manualBefore, "one undo removes only the house");
+    app.context.history.undo();
+    assertEqual(app.context.pillarStore.get(manualPillar), undefined, "the next undo is the manual pillar - one shared stack");
+  });
+
+  await check("AI house: a plan with one bad part is rejected whole - nothing built, no history entry, the redo stack untouched", async () => {
+    const plan = buildSimpleHousePlan({ length: 10, width: 8 }) as unknown as Record<string, Record<string, unknown>>[];
+    const withChange = (index: number, key: string, change: Record<string, unknown>) =>
+      plan.map((command, at) => (at === index ? { ...command, [key]: { ...command[key], ...change } } : command));
+    const cases = [
+      {
+        name: "a pillar with zero height (fails the store's validation part-way through)",
+        commands: withChange(5, "pillar", { height: 0 }),
+        message: "Command 6 of 12 failed: Could not add pillar: validation failed. Nothing was changed."
+      },
+      {
+        name: "a wall with a non-numeric position",
+        commands: withChange(2, "wall", { position: { x: "north", y: 1.55, z: -3.9 } }),
+        message: "Command 3 of 12 failed: Could not add wall: validation failed. Nothing was changed."
+      },
+      {
+        name: "an unknown object type",
+        commands: [...plan, { type: "roof.add", roof: {} }],
+        message: 'Command 13 of 13 failed: Unsupported object type: "roof". Nothing was changed.'
+      },
+      {
+        name: "code instead of a command",
+        commands: [...plan.slice(0, 4), "eval('buildEverything()')", ...plan.slice(4)],
+        message: "Command 5 of 13 failed: Malformed command: expected a plain object. Nothing was changed."
+      }
+    ];
+
+    for (const testCase of cases) {
+      const app = wireApp(alwaysReply(testCase.commands));
+      // Something on the redo stack, to prove a rejected plan leaves it alone.
+      const beam = addThroughExecutor(app.context, { type: "beam.add", beam: {} });
+      app.context.history.undo();
+
+      await app.controller.submit(HOUSE_PROMPT);
+
+      assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, `${testCase.name}: nothing was built`);
+      assertEqual(app.context.history.canUndo(), false, `${testCase.name}: no history entry`);
+      assertEqual(app.controller.getState().status, "error", `${testCase.name}: status`);
+      assertEqual(app.controller.getState().message, testCase.message, `${testCase.name}: message`);
+      app.context.history.redo();
+      assertEqual(app.context.beamStore.get(beam)?.id, beam, `${testCase.name}: the earlier redo still works`);
+    }
+  });
+
+  await check("AI house: a plan that arrives while a drag holds a history group open changes nothing", async () => {
+    const app = wireApp(mockProviderBackend);
+
+    app.context.history.beginGroup(); // what ObjectManipulator holds open during a drag
+    await app.controller.submit(HOUSE_PROMPT);
+    assertEqual(app.context.history.isGrouping(), true, "the drag's group is still open, untouched");
+    app.context.history.cancelGroup();
+
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, "nothing was built");
+    assertEqual(app.controller.getState().status, "error", "status");
+    assertIncludes(app.controller.getState().message, "still in progress", "message");
+  });
+
+  await check("AI house: the in-process MockAIProvider and the backend request path produce the same plan and the same model", async () => {
+    const direct = createProjectContext();
+    const directService = new AIService({
+      provider: new MockAIProvider(),
+      commandExecutor: direct.commandExecutor,
+      history: direct.history,
+      snapshotSource: direct
+    });
+    const directResult = await directService.submit(HOUSE_PROMPT);
+
+    const app = wireApp(mockProviderBackend);
+    await app.controller.submit(HOUSE_PROMPT);
+
+    assertTrue(directResult.success, "in-process: success");
+    assertEqual(app.controller.getState().status, "success", "backend path: success");
+    assertSameJson(
+      directResult.outcomes.map((outcome) => outcome.command),
+      buildSimpleHousePlan({ length: 10, width: 8 }),
+      "in-process: exactly the reference plan"
+    );
+    // Ids differ (every context shares the id counters), so compare everything else.
+    const withoutIds = (context: ProjectContext) => buildAIProjectSnapshot(context).objects.map(({ id, ...rest }) => rest);
+    assertSameJson(withoutIds(app.context), withoutIds(direct), "the same 12 objects either way, ids aside");
+  });
+
+  await check("every type keeps its base where it was when its vertical size changes - grounded stays grounded, raised stays raised", async () => {
+    // The store rule the AI house relies on: a wall standing on the slab, or
+    // a window on its sill, must not drop to the ground when resized.
+    const context = createProjectContext();
+    type Sized = { position: { y: number }; dimensions: Record<string, number> };
+    const stores: Record<string, { get(id: string): { position: { y: number }; dimensions: object } | undefined }> = {
+      wall: context.wallStore,
+      pillar: context.pillarStore,
+      beam: context.beamStore,
+      slab: context.slabStore,
+      door: context.doorStore,
+      window: context.windowStore
+    };
+    const read = (type: string, id: string): Sized => {
+      const object = stores[type].get(id);
+      assertTrue(object, `${id} exists`);
+      return { position: object.position, dimensions: { ...object.dimensions } as Record<string, number> };
+    };
+
+    for (const type of Object.keys(stores)) {
+      const size = type === "slab" ? "thickness" : "height";
+      const grounded = addThroughExecutor(context, { type: `${type}.add`, [type]: {} });
+      const raised = addThroughExecutor(context, { type: `${type}.add`, [type]: { position: { x: 30, y: 5, z: 0 } } });
+
+      for (const id of [grounded, raised]) {
+        const before = read(type, id);
+        const base = before.position.y - before.dimensions[size] / 2;
+        const edit = { dimensions: { ...before.dimensions, [size]: before.dimensions[size] + 0.3 } };
+        assertTrue(context.commandExecutor.execute({ type: `${type}.update`, id, changes: edit }).success, `${id}: ${size} edited`);
+        const after = read(type, id);
+        assertTrue(Math.abs(after.position.y - after.dimensions[size] / 2 - base) < 1e-9, `${id}: its base stays at y = ${base}`);
+      }
+
+      const current = read(type, raised);
+      const other = Object.keys(current.dimensions).find((key) => key !== size);
+      assertTrue(other, `${type} has another dimension`);
+      const edit = { dimensions: { ...current.dimensions, [other]: current.dimensions[other] + 0.5 } };
+      assertTrue(context.commandExecutor.execute({ type: `${type}.update`, id: raised, changes: edit }).success, `${raised}: ${other} edited`);
+      assertEqual(read(type, raised).position.y, current.position.y, `${raised}: a ${other}-only edit leaves y alone`);
+    }
   });
 
   // --- Secrets and harness discipline ---

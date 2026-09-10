@@ -27,14 +27,23 @@
  * allowImportingTsExtensions in tsconfig.json) - this file is run
  * directly by Node, not bundled by Vite.
  */
-import { AICommandPipeline } from "./AICommandPipeline.ts";
+import { AICommandPipeline, MAX_COMMANDS_PER_RESPONSE } from "./AICommandPipeline.ts";
 import type { CommandExecutorLike } from "./AICommandPipeline.ts";
 import { MockAIProvider } from "./MockAIProvider.ts";
+import { DEFAULT_HOUSE_FOOTPRINT, buildSimpleHousePlan } from "./housePlan.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "./types.ts";
 import { parseAIProjectSnapshot } from "./parseProjectSnapshot.ts";
 import { buildAIProjectContext } from "./aiProjectContext.ts";
 import { analyzeConstructionGeometry } from "./geometry/analyzeConstructionGeometry.ts";
-import type { AIProjectContext, AIProjectSnapshot, AIProviderRequest, AIProviderResponse, AIPipelineResult } from "./types.ts";
+import type {
+  AIContextObject,
+  AIProjectContext,
+  AIProjectSnapshot,
+  AIProviderRequest,
+  AIProviderResponse,
+  AIPipelineResult
+} from "./types.ts";
+import type { Command } from "../commands/types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
 import { AiPromptController, isAiPromptSubmitKey } from "./AiPromptController.ts";
@@ -693,20 +702,22 @@ async function run(): Promise<void> {
 
   // --- Malformed / unsupported commands ---
 
-  await check("AICommandPipeline rejects a structurally malformed command but still processes the rest of the batch", async () => {
-    const provider = fixedProvider({ commands: [42, { type: "wall.add", wall: {} }] });
+  await check("AICommandPipeline rejects the whole response when any command is malformed - not even the valid ones run", async () => {
+    const provider = fixedProvider({ commands: [{ type: "wall.add", wall: {} }, 42, { type: "pillar.add", pillar: {} }] });
     const executor = makeExecutorSpy();
     const pipeline = new AICommandPipeline(provider, executor);
 
     const result = await pipeline.run("Create a wall", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
-    assertEqual(result.outcomes.length, 2, "result.outcomes.length");
-    assertEqual(result.outcomes[0].result.success, false, "first outcome should fail structural validation");
-    assertEqual(result.outcomes[1].result.success, true, "second outcome should still be executed and succeed");
-    assertEqual(executor.calls.length, 1, "only the well-formed command should reach the executor");
+    assertEqual(executor.calls.length, 0, "nothing reaches the executor - validation covers the whole response first");
+    assertEqual(result.outcomes.length, 3, "one outcome per command");
+    assertEqual(result.outcomes[1].result.message, "Malformed command: expected a plain object.", "the malformed command says why");
+    assertTrue(result.outcomes[0].result.message?.startsWith("Not executed: command 2"), "a valid command says it wasn't run");
+    assertTrue(result.outcomes[2].result.message?.startsWith("Not executed: command 2"), "so does the one after it");
+    assertEqual(result.errors.length, 1, "one error, for the malformed command");
     assertEqual(result.errors[0].stage, "validation", "error stage");
-    assertEqual(result.errors[0].commandIndex, 0, "error commandIndex");
+    assertEqual(result.errors[0].commandIndex, 1, "error commandIndex");
   });
 
   await check("AICommandPipeline rejects an unsupported object type", async () => {
@@ -748,7 +759,7 @@ async function run(): Promise<void> {
 
   // --- Command failure propagation ---
 
-  await check("AICommandPipeline propagates one command's execution failure without aborting the rest of the batch", async () => {
+  await check("AICommandPipeline stops at the first execution failure - later commands are never run", async () => {
     const executor = makeExecutorSpy((input) => {
       const type = (input as { type: string }).type;
       return type === "wall.add"
@@ -757,21 +768,243 @@ async function run(): Promise<void> {
     });
     const provider = fixedProvider({
       commands: [
+        { type: "pillar.add", pillar: {} },
         { type: "wall.add", wall: {} },
-        { type: "pillar.add", pillar: {} }
+        { type: "beam.add", beam: {} }
       ]
     });
     const pipeline = new AICommandPipeline(provider, executor);
 
-    const result = await pipeline.run("Create a wall and add a pillar", emptySnapshot);
+    const result = await pipeline.run("Add a pillar, a wall and a beam", emptySnapshot);
 
     assertEqual(result.success, false, "result.success");
-    assertEqual(executor.calls.length, 2, "both commands should have been attempted");
-    assertEqual(result.outcomes[0].result.success, false, "first outcome");
-    assertEqual(result.outcomes[1].result.success, true, "second outcome should still succeed");
+    assertEqual(executor.calls.length, 2, "the beam after the failing wall was never attempted");
+    assertEqual(result.outcomes[1].result.message, "Could not add wall: validation failed.", "the failing command's own result");
+    assertEqual(result.outcomes[2].result.message, "Not executed: command 2 failed.", "a later command says it wasn't run");
     assertEqual(result.errors.length, 1, "result.errors.length");
     assertEqual(result.errors[0].stage, "execution", "error stage");
-    assertEqual(result.errors[0].commandIndex, 0, "error commandIndex");
+    assertEqual(result.errors[0].commandIndex, 1, "error commandIndex");
+  });
+
+  /**
+   * An executor stand-in that keeps "objects" in a list and records each
+   * add in a real HistoryManager - what the real *HistoryController classes
+   * do - so rollback and grouping can be checked without the real stores.
+   */
+  function makeRecordingExecutor(history: HistoryManager, failOnType: string | null = null) {
+    const objects: string[] = [];
+    let nextId = 1;
+    return {
+      objects,
+      execute(input: unknown): CommandResult {
+        const type = (input as { type: string }).type;
+        if (type === failOnType) {
+          return { success: false, message: `Could not run ${type}.` };
+        }
+        const id = `object-${nextId++}`;
+        objects.push(id);
+        history.record({
+          undo: () => {
+            objects.splice(objects.indexOf(id), 1);
+          },
+          redo: () => {
+            objects.push(id);
+          }
+        });
+        return { success: true, objectId: id };
+      }
+    };
+  }
+
+  const threeAdds = [
+    { type: "wall.add", wall: {} },
+    { type: "pillar.add", pillar: {} },
+    { type: "beam.add", beam: {} }
+  ];
+
+  await check("with a history, a response that fails part-way is rolled back completely and records nothing", async () => {
+    const history = new HistoryManager();
+    const executor = makeRecordingExecutor(history, "beam.add");
+    const pipeline = new AICommandPipeline(fixedProvider({ commands: threeAdds }), executor, history);
+
+    const result = await pipeline.run("Add a wall, a pillar and a beam", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(executor.objects, [], "the wall and pillar added before the failure were removed again");
+    assertEqual(history.canUndo(), false, "no history entry");
+    assertEqual(history.isGrouping(), false, "the group was closed");
+    assertEqual(result.outcomes[0].result.success, false, "a rolled-back command doesn't count as a success");
+    assertTrue(result.outcomes[0].result.message?.startsWith("Rolled back: command 3 failed"), "and says it was rolled back");
+    assertEqual(result.outcomes[2].result.message, "Could not run beam.add.", "the failing command's own result");
+  });
+
+  await check("with a history, a successful response is ONE undo entry - one undo removes all of it, one redo restores it", async () => {
+    const history = new HistoryManager();
+    const executor = makeRecordingExecutor(history);
+    const pipeline = new AICommandPipeline(fixedProvider({ commands: threeAdds }), executor, history);
+
+    const result = await pipeline.run("Add a wall, a pillar and a beam", emptySnapshot);
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(executor.objects, ["object-1", "object-2", "object-3"], "three objects");
+
+    history.undo();
+    assertDeepEqual(executor.objects, [], "one undo removes all three");
+    assertEqual(history.canUndo(), false, "it was a single entry");
+    history.redo();
+    assertDeepEqual(executor.objects, ["object-1", "object-2", "object-3"], "one redo restores all three, same ids");
+  });
+
+  await check("a response that arrives while a history group is open (a drag in progress) changes nothing", async () => {
+    const history = new HistoryManager();
+    const executor = makeRecordingExecutor(history);
+    const pipeline = new AICommandPipeline(fixedProvider({ commands: threeAdds }), executor, history);
+
+    history.beginGroup();
+    const result = await pipeline.run("Add a wall, a pillar and a beam", emptySnapshot);
+    assertEqual(history.isGrouping(), true, "the drag's group is still open, untouched");
+    history.cancelGroup();
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(executor.objects, [], "nothing was added");
+    assertTrue(result.errors[0].message.includes("still in progress"), "clear message");
+  });
+
+  await check("AICommandPipeline refuses a response with more commands than one response may contain", async () => {
+    const commands = Array.from({ length: MAX_COMMANDS_PER_RESPONSE + 1 }, () => ({ type: "wall.add", wall: {} }));
+    const executor = makeExecutorSpy();
+
+    const result = await new AICommandPipeline(fixedProvider({ commands }), executor).run("Add many walls", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(result.errors[0].stage, "provider", "error stage");
+    assertEqual(executor.calls.length, 0, "nothing executed");
+  });
+
+  // --- MockAIProvider: a whole house (see housePlan.ts) ---
+
+  const HOUSE_INSTRUCTION = "Build a simple 2-bedroom house on a 10m × 8m footprint.";
+  const interpretWith = (instruction: string, projectContext: AIProjectContext = emptyContext, types = AI_SUPPORTED_OBJECT_TYPES) =>
+    new MockAIProvider().interpret({ instruction, projectContext, availableObjectTypes: types });
+
+  await check("MockAIProvider answers a house instruction with the complete 12-command plan, in build order", () => {
+    const response = interpretWith(HOUSE_INSTRUCTION);
+
+    assertDeepEqual(response.commands, buildSimpleHousePlan({ length: 10, width: 8 }), "exactly the reference plan");
+    assertDeepEqual(
+      response.commands.map((command) => (command as { type: string }).type),
+      ["slab.add", "wall.add", "wall.add", "wall.add", "wall.add", "pillar.add", "pillar.add", "pillar.add", "pillar.add", "door.add", "window.add", "window.add"],
+      "1 slab, 4 walls, 4 pillars, 1 door, 2 windows"
+    );
+    assertTrue(response.notes?.includes("10 m × 8 m house centered on the origin"), "notes describe the plan");
+    assertTrue(response.notes?.includes("no interior walls"), "notes say rooms weren't modeled");
+    assertDeepEqual(interpretWith(HOUSE_INSTRUCTION), response, "deterministic: the same request, the same response");
+  });
+
+  await check("the reference house plan on a 10 x 8 footprint, pinned: slab, perimeter walls between corner pillars, door and windows on the outside faces", () => {
+    const quarterTurn = Math.PI / 2;
+    const wall = (length: number, rotation: number, x: number, z: number) => ({
+      type: "wall.add",
+      wall: { length, height: 2.7, thickness: 0.2, rotation, position: { x, y: 1.55, z } }
+    });
+    const pillar = (x: number, z: number) => ({
+      type: "pillar.add",
+      pillar: { width: 0.4, depth: 0.4, height: 2.7, rotation: 0, position: { x, y: 1.55, z } }
+    });
+    const windowAt = (rotation: number, x: number, z: number) => ({
+      type: "window.add",
+      window: { width: 1.2, height: 1.2, thickness: 0.05, rotation, position: { x, y: 1.7, z } }
+    });
+
+    assertDeepEqual(
+      buildSimpleHousePlan({ length: 10, width: 8 }),
+      [
+        { type: "slab.add", slab: { length: 10, width: 8, thickness: 0.2, rotation: 0, position: { x: 0, y: 0.1, z: 0 } } },
+        wall(9.2, 0, 0, 3.9),
+        wall(9.2, 0, 0, -3.9),
+        wall(7.2, quarterTurn, -4.9, 0),
+        wall(7.2, quarterTurn, 4.9, 0),
+        pillar(-4.8, -3.8),
+        pillar(4.8, -3.8),
+        pillar(4.8, 3.8),
+        pillar(-4.8, 3.8),
+        { type: "door.add", door: { width: 0.9, height: 2.1, thickness: 0.05, rotation: 0, position: { x: 0, y: 1.25, z: 4.025 } } },
+        windowAt(0, -2.5, -4.025),
+        windowAt(quarterTurn, 5.025, -2)
+      ],
+      "the plan"
+    );
+  });
+
+  /** A plan command as the geometry analysis sees an object - the same fields buildAIProjectSnapshot copies out of a store. */
+  function planObject(command: Command, index: number) {
+    const type = command.type.split(".")[0] as AIContextObject["type"];
+    const options = (command as unknown as Record<string, { position: AIContextObject["position"]; rotation: number } & Record<string, number>>)[type];
+    const { position, rotation, ...dimensions } = options;
+    return { id: `${type}-${index + 1}`, type, position, rotation, dimensions, material: "generic", color: "#c9c9c9", assemblyIds: [] };
+  }
+
+  await check("the house plan's parts meet face to face - no two boxes share any volume - on several footprints", () => {
+    for (const footprint of [{ length: 10, width: 8 }, { length: 4, width: 4 }, { length: 23.5, width: 11 }]) {
+      const objects = buildSimpleHousePlan(footprint).map(planObject);
+      const geometry = analyzeConstructionGeometry({ ...emptySnapshot, objects });
+      const label = `${footprint.length} x ${footprint.width}`;
+
+      assertEqual(geometry.invalidObjects.length, 0, `${label}: no invalid objects`);
+      const overlapping = geometry.relationships.filter((pair) => pair.overlap.aabb).map((pair) => `${pair.a}/${pair.b}`);
+      assertEqual(overlapping.join(", "), "", `${label}: no overlapping pair`);
+    }
+  });
+
+  await check("MockAIProvider reads the footprint ('12 x 9', '12.5 by 9 metres') and falls back to 10 x 8 with a note", () => {
+    assertDeepEqual(interpretWith("Build a house, 12 x 9").commands, buildSimpleHousePlan({ length: 12, width: 9 }), "12 x 9");
+    assertDeepEqual(
+      interpretWith("Create a small cottage 12.5 by 9 metres").commands,
+      buildSimpleHousePlan({ length: 12.5, width: 9 }),
+      "12.5 by 9 metres"
+    );
+    const defaulted = interpretWith("Build me a house");
+    assertDeepEqual(defaulted.commands, buildSimpleHousePlan(DEFAULT_HOUSE_FOOTPRINT), "the default footprint");
+    assertTrue(defaulted.notes?.includes("No footprint was given"), "the default is explained");
+  });
+
+  await check("MockAIProvider refuses an out-of-range footprint, or a house whose types aren't all available - notes, no commands", () => {
+    const tiny = interpretWith("Build a house 2m x 3m");
+    assertEqual(tiny.commands.length, 0, "no commands for a 2 x 3 footprint");
+    assertTrue(tiny.notes?.includes("outside what the house plan supports"), "explained");
+
+    const noDoors = interpretWith(HOUSE_INSTRUCTION, emptyContext, AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "door"));
+    assertEqual(noDoors.commands.length, 0, "no commands without doors");
+    assertTrue(noDoors.notes?.includes("door"), "the missing type is named");
+  });
+
+  await check("MockAIProvider only plans a house when a new house is asked for", () => {
+    assertDeepEqual(interpretWith("Build a wall next to the house").commands, [{ type: "wall.add", wall: {} }], "a wall next to a house is a wall");
+    assertDeepEqual(interpretWith("Add a door to the house").commands, [{ type: "door.add", door: {} }], "a door for a house is a door");
+    assertDeepEqual(interpretWith("Create a wall and add a pillar").commands.length, 2, "ordinary instructions are unaffected");
+  });
+
+  await check("MockAIProvider uses the context's geometry to place the house clear of existing objects", () => {
+    const wallAtOrigin: AIContextObject = {
+      id: "wall-1",
+      type: "wall",
+      position: { x: 0, y: 1.35, z: 0 },
+      rotation: 0,
+      dimensions: { height: 2.7, length: 4, thickness: 0.2 },
+      material: "generic",
+      color: "#c9c9c9",
+      assemblyIds: []
+    };
+    const context = buildAIProjectContext({ ...emptySnapshot, wallCount: 1, objects: [wallAtOrigin] });
+
+    const response = interpretWith(HOUSE_INSTRUCTION, context);
+
+    // The wall reaches x = 2; 1 m clearance plus the plan's 5.05 m half-reach is 8.05, rounded up to the next half meter.
+    assertDeepEqual(response.commands, buildSimpleHousePlan({ length: 10, width: 8, center: { x: 8.5, z: 0 } }), "moved to x = 8.5");
+    assertTrue(response.notes?.includes("centered at x = 8.5, z = 0, clear of the existing objects"), "notes say where, and why");
+
+    const objects = [wallAtOrigin, ...(response.commands as Command[]).map((command, index) => planObject(command, index + 1))];
+    const geometry = analyzeConstructionGeometry({ ...emptySnapshot, objects });
+    assertEqual(geometry.relationships.filter((pair) => pair.overlap.aabb).length, 0, "the house overlaps nothing, the existing wall included");
   });
 
   await check("AICommandPipeline propagates a real domain validation failure (invalid dimensions) from CommandExecutor", async () => {
@@ -821,12 +1054,12 @@ async function run(): Promise<void> {
 
   // --- No direct store mutation from the AI layer ---
 
-  await check("AICommandPipeline holds no store reference - only a provider and a CommandExecutorLike", async () => {
+  await check("AICommandPipeline holds no store reference - only a provider, a CommandExecutorLike, and an optional history group handle", async () => {
     const pipeline = new AICommandPipeline(new MockAIProvider(), makeExecutorSpy());
 
     const ownProperties = Object.getOwnPropertyNames(pipeline).sort();
 
-    assertDeepEqual(ownProperties, ["commandExecutor", "provider"], "AICommandPipeline's own instance properties");
+    assertDeepEqual(ownProperties, ["commandExecutor", "history", "provider"], "AICommandPipeline's own instance properties");
   });
 
   await check("every mutation an AI instruction causes goes through the CommandExecutorLike, and only that", async () => {
