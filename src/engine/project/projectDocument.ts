@@ -7,6 +7,8 @@ import { validateBeam } from "../beam/validateBeam.ts";
 import { validateSlab } from "../slab/validateSlab.ts";
 import { validateDoor } from "../door/validateDoor.ts";
 import { validateWindow } from "../window/validateWindow.ts";
+import { validateElement } from "../elements/validateElement.ts";
+import { getElementKind } from "../elements/catalog.ts";
 import { validateAssembly } from "../assemblies/AssemblyStore.ts";
 import type { WallData } from "../wall/types";
 import type { PillarData } from "../pillar/types";
@@ -14,6 +16,7 @@ import type { BeamData } from "../beam/types";
 import type { SlabData } from "../slab/types";
 import type { DoorData } from "../door/types";
 import type { WindowData } from "../window/types";
+import type { ElementData } from "../elements/types";
 import type { AssemblyData } from "../assemblies/types";
 
 /**
@@ -34,11 +37,13 @@ import type { AssemblyData } from "../assemblies/types";
 
 export const PROJECT_DOCUMENT_VERSION = 1;
 
-export const PERSISTED_OBJECT_TYPES = ["wall", "pillar", "beam", "slab", "door", "window"] as const;
+/** Every persisted object type: the six original types, and "element" for every catalog kind (elements/catalog.ts). */
+export const PERSISTED_OBJECT_TYPES = ["wall", "pillar", "beam", "slab", "door", "window", "element"] as const;
 export type PersistedObjectType = (typeof PERSISTED_OBJECT_TYPES)[number];
+type OriginalObjectType = Exclude<PersistedObjectType, "element">;
 
 /** A construction object exactly as its store holds it. */
-export type PersistedObject = WallData | PillarData | BeamData | SlabData | DoorData | WindowData;
+export type PersistedObject = WallData | PillarData | BeamData | SlabData | DoorData | WindowData | ElementData;
 
 export interface ProjectDocument {
   version: typeof PROJECT_DOCUMENT_VERSION;
@@ -46,8 +51,8 @@ export interface ProjectDocument {
   assemblies: AssemblyData[];
 }
 
-/** Each type's dimension names, in the order its factory writes them. */
-export const DIMENSION_KEYS: Readonly<Record<PersistedObjectType, readonly string[]>> = {
+/** Each original type's dimension names, in the order its factory writes them. An element's come from its catalog kind. */
+export const DIMENSION_KEYS: Readonly<Record<OriginalObjectType, readonly string[]>> = {
   wall: ["length", "height", "thickness"],
   pillar: ["width", "depth", "height"],
   beam: ["length", "width", "height"],
@@ -65,13 +70,15 @@ const VALIDATORS: Readonly<Record<PersistedObjectType, (object: PersistedObject)
   beam: (object) => validateBeam(object as BeamData),
   slab: (object) => validateSlab(object as SlabData),
   door: (object) => validateDoor(object as DoorData),
-  window: (object) => validateWindow(object as WindowData)
+  window: (object) => validateWindow(object as WindowData),
+  element: (object) => validateElement(object as ElementData)
 };
 
 export const MAX_PROJECT_NAME_LENGTH = 120;
 
-/** Ids the factories hand out: "<type>-<n>". Loading reserves them, so new objects never reuse one. */
+/** Ids the factories hand out: "<type>-<n>" - for an element, "<kind>-<n>". Loading reserves them, so new objects never reuse one. */
 const OBJECT_ID = /^(?:wall|pillar|beam|slab|door|window)-[1-9]\d*$/;
+const ELEMENT_ID = /^([a-z][a-z-]*[a-z])-[1-9]\d*$/;
 const ASSEMBLY_ID = /^assembly-[1-9]\d*$/;
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -95,28 +102,177 @@ function fail<T>(error: string): Parsed<T> {
   return { ok: false, error };
 }
 
+function isOpening(object: PersistedObject): object is DoorData | WindowData {
+  return object.type === "door" || object.type === "window";
+}
+
+/** A record's fields copied one key list at a time, in that order. */
+function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const key of keys) {
+    copy[key] = source[key];
+  }
+  return copy;
+}
+
 /**
  * An object in its canonical persisted form: every field copied out one
- * by one, dimensions in the order the factories write them. Both
- * serializeProject() and parseProjectDocument() produce this shape, so a
- * loaded object is the same JSON as the object that was saved.
+ * by one, dimensions (and an element's parameters) in the order the
+ * factories write them. Both serializeProject() and parseProjectDocument()
+ * produce this shape, so a loaded object is the same JSON as the object
+ * that was saved.
  */
 export function toPersistedObject(record: PersistedObject): PersistedObject {
-  const source = record.dimensions as unknown as Record<string, number>;
-  const dimensions: Record<string, number> = {};
-  for (const key of DIMENSION_KEYS[record.type]) {
-    dimensions[key] = source[key];
+  const position = { x: record.position.x, y: record.position.y, z: record.position.z };
+  if (record.type === "element") {
+    const definition = getElementKind(record.kind);
+    const dimensionKeys = definition ? definition.dimensions.map((spec) => spec.key) : Object.keys(record.dimensions);
+    const paramKeys = definition ? definition.params.map((spec) => spec.key) : Object.keys(record.params);
+    return {
+      id: record.id,
+      type: record.type,
+      kind: record.kind,
+      label: record.label,
+      position,
+      rotation: record.rotation,
+      dimensions: pick(record.dimensions, dimensionKeys),
+      params: pick(record.params, paramKeys),
+      material: record.material,
+      color: record.color,
+      assemblyId: record.assemblyId
+    } as unknown as PersistedObject;
   }
-  return {
+
+  const base = {
     id: record.id,
     type: record.type,
-    position: { x: record.position.x, y: record.position.y, z: record.position.z },
+    position,
     rotation: record.rotation,
-    dimensions,
+    dimensions: pick(record.dimensions as unknown as Record<string, unknown>, DIMENSION_KEYS[record.type]),
     material: record.material,
     color: record.color,
     assemblyId: record.assemblyId
-  } as unknown as PersistedObject;
+  };
+  return (isOpening(record) ? { ...base, hostId: record.hostId ?? null } : base) as unknown as PersistedObject;
+}
+
+/** The checks every object shares - position, rotation, material, color, assemblyId. */
+function parseCommonFields(
+  raw: Record<string, unknown>,
+  where: string
+): Parsed<{ position: { x: number; y: number; z: number }; rotation: number; material: string; color: string; assemblyId: string | null }> {
+  const position = raw.position;
+  if (!isPlainObject(position) || !isFiniteNumber(position.x) || !isFiniteNumber(position.y) || !isFiniteNumber(position.z)) {
+    return fail(`${where}: position must have finite numeric x, y and z.`);
+  }
+  const rotation = raw.rotation;
+  if (!isFiniteNumber(rotation)) {
+    return fail(`${where}: rotation must be a finite number.`);
+  }
+  const material = raw.material;
+  if (!isNonEmptyString(material)) {
+    return fail(`${where}: material must be a non-empty string.`);
+  }
+  const color = raw.color;
+  if (typeof color !== "string") {
+    return fail(`${where}: color must be a string.`);
+  }
+  const assemblyId = raw.assemblyId === undefined ? null : raw.assemblyId;
+  if (assemblyId !== null && !isNonEmptyString(assemblyId)) {
+    return fail(`${where}: assemblyId must be a non-empty string or null.`);
+  }
+  return { ok: true, value: { position: { x: position.x, y: position.y, z: position.z }, rotation, material, color, assemblyId } };
+}
+
+/** Exactly `expected` numeric dimensions, each finite and positive - in `expected`'s order. */
+function parseDimensions(raw: unknown, expected: readonly string[], typeLabel: string, where: string): Parsed<Record<string, number>> {
+  if (!isPlainObject(raw)) {
+    return fail(`${where}: dimensions must be an object.`);
+  }
+  const unexpected = Object.keys(raw).find((key) => !expected.includes(key));
+  if (unexpected !== undefined) {
+    return fail(`${where}: a ${typeLabel} has no "${unexpected}" dimension (expected ${expected.join(", ")}).`);
+  }
+  const ordered: Record<string, number> = {};
+  for (const key of expected) {
+    const value = raw[key];
+    if (!isFiniteNumber(value) || value <= 0) {
+      return fail(`${where}: dimensions.${key} must be a finite number greater than 0.`);
+    }
+    ordered[key] = value;
+  }
+  return { ok: true, value: ordered };
+}
+
+function parseElement(raw: Record<string, unknown>, path: string): Parsed<PersistedObject> {
+  const kind = raw.kind;
+  const definition = typeof kind === "string" ? getElementKind(kind) : undefined;
+  if (!definition) {
+    return fail(`${path}: ${JSON.stringify(kind)} is not a known element kind.`);
+  }
+
+  const id = raw.id;
+  const idMatch = typeof id === "string" ? ELEMENT_ID.exec(id) : null;
+  if (typeof id !== "string" || !idMatch || idMatch[1] !== definition.kind) {
+    return fail(`${path}: the id must look like "${definition.kind}-<number>", got ${JSON.stringify(id)}.`);
+  }
+  const where = `${path} (${id})`;
+
+  const label = raw.label;
+  if (!isNonEmptyString(label)) {
+    return fail(`${where}: label must be a non-empty string.`);
+  }
+
+  const common = parseCommonFields(raw, where);
+  if (!common.ok) {
+    return common;
+  }
+  const dimensions = parseDimensions(
+    raw.dimensions,
+    definition.dimensions.map((spec) => spec.key),
+    definition.label.toLowerCase(),
+    where
+  );
+  if (!dimensions.ok) {
+    return dimensions;
+  }
+
+  const rawParams = raw.params === undefined ? {} : raw.params;
+  if (!isPlainObject(rawParams)) {
+    return fail(`${where}: params must be an object.`);
+  }
+  const paramKeys = definition.params.map((spec) => spec.key);
+  const unexpected = Object.keys(rawParams).find((key) => !paramKeys.includes(key));
+  if (unexpected !== undefined) {
+    return fail(`${where}: a ${definition.label.toLowerCase()} has no "${unexpected}" parameter.`);
+  }
+  const params: Record<string, number | string> = {};
+  for (const key of paramKeys) {
+    const value = rawParams[key];
+    if (typeof value !== "number" && typeof value !== "string") {
+      return fail(`${where}: params.${key} is missing.`);
+    }
+    params[key] = value;
+  }
+
+  const element: ElementData = {
+    id,
+    type: "element",
+    kind: definition.kind,
+    label,
+    position: common.value.position,
+    rotation: common.value.rotation,
+    dimensions: dimensions.value,
+    params,
+    material: common.value.material,
+    color: common.value.color,
+    assemblyId: common.value.assemblyId
+  };
+  const validation = validateElement(element);
+  if (!validation.valid) {
+    return fail(`${where}: ${validation.errors[0]?.message ?? "invalid element."}`);
+  }
+  return { ok: true, value: element };
 }
 
 function parseObject(raw: unknown, path: string): Parsed<PersistedObject> {
@@ -128,7 +284,10 @@ function parseObject(raw: unknown, path: string): Parsed<PersistedObject> {
   if (typeof type !== "string" || !(PERSISTED_OBJECT_TYPES as readonly string[]).includes(type)) {
     return fail(`${path}: ${JSON.stringify(type)} is not a supported object type (${PERSISTED_OBJECT_TYPES.join(", ")}).`);
   }
-  const objectType = type as PersistedObjectType;
+  if (type === "element") {
+    return parseElement(raw, path);
+  }
+  const objectType = type as OriginalObjectType;
 
   const id = raw.id;
   if (typeof id !== "string" || !OBJECT_ID.test(id) || !id.startsWith(`${objectType}-`)) {
@@ -136,60 +295,35 @@ function parseObject(raw: unknown, path: string): Parsed<PersistedObject> {
   }
   const where = `${path} (${id})`;
 
-  const position = raw.position;
-  if (!isPlainObject(position) || !isFiniteNumber(position.x) || !isFiniteNumber(position.y) || !isFiniteNumber(position.z)) {
-    return fail(`${where}: position must have finite numeric x, y and z.`);
+  const common = parseCommonFields(raw, where);
+  if (!common.ok) {
+    return common;
+  }
+  const dimensions = parseDimensions(raw.dimensions, DIMENSION_KEYS[objectType], objectType, where);
+  if (!dimensions.ok) {
+    return dimensions;
   }
 
-  const rotation = raw.rotation;
-  if (!isFiniteNumber(rotation)) {
-    return fail(`${where}: rotation must be a finite number.`);
-  }
-
-  const dimensions = raw.dimensions;
-  if (!isPlainObject(dimensions)) {
-    return fail(`${where}: dimensions must be an object.`);
-  }
-  const expected = DIMENSION_KEYS[objectType];
-  const unexpected = Object.keys(dimensions).find((key) => !expected.includes(key));
-  if (unexpected !== undefined) {
-    return fail(`${where}: a ${objectType} has no "${unexpected}" dimension (expected ${expected.join(", ")}).`);
-  }
-  const orderedDimensions: Record<string, number> = {};
-  for (const key of expected) {
-    const value = dimensions[key];
-    if (!isFiniteNumber(value) || value <= 0) {
-      return fail(`${where}: dimensions.${key} must be a finite number greater than 0.`);
-    }
-    orderedDimensions[key] = value;
-  }
-
-  const material = raw.material;
-  if (!isNonEmptyString(material)) {
-    return fail(`${where}: material must be a non-empty string.`);
-  }
-
-  const color = raw.color;
-  if (typeof color !== "string") {
-    return fail(`${where}: color must be a string.`);
-  }
-
-  const assemblyId = raw.assemblyId === undefined ? null : raw.assemblyId;
-  if (assemblyId !== null && !isNonEmptyString(assemblyId)) {
-    return fail(`${where}: assemblyId must be a non-empty string or null.`);
-  }
-
-  const object = {
+  const record: Record<string, unknown> = {
     id,
     type: objectType,
-    position: { x: position.x, y: position.y, z: position.z },
-    rotation,
-    dimensions: orderedDimensions,
-    material,
-    color,
-    assemblyId
-  } as unknown as PersistedObject;
+    position: common.value.position,
+    rotation: common.value.rotation,
+    dimensions: dimensions.value,
+    material: common.value.material,
+    color: common.value.color,
+    assemblyId: common.value.assemblyId
+  };
 
+  if (objectType === "door" || objectType === "window") {
+    const hostId = raw.hostId === undefined ? null : raw.hostId;
+    if (hostId !== null && !isNonEmptyString(hostId)) {
+      return fail(`${where}: hostId must be a wall id or null.`);
+    }
+    record.hostId = hostId;
+  }
+
+  const object = record as unknown as PersistedObject;
   // Last, the type's own validator - so a stored object obeys exactly the
   // rules a live edit does (e.g. a 6-digit hex color).
   const validation = VALIDATORS[objectType](object);
@@ -257,13 +391,15 @@ function parseAssembly(raw: unknown, path: string): Parsed<AssemblyData> {
  *
  * - anything that isn't a version-1 document with `objects` and
  *   `assemblies` arrays
- * - an unknown object type
+ * - an unknown object type, or an element of an unknown kind
  * - a malformed or duplicate object id, or a duplicate assembly id
- * - missing, extra, zero, negative, or non-numeric dimensions
+ * - missing, extra, zero, negative, or non-numeric dimensions, and an
+ *   element's unknown or invalid parameters
  * - a non-finite position or rotation, a blank material, a bad color -
  *   and anything else the type's own validator rejects
- * - an assembly member that isn't an object in the document, or an
- *   object whose assemblyId names no assembly in it
+ * - an assembly member that isn't an object in the document, an object
+ *   whose assemblyId names no assembly in it, or a door/window whose
+ *   hostId names no wall in it
  */
 export function parseProjectDocument(value: unknown): ParsedProjectDocument {
   if (!isPlainObject(value)) {
@@ -320,6 +456,12 @@ export function parseProjectDocument(value: unknown): ParsedProjectDocument {
   const orphan = objects.find((object) => object.assemblyId !== null && !assemblyIds.has(object.assemblyId));
   if (orphan) {
     return { ok: false, error: `${orphan.id}: assemblyId "${orphan.assemblyId}" is not an assembly in this project.` };
+  }
+
+  const wallIds = new Set(objects.filter((object) => object.type === "wall").map((object) => object.id));
+  const unhosted = objects.find((object) => isOpening(object) && object.hostId !== null && !wallIds.has(object.hostId));
+  if (unhosted && isOpening(unhosted)) {
+    return { ok: false, error: `${unhosted.id}: hostId "${unhosted.hostId}" is not a wall in this project.` };
   }
 
   return { ok: true, document: { version: PROJECT_DOCUMENT_VERSION, objects, assemblies } };

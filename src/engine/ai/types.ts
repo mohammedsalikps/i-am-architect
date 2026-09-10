@@ -11,14 +11,20 @@ import type { ConstructionGeometryAnalysis } from "./geometry/types";
  * provider is allowed to see of the current project.
  */
 
-/** The construction object types the AI layer currently knows how to produce commands for. */
+/**
+ * The construction object types the AI layer currently knows how to
+ * produce commands for. "element" covers every parametric kind in the
+ * element catalog (elements/catalog.ts) through element.* commands - the
+ * catalog is the registry a provider discovers the kinds from.
+ */
 export const AI_SUPPORTED_OBJECT_TYPES: readonly ObjectType[] = [
   "wall",
   "pillar",
   "beam",
   "slab",
   "door",
-  "window"
+  "window",
+  "element"
 ];
 
 /**
@@ -64,6 +70,10 @@ export interface AIProjectSnapshot {
 export interface AIContextObject {
   id: string;
   type: ObjectType;
+  /** Elements only: the catalog kind (e.g. "water-pipe") - absent for the six original types. */
+  kind?: string;
+  /** Elements only: the name people see (a room's name). */
+  label?: string;
   /** Center of the object's bounding volume, in meters. */
   position: { x: number; y: number; z: number };
   /** Rotation around the vertical (Y) axis, in radians. */
@@ -110,6 +120,12 @@ export interface AIObjectSourceRecord {
   color: string;
 }
 
+/** An element store record - an AIObjectSourceRecord with its kind and label. */
+export interface AIElementSourceRecord extends AIObjectSourceRecord {
+  kind: string;
+  label: string;
+}
+
 /** The fields buildAIProjectSnapshot() reads from each assembly record. */
 export interface AIAssemblySourceRecord {
   id: string;
@@ -138,6 +154,8 @@ export interface AIProjectSnapshotSource {
   slabStore: { getAll(): readonly AIObjectSourceRecord[] };
   doorStore: { getAll(): readonly AIObjectSourceRecord[] };
   windowStore: { getAll(): readonly AIObjectSourceRecord[] };
+  /** Every element kind - optional so a source built for the six original types keeps working. */
+  elementStore?: { getAll(): readonly AIElementSourceRecord[] };
   assemblyStore: { getAll(): readonly AIAssemblySourceRecord[] };
   selectionStore: { get(): string | null };
 }
@@ -184,6 +202,10 @@ function copyDimensions(dimensions: object): Record<string, number> {
  * objects and assemblies are sorted by id, dimension keys are sorted, and
  * timestamps are left out - so the same project state always yields the
  * same snapshot.
+ *
+ * Elements appear among `objects` with type "element", their `kind`, and
+ * their `label`. The six original types carry neither field, so their
+ * snapshots are exactly what they were before elements existed.
  */
 export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProjectSnapshot {
   const walls = source.wallStore.getAll();
@@ -192,6 +214,7 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
   const slabs = source.slabStore.getAll();
   const doors = source.doorStore.getAll();
   const windows = source.windowStore.getAll();
+  const elements = source.elementStore?.getAll() ?? [];
   const assemblyRecords = source.assemblyStore.getAll();
 
   const assemblies: AIContextAssembly[] = assemblyRecords
@@ -216,18 +239,31 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
     }
   }
 
-  const objects: AIContextObject[] = [...walls, ...pillars, ...beams, ...slabs, ...doors, ...windows]
-    .map((record) => ({
-      id: record.id,
-      type: record.type,
-      position: { x: record.position.x, y: record.position.y, z: record.position.z },
-      rotation: record.rotation,
-      dimensions: copyDimensions(record.dimensions),
-      material: record.material,
-      color: record.color,
-      assemblyIds: [...(membership.get(record.id) ?? [])]
-    }))
-    .sort((a, b) => compareIds(a.id, b.id) || compareIds(a.type, b.type));
+  const originals: AIContextObject[] = [...walls, ...pillars, ...beams, ...slabs, ...doors, ...windows].map((record) => ({
+    id: record.id,
+    type: record.type,
+    position: { x: record.position.x, y: record.position.y, z: record.position.z },
+    rotation: record.rotation,
+    dimensions: copyDimensions(record.dimensions),
+    material: record.material,
+    color: record.color,
+    assemblyIds: [...(membership.get(record.id) ?? [])]
+  }));
+
+  const elementObjects: AIContextObject[] = elements.map((record) => ({
+    id: record.id,
+    type: record.type,
+    kind: record.kind,
+    label: record.label,
+    position: { x: record.position.x, y: record.position.y, z: record.position.z },
+    rotation: record.rotation,
+    dimensions: copyDimensions(record.dimensions),
+    material: record.material,
+    color: record.color,
+    assemblyIds: [...(membership.get(record.id) ?? [])]
+  }));
+
+  const objects = [...originals, ...elementObjects].sort((a, b) => compareIds(a.id, b.id) || compareIds(a.type, b.type));
 
   return {
     wallCount: walls.length,

@@ -7,6 +7,7 @@ import { reserveBeamIds } from "../beam/createBeam.ts";
 import { reserveSlabIds } from "../slab/createSlab.ts";
 import { reserveDoorIds } from "../door/createDoor.ts";
 import { reserveWindowIds } from "../window/createWindow.ts";
+import { reserveElementIds } from "../elements/createElement.ts";
 import { reserveAssemblyIds } from "../assemblies/AssemblyStore.ts";
 import type { PersistedObject, PersistedObjectType, ProjectDocument } from "./projectDocument";
 import type { AssemblyData } from "../assemblies/types";
@@ -22,29 +23,51 @@ import type { ProjectContext } from "./ProjectContext";
 /** The parts of ProjectContext that saving and loading touch. */
 export type PersistableProject = Pick<
   ProjectContext,
-  "wallStore" | "pillarStore" | "beamStore" | "slabStore" | "doorStore" | "windowStore" | "assemblyStore" | "selectionStore" | "history"
+  | "wallStore"
+  | "pillarStore"
+  | "beamStore"
+  | "slabStore"
+  | "doorStore"
+  | "windowStore"
+  | "elementStore"
+  | "assemblyStore"
+  | "selectionStore"
+  | "history"
 >;
+
+function allObjects(project: PersistableProject): PersistedObject[] {
+  return [
+    ...project.wallStore.getAll(),
+    ...project.pillarStore.getAll(),
+    ...project.beamStore.getAll(),
+    ...project.slabStore.getAll(),
+    ...project.doorStore.getAll(),
+    ...project.windowStore.getAll(),
+    ...project.elementStore.getAll()
+  ];
+}
 
 /**
  * The current model as a plain, JSON-safe document: every object exactly
  * as its store holds it, and every assembly. Only reads - saving is never
  * an undo step and never changes the selection.
  *
- * An assembly keeps a deleted member's id so that undoing the delete
- * restores the membership (see assemblies/README.md). History isn't saved,
- * so that id could never come back - only live members are written.
+ * Two references can outlive what they point at, because history isn't
+ * saved: an assembly keeps a deleted member's id (so undoing the delete
+ * restores the membership - see assemblies/README.md), and a door or
+ * window keeps the id of a deleted host wall. Neither could come back
+ * after a reload, so only live members are written, and an opening whose
+ * wall is gone is saved unhosted.
  */
 export function serializeProject(project: PersistableProject): ProjectDocument {
-  const records: PersistedObject[] = [
-    ...project.wallStore.getAll(),
-    ...project.pillarStore.getAll(),
-    ...project.beamStore.getAll(),
-    ...project.slabStore.getAll(),
-    ...project.doorStore.getAll(),
-    ...project.windowStore.getAll()
-  ];
-  const objects = records.map(toPersistedObject);
-  const liveIds = new Set(objects.map((object) => object.id));
+  const canonical = allObjects(project).map(toPersistedObject);
+  const liveIds = new Set(canonical.map((object) => object.id));
+  const wallIds = new Set(canonical.filter((object) => object.type === "wall").map((object) => object.id));
+  const objects = canonical.map((object) =>
+    (object.type === "door" || object.type === "window") && object.hostId !== null && !wallIds.has(object.hostId)
+      ? { ...object, hostId: null }
+      : object
+  );
 
   const assemblies: AssemblyData[] = project.assemblyStore.getAll().map((assembly) => ({
     id: assembly.id,
@@ -65,19 +88,9 @@ interface ModelState {
   assemblies: AssemblyData[];
 }
 
-/** Everything currently in the stores, exactly - including stale assembly members - so a failed load can put it back. */
+/** Everything currently in the stores, exactly - including stale references - so a failed load can put it back. */
 function captureModel(project: PersistableProject): ModelState {
-  return {
-    objects: [
-      ...project.wallStore.getAll(),
-      ...project.pillarStore.getAll(),
-      ...project.beamStore.getAll(),
-      ...project.slabStore.getAll(),
-      ...project.doorStore.getAll(),
-      ...project.windowStore.getAll()
-    ],
-    assemblies: project.assemblyStore.getAll()
-  };
+  return { objects: allObjects(project), assemblies: project.assemblyStore.getAll() };
 }
 
 function addObject(project: PersistableProject, object: PersistedObject): { valid: boolean; errors: { message: string }[] } {
@@ -94,12 +107,22 @@ function addObject(project: PersistableProject, object: PersistedObject): { vali
       return project.doorStore.add(object);
     case "window":
       return project.windowStore.add(object);
+    case "element":
+      return project.elementStore.add(object);
   }
 }
 
 /** Empties every store, then fills them from `state`. Returns an error message if a store refused something. */
 function replaceModel(project: PersistableProject, state: ModelState): string | null {
-  for (const store of [project.wallStore, project.pillarStore, project.beamStore, project.slabStore, project.doorStore, project.windowStore]) {
+  for (const store of [
+    project.wallStore,
+    project.pillarStore,
+    project.beamStore,
+    project.slabStore,
+    project.doorStore,
+    project.windowStore,
+    project.elementStore
+  ]) {
     for (const record of store.getAll()) {
       store.remove(record.id);
     }
@@ -129,7 +152,8 @@ const RESERVE_IDS: Readonly<Record<PersistedObjectType, (ids: string[]) => void>
   beam: reserveBeamIds,
   slab: reserveSlabIds,
   door: reserveDoorIds,
-  window: reserveWindowIds
+  window: reserveWindowIds,
+  element: reserveElementIds
 };
 
 /**

@@ -10,6 +10,7 @@ import { BeamStore } from "../beam/BeamStore.ts";
 import { SlabStore } from "../slab/SlabStore.ts";
 import { DoorStore } from "../door/DoorStore.ts";
 import { WindowStore } from "../window/WindowStore.ts";
+import { ElementStore } from "../elements/ElementStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import { SelectionStore } from "../selection/SelectionStore.ts";
 import { HistoryManager } from "../history/HistoryManager.ts";
@@ -19,6 +20,7 @@ import { BeamHistoryController } from "../history/beamHistory.ts";
 import { SlabHistoryController } from "../history/slabHistory.ts";
 import { DoorHistoryController } from "../history/doorHistory.ts";
 import { WindowHistoryController } from "../history/windowHistory.ts";
+import { ElementHistoryController } from "../history/elementHistory.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { ProjectMetaStore } from "./ProjectMetaStore.ts";
 
@@ -34,20 +36,21 @@ export type { LoadProjectResult, PersistableProject } from "./projectPersistence
  * threads the returned pieces through, instead of constructing them
  * individually - that's what guarantees exactly one AssemblyStore (and
  * one of everything else) exists for the whole running app, and that
- * CommandExecutor holds the SAME AssemblyStore/PillarStore/BeamStore/
- * SlabStore/DoorStore/WindowStore instance every other consumer sees,
- * not a private default of its own (CommandExecutor's constructor
- * still has defaults for those - see its own docs - but nothing in the
- * running app should end up relying on them; this module is what
- * prevents that).
+ * CommandExecutor holds the SAME stores every other consumer sees, not a
+ * private default of its own (CommandExecutor's constructor still has
+ * defaults for those - see its own docs - but nothing in the running app
+ * should end up relying on them; this module is what prevents that).
  *
- * wallHistory, pillarHistory, beamHistory, slabHistory, doorHistory,
- * and windowHistory all share the SAME HistoryManager instance, so
- * every object type's undo/redo interleaves into one global undo
- * stack - not six independent ones. selectionStore is likewise shared
- * across every object type (it was already generic, not wall-specific),
- * which is what gives "one selected construction object at a time"
- * across all of them with no extra code.
+ * Every history controller - one per original type, plus the one for
+ * every element kind - shares the SAME HistoryManager instance, so every
+ * edit interleaves into one global undo stack. selectionStore is likewise
+ * shared across every object type, which is what gives "one selected
+ * construction object at a time" with no extra code.
+ *
+ * elementStore holds every parametric element kind in the catalog
+ * (foundation, roof, stair, flooring, plumbing, electrical, interior,
+ * exterior, rooms - see elements/catalog.ts); the six original types keep
+ * their own stores.
  *
  * projectMeta is the project's identity - which saved project, if any,
  * the model belongs to, and its name. It is not part of the construction
@@ -59,12 +62,6 @@ export type { LoadProjectResult, PersistableProject } from "./projectPersistence
  * default wall on startup") - this module only wires infrastructure
  * together, it doesn't decide what a new project's initial content is.
  * That stays in main.ts.
- *
- * Ownership is unchanged from before this module existed: stores own
- * domain data, CommandExecutor owns command execution, SelectionStore
- * is UI state, HistoryManager is shared undo/redo infrastructure -
- * assemblies have no undo/redo yet (see assemblies/README.md). This
- * module introduces no new behavior, only composition.
  */
 export interface ProjectContext {
   wallStore: WallStore;
@@ -73,6 +70,7 @@ export interface ProjectContext {
   slabStore: SlabStore;
   doorStore: DoorStore;
   windowStore: WindowStore;
+  elementStore: ElementStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -82,6 +80,7 @@ export interface ProjectContext {
   slabHistory: SlabHistoryController;
   doorHistory: DoorHistoryController;
   windowHistory: WindowHistoryController;
+  elementHistory: ElementHistoryController;
   commandExecutor: CommandExecutor;
   projectMeta: ProjectMetaStore;
 }
@@ -102,6 +101,7 @@ export function clearProject(context: ProjectContext): void {
     ...context.slabStore.getAll().map((object) => ({ type: "slab.delete", id: object.id })),
     ...context.doorStore.getAll().map((object) => ({ type: "door.delete", id: object.id })),
     ...context.windowStore.getAll().map((object) => ({ type: "window.delete", id: object.id })),
+    ...context.elementStore.getAll().map((object) => ({ type: "element.delete", id: object.id })),
     ...context.assemblyStore.getAll().map((assembly) => ({ type: "assembly.delete", id: assembly.id }))
   ];
   for (const command of deletions) {
@@ -120,6 +120,7 @@ export function createProjectContext(): ProjectContext {
   const slabStore = new SlabStore();
   const doorStore = new DoorStore();
   const windowStore = new WindowStore();
+  const elementStore = new ElementStore();
   const assemblyStore = new AssemblyStore();
   const selectionStore = new SelectionStore();
   const history = new HistoryManager();
@@ -129,6 +130,7 @@ export function createProjectContext(): ProjectContext {
   const slabHistory = new SlabHistoryController(slabStore, selectionStore, history);
   const doorHistory = new DoorHistoryController(doorStore, selectionStore, history);
   const windowHistory = new WindowHistoryController(windowStore, selectionStore, history);
+  const elementHistory = new ElementHistoryController(elementStore, selectionStore, history);
   const commandExecutor = new CommandExecutor(
     wallStore,
     wallHistory,
@@ -142,7 +144,9 @@ export function createProjectContext(): ProjectContext {
     doorStore,
     doorHistory,
     windowStore,
-    windowHistory
+    windowHistory,
+    elementStore,
+    elementHistory
   );
   const projectMeta = new ProjectMetaStore();
 
@@ -153,6 +157,7 @@ export function createProjectContext(): ProjectContext {
     slabStore,
     doorStore,
     windowStore,
+    elementStore,
     assemblyStore,
     selectionStore,
     history,
@@ -162,6 +167,7 @@ export function createProjectContext(): ProjectContext {
     slabHistory,
     doorHistory,
     windowHistory,
+    elementHistory,
     commandExecutor,
     projectMeta
   };

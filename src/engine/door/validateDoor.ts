@@ -78,5 +78,10 @@ export function validateDoor(door: DoorData): DoorValidationResult {
     errors.push({ field: "assemblyId", message: "assemblyId must be a non-empty string, or null." });
   }
 
+  // Absent is treated as null, so a door built before hosting existed still validates.
+  if (door.hostId !== undefined && door.hostId !== null && !isNonEmptyString(door.hostId)) {
+    errors.push({ field: "hostId", message: "hostId must be a wall id, or null." });
+  }
+
   return { valid: errors.length === 0, errors };
 }

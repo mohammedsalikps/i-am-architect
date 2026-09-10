@@ -2,6 +2,7 @@ import { el } from "./dom";
 import { createTopBar } from "./topBar";
 import { createMainNav } from "./mainNav";
 import { createConstructionRibbon } from "./constructionRibbon";
+import { buildRibbonTabs, type RibbonActions } from "./ribbonTabs";
 import { createLeftSidebar } from "./leftSidebar";
 import { createRightSidebar } from "./rightSidebar";
 import { createCommandBar } from "./commandBar";
@@ -14,6 +15,7 @@ import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
+import type { ElementStore } from "../engine/elements/ElementStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -27,12 +29,8 @@ export type AppShellOptions = {
   /** Save/Open state, rendered by the top bar - see ProjectPersistenceController. */
   persistence: ProjectPersistenceController;
   onViewChange: (preset: ViewPreset) => void;
-  onAddWall: () => void;
-  onAddPillar: () => void;
-  onAddBeam: () => void;
-  onAddSlab: () => void;
-  onAddDoor: () => void;
-  onAddWindow: () => void;
+  /** What every ribbon tool does - see ribbonTabs.ts and main.ts. */
+  ribbonActions: RibbonActions;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
   /** Empties the project - see main.ts's newProject. */
@@ -51,6 +49,7 @@ export type AppShellOptions = {
   slabStore: SlabStore;
   doorStore: DoorStore;
   windowStore: WindowStore;
+  elementStore: ElementStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -70,13 +69,14 @@ export type AppShell = {
  * Three.js code - SceneManager is mounted into `viewportContainer`
  * from main.ts.
  *
- * Six stacked rows: top bar, main nav, construction ribbon, body
- * (left workspace / viewport / right sidebar), bottom workspace,
- * status bar - one child per `.app-shell` grid row, in the same order
- * (src/ui/verify.ts checks the two stay in step). The shell is exactly
- * one viewport tall: a panel whose content is too tall scrolls inside
- * itself rather than growing the page. See styles.css's "Shell layout"
- * section for details, and for how this collapses at narrow widths.
+ * Six stacked rows: top bar, main nav (the tool categories), construction
+ * ribbon (the chosen category's tools), body (left workspace / viewport /
+ * right sidebar), bottom workspace, status bar - one child per
+ * `.app-shell` grid row, in the same order (src/ui/verify.ts checks the
+ * two stay in step). The shell is exactly one viewport tall: a panel
+ * whose content is too tall scrolls inside itself rather than growing
+ * the page. See styles.css's "Shell layout" section for details, and for
+ * how this collapses at narrow widths.
  */
 export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
@@ -90,16 +90,20 @@ export function createAppShell(options: AppShellOptions): AppShell {
     history: options.history
   });
 
-  const mainNav = createMainNav();
-
-  const ribbon = createConstructionRibbon(
-    options.onAddWall,
-    options.onAddPillar,
-    options.onAddBeam,
-    options.onAddSlab,
-    options.onAddDoor,
-    options.onAddWindow
+  const ribbonTabs = buildRibbonTabs(options.ribbonActions);
+  const ribbonControl = createConstructionRibbon(ribbonTabs, "home");
+  const mainNav = createMainNav(
+    ribbonTabs.map((tab) => ({ id: tab.id, label: tab.label })),
+    (id) => ribbonControl.show(id),
+    "home"
   );
+  const ribbon = ribbonControl.element;
+  // Tools that need a selection (Paint) re-check whenever it - or the
+  // selected object - may have changed.
+  const refreshRibbon = (): void => ribbonControl.refresh();
+  options.selectionStore.subscribe(refreshRibbon);
+  options.elementStore.subscribe(refreshRibbon);
+  options.wallStore.subscribe(refreshRibbon);
 
   const leftSidebar = createLeftSidebar(
     options.assemblyStore,
@@ -110,7 +114,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.beamStore,
     options.slabStore,
     options.doorStore,
-    options.windowStore
+    options.windowStore,
+    options.elementStore
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
@@ -119,6 +124,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
     slabStore: options.slabStore,
     doorStore: options.doorStore,
     windowStore: options.windowStore,
+    elementStore: options.elementStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,
@@ -135,7 +141,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const body = el("div", { className: "app-body" }, [leftSidebar, viewportArea, rightSidebar]);
 
-  const commandBar = createCommandBar(options.onAddWall, options.onSubmitAiInstruction);
+  const commandBar = createCommandBar(options.ribbonActions.addWall, options.onSubmitAiInstruction);
 
   const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore });
 

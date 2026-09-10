@@ -348,10 +348,11 @@ engine builds the objects.
   `objects/grounding.ts`), so editing a wall that stands on the slab
   keeps it on the slab instead of sinking it to the ground.
 - **What it doesn't do.**
-  - Rooms aren't objects, so there are no interior walls; the notes say
-    so.
-  - Openings aren't cut into walls.
-  - There is no roof.
+  - The reference plan has no rooms, interior walls, finishes, services,
+    or roof. Those are element kinds now (see `elements/README.md`): ask
+    for them, or add them from the ribbon. The notes say so.
+  - Openings aren't cut into walls, and the plan's door and windows
+    aren't hosted (`hostId`) - hosting is a manual tool today.
   - Nothing is saved.
   - A real model's plan isn't guaranteed to match the reference layout.
     It is validated exactly like any other response, and a malformed or
@@ -489,7 +490,9 @@ as positive proof no extra (or real) request happened.**
   existing object the instruction names by id.
 - **`MockAIProvider`'s language understanding is still limited.** It
   only recognizes "create/add a `<type>`" style clauses via whole-word
-  keyword matching (wall/pillar/beam/slab/door/window) - no
+  keyword matching (wall/pillar/beam/slab/door/window, plus every element
+  kind's catalog keywords - "roof", "water pipe", "light switch",
+  "sofa", ...; the earliest, then longest, mention in a clause wins) - no
   "update"/"delete"/"duplicate" instructions, no free-text dimension or
   position parsing. `OpenAIProvider` can, in principle, understand
   dimensions/colors/materials/rotation from free text (the model fills
@@ -509,12 +512,22 @@ as positive proof no extra (or real) request happened.**
   ribbon button wired up to `AICommandPipeline` yet. This module is
   usable today only from code (e.g. a future UI, or the `verify.ts`
   files) - see the parent task's constraints.
-- **No snapping, wall-hosting, or opening behavior.** Commands produced
-  here create/update construction objects exactly as
+- **No snapping, wall-hosting, or opening behavior from AI.** Commands
+  produced here create/update construction objects exactly as
   `CommandExecutor` already allows - independent objects with no spatial
-  relationship inference. Unchanged from the door/window milestone.
+  relationship inference. The AI schema doesn't offer `hostId`, so doors
+  and windows the AI creates are free-standing; hosting them on a wall is
+  a manual tool (see `elements/README.md`).
+- **Elements.** `AI_SUPPORTED_OBJECT_TYPES` includes `element`: the
+  snapshot lists every element with its `kind` and `label`, the backend
+  sanitizer accepts only catalog kinds, and the structured-output schema
+  offers `element.add` with the kind and material enums generated from
+  the element catalog and the material library. The system prompt lists
+  every kind with its axes and parameters. Nothing about an element is
+  AI-only: it goes through the same `element.add` command, store
+  validation, and history as the ribbon.
 - **No assembly commands from AI yet.** `AI_SUPPORTED_OBJECT_TYPES`
-  covers the six construction object types only; `assembly.*` commands
+  covers the construction object types only; `assembly.*` commands
   are intentionally not reachable through this pipeline in this
   milestone (nothing prevents it structurally - a future change could
   simply extend the supported-type list and add assembly-aware handling

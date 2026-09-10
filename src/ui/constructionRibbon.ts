@@ -1,83 +1,100 @@
 import { el } from "./dom";
+import type { RibbonTab, RibbonTool } from "./ribbonTabs";
 
-// Mirrors ObjectType (src/engine/objects/types.ts) plus a few not yet
-// modeled at all (Brick, Concrete, Stairs, Flooring, Plumbing,
-// Electrical). "Wall", "Pillar", "Beam", "Slab", "Door", and "Window"
-// have an engine behind them today.
-const RIBBON_ITEMS = [
-  "Wall",
-  "Brick",
-  "Concrete",
-  "Pillar",
-  "Beam",
-  "Slab",
-  "Door",
-  "Window",
-  "Stairs",
-  "Roof",
-  "Flooring",
-  "Plumbing",
-  "Electrical",
-  "Furniture",
-  "Landscape",
-  "More"
-];
+export interface ConstructionRibbon {
+  element: HTMLElement;
+  /** Shows a tab's tools - called by the main nav. */
+  show(tabId: string): void;
+  /** Re-checks which tools are usable right now (e.g. Paint needs a selection). */
+  refresh(): void;
+}
 
 /**
- * Construction ribbon: one button per buildable element type. "Wall",
- * "Pillar", "Beam", "Slab", "Door", and "Window" are wired up (to the
- * onAddWall/onAddPillar/onAddBeam/onAddSlab/onAddDoor/onAddWindow
- * callbacks - the same ones the Manual Build tab uses) since those are
- * the only object types the engine implements - every other item is a
- * disabled placeholder rather than a click that does nothing, per the
- * "disabled states for unavailable actions" requirement.
+ * The construction ribbon: the active tab's tools, in labelled groups -
+ * see ribbonTabs.ts for which tools each tab holds. Every button runs a
+ * real tool; one that needs something first (Paint needs a selected wall
+ * or element) is disabled with a tooltip saying why, and re-enabled by
+ * refresh(). Nothing here is a placeholder.
  */
-export function createConstructionRibbon(
-  onAddWall: () => void,
-  onAddPillar: () => void,
-  onAddBeam: () => void,
-  onAddSlab: () => void,
-  onAddDoor: () => void,
-  onAddWindow: () => void
-): HTMLElement {
-  const handlers: Partial<Record<string, () => void>> = {
-    Wall: onAddWall,
-    Pillar: onAddPillar,
-    Beam: onAddBeam,
-    Slab: onAddSlab,
-    Door: onAddDoor,
-    Window: onAddWindow
+export function createConstructionRibbon(tabs: readonly RibbonTab[], initialTabId: string): ConstructionRibbon {
+  const element = el("div", { className: "app-ribbon", attrs: { role: "toolbar" } });
+  let current = tabs.find((tab) => tab.id === initialTabId) ?? tabs[0];
+  let rendered: { tool: RibbonTool; button: HTMLButtonElement }[] = [];
+  // A picked color survives switching tabs and back.
+  const colorValues = new Map<string, string>();
+
+  const refresh = (): void => {
+    for (const { tool, button } of rendered) {
+      const enabled = tool.isEnabled ? tool.isEnabled() : true;
+      button.disabled = !enabled;
+      const title = enabled || !tool.disabledTitle ? tool.title : tool.disabledTitle;
+      button.title = title;
+      button.setAttribute("aria-label", title);
+    }
   };
 
-  return el(
-    "div",
-    { className: "app-ribbon" },
-    RIBBON_ITEMS.map((label) => {
-      const handler = handlers[label];
-      const isEnabled = !!handler;
-      const button = el(
-        "button",
-        {
-          className: "app-ribbon__item",
-          attrs: {
-            type: "button",
-            // The visible label is short ("Wall"); the tooltip and accessible
-            // name say what the button does.
-            ...(isEnabled
-              ? { title: `Add a ${label.toLowerCase()}`, "aria-label": `Add a ${label.toLowerCase()}` }
-              : { title: "Coming soon" })
-          }
-        },
-        [
-          el("span", { className: "app-ribbon__icon", text: label.charAt(0) }),
-          el("span", { className: "app-ribbon__label", text: label })
-        ]
-      );
-      button.disabled = !isEnabled;
-      if (handler) {
-        button.addEventListener("click", handler);
+  const renderTool = (tool: RibbonTool): HTMLElement[] => {
+    const button = el(
+      "button",
+      { className: "app-ribbon__item", attrs: { type: "button", "data-tool": tool.id } },
+      [el("span", { className: "app-ribbon__icon", text: tool.icon }), el("span", { className: "app-ribbon__label", text: tool.label })]
+    );
+    rendered.push({ tool, button });
+
+    if (!tool.colorInput) {
+      button.addEventListener("click", () => tool.run());
+      return [button];
+    }
+    const picker = el("input", {
+      className: "app-ribbon__color",
+      attrs: {
+        type: "color",
+        value: colorValues.get(tool.id) ?? tool.colorInput.initial,
+        title: tool.colorInput.label,
+        "aria-label": tool.colorInput.label
       }
-      return button;
-    })
-  );
+    });
+    picker.addEventListener("input", () => colorValues.set(tool.id, picker.value));
+    button.addEventListener("click", () => tool.run(picker.value));
+    return [button, picker];
+  };
+
+  const render = (): void => {
+    const groups = new Map<string, RibbonTool[]>();
+    for (const tool of current.tools) {
+      const list = groups.get(tool.group);
+      if (list) {
+        list.push(tool);
+      } else {
+        groups.set(tool.group, [tool]);
+      }
+    }
+
+    rendered = [];
+    element.dataset.category = current.id;
+    element.setAttribute("aria-label", `${current.label} tools`);
+    element.replaceChildren(
+      ...Array.from(groups, ([group, tools]) =>
+        el("div", { className: "app-ribbon__group", attrs: { role: "group", "aria-label": group } }, [
+          el("div", { className: "app-ribbon__group-items" }, tools.flatMap(renderTool)),
+          el("span", { className: "app-ribbon__group-label", text: group })
+        ])
+      )
+    );
+    refresh();
+  };
+
+  render();
+
+  return {
+    element,
+    show(tabId: string): void {
+      const next = tabs.find((tab) => tab.id === tabId);
+      if (next && next !== current) {
+        current = next;
+        render();
+      }
+    },
+    refresh
+  };
 }

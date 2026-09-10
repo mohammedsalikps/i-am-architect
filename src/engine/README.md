@@ -7,8 +7,21 @@ imports anywhere under this folder. See `src/scene` for rendering and
 - `objects/` - the shared construction-object foundation every object
   type builds on. Start here when adding a new object type. See
   `objects/README.md`.
-- `wall/` - the wall object type: data model, store, and factory
-  functions. The only object type implemented so far.
+- `wall/`, `pillar/`, `beam/`, `slab/`, `door/`, `window/` - the six
+  original object types, each with its own data model, store, factory,
+  and validator.
+- `elements/` - every other construction object (foundation, roof,
+  stair, rooms, finishes, plumbing, electrical, interior, exterior) as
+  one catalog-driven element system: one registry, store, command set,
+  and history controller for all kinds. See `elements/README.md`.
+- `materials/` - the material library every object's material comes
+  from.
+- `openings/` - hosting doors and windows on a wall (`hostId` and
+  flush-on-face placement).
+- `project/` - the shared `ProjectContext`, New Project, and saving and
+  opening projects. See `project/README.md`.
+- `ai/` - the AI command pipeline: structured commands only, validated,
+  then executed through `CommandExecutor`. See `ai/README.md`.
 - `selection/` - generic single-selection state, shared by every object
   type.
 - `history/` - generic undo/redo (`HistoryManager`) plus one adapter per

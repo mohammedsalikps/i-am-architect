@@ -16,6 +16,9 @@ import type { DoorValidationResult } from "../door/validateDoor";
 import type { CreateWindowOptions } from "../window/createWindow";
 import type { WindowData, WindowId } from "../window/types";
 import type { WindowValidationResult } from "../window/validateWindow";
+import type { CreateElementOptions } from "../elements/createElement";
+import type { ElementData, ElementId } from "../elements/types";
+import type { ElementValidationResult } from "../elements/validateElement";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
 
@@ -27,15 +30,14 @@ import type { ObjectId } from "../objects/types";
  * request a mutation without calling WallStore/WallHistoryController/
  * PillarStore/PillarHistoryController/BeamStore/BeamHistoryController/
  * SlabStore/SlabHistoryController/DoorStore/DoorHistoryController/
- * WindowStore/WindowHistoryController/AssemblyStore directly. See
- * commands/README.md.
+ * WindowStore/WindowHistoryController/ElementStore/ElementHistoryController/
+ * AssemblyStore directly. See commands/README.md.
  *
- * The "pillar.*", "beam.*", "slab.*", "door.*", and "window.*"
- * commands below are the second through sixth object types to follow
- * this pattern (after "wall.*") - a future object type adds its own
- * namespaced command interfaces here and joins the Command union below
- * the same way, giving CommandExecutor one new switch case per command
- * without changing any existing shape.
+ * The six original object types each have their own namespaced commands
+ * ("wall.*" ... "window.*"). Every newer kind - foundation, roof, stair,
+ * flooring, plumbing, electrical, interior, exterior, rooms - shares the
+ * "element.*" commands, with the catalog kind (elements/catalog.ts) in
+ * the payload, so a new kind needs no new command.
  */
 
 export interface AddWallCommand {
@@ -176,6 +178,29 @@ export interface DuplicateWindowCommand {
   id: WindowId;
 }
 
+export interface AddElementCommand {
+  type: "element.add";
+  /** createElementData()'s options: a catalog `kind`, plus any of its label, position, rotation, dimensions, params, material, color. */
+  element: CreateElementOptions;
+}
+
+export interface UpdateElementCommand {
+  type: "element.update";
+  id: ElementId;
+  /** Same shape ElementStore.update() takes - nested fields are complete replacements, and the kind can't change. */
+  changes: Partial<Omit<ElementData, "id" | "type" | "kind">>;
+}
+
+export interface DeleteElementCommand {
+  type: "element.delete";
+  id: ElementId;
+}
+
+export interface DuplicateElementCommand {
+  type: "element.duplicate";
+  id: ElementId;
+}
+
 export interface CreateAssemblyCommand {
   type: "assembly.create";
   /** Same shape as createAssemblyData()'s options - id/createdAt/updatedAt are always generated, never caller-supplied. */
@@ -231,6 +256,10 @@ export type Command =
   | UpdateWindowCommand
   | DeleteWindowCommand
   | DuplicateWindowCommand
+  | AddElementCommand
+  | UpdateElementCommand
+  | DeleteElementCommand
+  | DuplicateElementCommand
   | CreateAssemblyCommand
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
@@ -261,6 +290,10 @@ export interface ObjectChanges {
   rotation?: number | { y: number };
   material?: string;
   color?: string;
+  /** Elements only: the name people see. */
+  label?: string;
+  /** Elements only: any of the kind's parameters. */
+  params?: Record<string, number | string>;
 }
 
 /**
@@ -335,4 +368,11 @@ export interface WindowHistoryLike {
   add(windowData: WindowData): WindowValidationResult;
   update(id: WindowId, changes: Partial<Omit<WindowData, "id" | "type">>): WindowValidationResult;
   remove(id: WindowId): void;
+}
+
+/** The element equivalent of WallHistoryLike - one controller for every element kind. */
+export interface ElementHistoryLike {
+  add(element: ElementData): ElementValidationResult;
+  update(id: ElementId, changes: Partial<Omit<ElementData, "id" | "type" | "kind">>): ElementValidationResult;
+  remove(id: ElementId): void;
 }

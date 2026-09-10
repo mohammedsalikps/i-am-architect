@@ -14,6 +14,9 @@ import { createDoorData, duplicateDoorData } from "../door/createDoor.ts";
 import { DoorStore } from "../door/DoorStore.ts";
 import { createWindowData, duplicateWindowData } from "../window/createWindow.ts";
 import { WindowStore } from "../window/WindowStore.ts";
+import { createElementData, duplicateElementData } from "../elements/createElement.ts";
+import { ElementStore } from "../elements/ElementStore.ts";
+import { getElementKind } from "../elements/catalog.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import type {
   Command,
@@ -42,6 +45,10 @@ import type {
   UpdateWindowCommand,
   DeleteWindowCommand,
   DuplicateWindowCommand,
+  AddElementCommand,
+  UpdateElementCommand,
+  DeleteElementCommand,
+  DuplicateElementCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
@@ -53,7 +60,8 @@ import type {
   BeamHistoryLike,
   SlabHistoryLike,
   DoorHistoryLike,
-  WindowHistoryLike
+  WindowHistoryLike,
+  ElementHistoryLike
 } from "./types";
 import { resolveConstructionObject } from "../objects/resolveConstructionObject.ts";
 
@@ -82,6 +90,10 @@ const KNOWN_COMMAND_TYPES = [
   "window.update",
   "window.delete",
   "window.duplicate",
+  "element.add",
+  "element.update",
+  "element.delete",
+  "element.duplicate",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -96,6 +108,10 @@ function isCommand(value: unknown): value is Command {
   }
   const type = (value as { type?: unknown }).type;
   return (KNOWN_COMMAND_TYPES as readonly unknown[]).includes(type);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -128,8 +144,10 @@ function isCommand(value: unknown): value is Command {
  * existing tests in commands/verify.ts) keep compiling unchanged.
  *
  * beamStore/beamHistory, slabStore/slabHistory, doorStore/doorHistory,
- * and windowStore/windowHistory, all follow the exact same defaulting
- * idea as pillarStore/pillarHistory - see the paragraph above.
+ * windowStore/windowHistory, and elementStore/elementHistory all follow
+ * the exact same defaulting idea as pillarStore/pillarHistory - see the
+ * paragraph above. The element pair serves every catalog kind (see
+ * elements/catalog.ts) through the "element.*" commands.
  */
 export class CommandExecutor {
   private readonly wallStore: WallStore;
@@ -144,6 +162,8 @@ export class CommandExecutor {
   private readonly doorHistory: DoorHistoryLike;
   private readonly windowStore: WindowStore;
   private readonly windowHistory: WindowHistoryLike;
+  private readonly elementStore: ElementStore;
+  private readonly elementHistory: ElementHistoryLike;
   private readonly assemblyStore: AssemblyStore;
 
   constructor(
@@ -179,6 +199,12 @@ export class CommandExecutor {
       add: (windowData) => windowStore.add(windowData),
       update: (id, changes) => windowStore.update(id, changes),
       remove: (id) => windowStore.remove(id)
+    },
+    elementStore: ElementStore = new ElementStore(),
+    elementHistory: ElementHistoryLike = {
+      add: (element) => elementStore.add(element),
+      update: (id, changes) => elementStore.update(id, changes),
+      remove: (id) => elementStore.remove(id)
     }
   ) {
     this.wallStore = wallStore;
@@ -194,6 +220,8 @@ export class CommandExecutor {
     this.doorHistory = doorHistory;
     this.windowStore = windowStore;
     this.windowHistory = windowHistory;
+    this.elementStore = elementStore;
+    this.elementHistory = elementHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -251,6 +279,14 @@ export class CommandExecutor {
         return this.executeDeleteWindow(input);
       case "window.duplicate":
         return this.executeDuplicateWindow(input);
+      case "element.add":
+        return this.executeAddElement(input);
+      case "element.update":
+        return this.executeUpdateElement(input);
+      case "element.delete":
+        return this.executeDeleteElement(input);
+      case "element.duplicate":
+        return this.executeDuplicateElement(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -291,14 +327,15 @@ export class CommandExecutor {
       beamStore: this.beamStore,
       slabStore: this.slabStore,
       doorStore: this.doorStore,
-      windowStore: this.windowStore
+      windowStore: this.windowStore,
+      elementStore: this.elementStore
     });
     const current = resolved ? this.readConstructionObject(resolved.type, objectId) : undefined;
     if (!resolved || !current) {
       return { success: false, objectId, message: `No construction object found with id "${objectId}".` };
     }
 
-    const built = this.buildObjectChanges(current, command.changes);
+    const built = this.buildObjectChanges(current, command.changes, resolved.type);
     if (!built.ok) {
       return {
         success: false,
@@ -316,7 +353,7 @@ export class CommandExecutor {
   private readConstructionObject(
     type: string,
     id: string
-  ): { dimensions: object; position: { x: number; y: number; z: number } } | undefined {
+  ): { dimensions: object; position: { x: number; y: number; z: number }; params?: object } | undefined {
     switch (type) {
       case "wall":
         return this.wallStore.get(id);
@@ -330,6 +367,8 @@ export class CommandExecutor {
         return this.doorStore.get(id);
       case "window":
         return this.windowStore.get(id);
+      case "element":
+        return this.elementStore.get(id);
       default:
         return undefined;
     }
@@ -340,7 +379,8 @@ export class CommandExecutor {
    * state and merges it into a complete change for the type's update
    * command. Only properties the object already has are accepted:
    * dimensions it already has, x/y/z position, rotation around the
-   * vertical axis, material, and color.
+   * vertical axis, material, and color - plus, for an element, its label
+   * and parameters.
    *
    * Types are checked here; ranges and formats (positive dimensions,
    * finite numbers, hex colors) are left to the store's own validator.
@@ -352,12 +392,10 @@ export class CommandExecutor {
    * change still gets the store's grounding rule (see WallStore.update).
    */
   private buildObjectChanges(
-    current: { dimensions: object; position: { x: number; y: number; z: number } },
-    raw: unknown
+    current: { dimensions: object; position: { x: number; y: number; z: number }; params?: object },
+    raw: unknown,
+    type: string
   ): { ok: true; changes: Record<string, unknown> } | { ok: false; errors: { field: string; message: string }[] } {
-    const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-      typeof value === "object" && value !== null && !Array.isArray(value);
-
     if (!isPlainObject(raw)) {
       return { ok: false, errors: [{ field: "changes", message: "changes must be an object." }] };
     }
@@ -431,6 +469,24 @@ export class CommandExecutor {
             errors.push({ field: "changes.color", message: "color must be a string, e.g. #c9c9c9." });
           } else {
             changes.color = value;
+          }
+          break;
+        case "label":
+          if (type !== "element") {
+            errors.push({ field: "changes.label", message: '"label" is not an editable property.' });
+          } else if (typeof value !== "string" || value.trim().length === 0) {
+            errors.push({ field: "changes.label", message: "label must be a non-empty string." });
+          } else {
+            changes.label = value.trim();
+          }
+          break;
+        case "params":
+          if (type !== "element") {
+            errors.push({ field: "changes.params", message: '"params" is not an editable property.' });
+          } else if (!isPlainObject(value)) {
+            errors.push({ field: "changes.params", message: "params must be an object." });
+          } else {
+            changes.params = { ...(current.params as Record<string, unknown> | undefined), ...value };
           }
           break;
         default:
@@ -841,6 +897,89 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Window duplicated." };
+  }
+
+  /**
+   * Adds an element of any catalog kind. The kind is checked first (an
+   * unknown kind has no defaults to build from), then createElementData()
+   * fills in the catalog's defaults and ElementStore validates the result
+   * like any write.
+   */
+  private executeAddElement(command: AddElementCommand): CommandResult {
+    const options: unknown = command.element;
+    if (!isPlainObject(options)) {
+      return { success: false, message: "element.add command is missing its element." };
+    }
+    const definition = getElementKind(options.kind as string);
+    if (!definition) {
+      return { success: false, message: `Unknown element kind "${String(options.kind)}".` };
+    }
+
+    const element = createElementData(command.element);
+    const result = this.elementHistory.add(element);
+    if (!result.valid) {
+      return {
+        success: false,
+        errors: result.errors,
+        message: `Could not add ${definition.label.toLowerCase()}: validation failed.`
+      };
+    }
+    return { success: true, objectId: element.id, message: `${definition.label} added.` };
+  }
+
+  private executeUpdateElement(command: UpdateElementCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "element.update command is missing an id." };
+    }
+
+    const result = this.elementHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not update element: validation failed."
+      };
+    }
+    return { success: true, objectId: command.id, message: "Element updated." };
+  }
+
+  private executeDeleteElement(command: DeleteElementCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "element.delete command is missing an id." };
+    }
+
+    const existing = this.elementStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No element found with id "${command.id}".` };
+    }
+
+    this.elementHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Element deleted." };
+  }
+
+  private executeDuplicateElement(command: DuplicateElementCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "element.duplicate command is missing an id." };
+    }
+
+    const source = this.elementStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No element found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateElementData(source);
+    const result = this.elementHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateElementData() always produces valid data from a valid source - stay defensive.
+      return {
+        success: false,
+        objectId: command.id,
+        errors: result.errors,
+        message: "Could not duplicate element: validation failed."
+      };
+    }
+    return { success: true, objectId: duplicate.id, message: "Element duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {

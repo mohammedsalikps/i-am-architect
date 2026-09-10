@@ -1,42 +1,46 @@
 import { el } from "./dom";
 
-const NAV_ITEMS = [
-  "Home",
-  "Insert",
-  "Build",
-  "Materials",
-  "Tools",
-  "View",
-  "AI Assistant",
-  "Estimate",
-  "Collaborate",
-  "Export"
-];
-
-// Only "Home" leads anywhere today - the rest have no distinct content
-// to switch to yet (this milestone doesn't add per-tab pages), so they
-// render disabled rather than as clicks that silently do nothing.
-const ENABLED_ITEM = "Home";
+export interface MainNavItem {
+  id: string;
+  label: string;
+}
 
 /**
- * Primary application navigation row, between the top bar and the
- * construction ribbon. Purely a navigation affordance - it does not
- * gate or change what the ribbon/body show; see mainNav's doc in
- * layout.ts for why.
+ * Primary navigation row, between the top bar and the construction
+ * ribbon: one tab per tool category (Home, Structure, Openings, Rooms,
+ * Finish, Plumbing, Electrical, Interior, Exterior). Choosing one switches
+ * which tools the ribbon shows - see constructionRibbon.ts. Every item
+ * leads somewhere; there are no placeholder entries.
  */
-export function createMainNav(): HTMLElement {
-  return el(
+export function createMainNav(items: readonly MainNavItem[], onSelect: (id: string) => void, initialId: string): HTMLElement {
+  const buttons = new Map<string, HTMLButtonElement>();
+
+  const setActive = (id: string): void => {
+    for (const [itemId, button] of buttons) {
+      const active = itemId === id;
+      button.classList.toggle("app-mainnav__item--active", active);
+      button.setAttribute("aria-selected", String(active));
+    }
+  };
+
+  const nav = el(
     "nav",
-    { className: "app-mainnav" },
-    NAV_ITEMS.map((label) => {
-      const isEnabled = label === ENABLED_ITEM;
+    { className: "app-mainnav", attrs: { role: "tablist", "aria-label": "Tool categories" } },
+    items.map((item) => {
       const button = el("button", {
-        className: `app-mainnav__item${isEnabled ? " app-mainnav__item--active" : ""}`,
-        text: label,
-        attrs: { type: "button", ...(isEnabled ? {} : { title: "Coming soon" }) }
+        className: "app-mainnav__item",
+        text: item.label,
+        attrs: { type: "button", role: "tab", "data-category": item.id }
       });
-      button.disabled = !isEnabled;
+      button.addEventListener("click", () => {
+        setActive(item.id);
+        onSelect(item.id);
+      });
+      buttons.set(item.id, button);
       return button;
     })
   );
+
+  setActive(initialId);
+  return nav;
 }

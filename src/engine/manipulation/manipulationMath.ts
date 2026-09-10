@@ -1,6 +1,6 @@
 // Explicit .ts extension on this value import lets Node run this module
 // directly - see manipulation/verify.ts. Harmless for Vite.
-import { LOCAL_AXIS_DIMENSIONS } from "../ai/geometry/analyzeConstructionGeometry.ts";
+import { localAxesFor } from "../ai/geometry/analyzeConstructionGeometry.ts";
 
 /**
  * Pure math for mouse manipulation: turns where the pointer grabbed and
@@ -67,9 +67,13 @@ export function localAxis(rotation: number, axis: ManipulationAxis): Point3 {
   }
 }
 
-/** Which of an object type's dimensions runs along a local axis - the verified mesh-builder mapping, never a guess. */
-export function dimensionForAxis(type: string, axis: ManipulationAxis): string | undefined {
-  return Object.prototype.hasOwnProperty.call(LOCAL_AXIS_DIMENSIONS, type) ? LOCAL_AXIS_DIMENSIONS[type][axis] : undefined;
+/**
+ * Which of an object's dimensions runs along a local axis - the verified
+ * mesh-builder mapping for the six original types, the element catalog
+ * for an element (pass its `kind`). Never a guess.
+ */
+export function dimensionForAxis(type: string, axis: ManipulationAxis, kind?: string): string | undefined {
+  return localAxesFor(type, kind)?.[axis];
 }
 
 /**
@@ -186,12 +190,12 @@ export interface HandleLayout {
  * rotation ring around the base, outside the side handles. Every resize
  * handle is tied to a dimension the object really has (see
  * dimensionForAxis) - returns null for a type or shape it can't place
- * handles on.
+ * handles on. An element passes its `kind`.
  */
-export function layoutHandles(object: { type: string; dimensions: Record<string, number> }): HandleLayout | null {
-  const x = dimensionForAxis(object.type, "x");
-  const y = dimensionForAxis(object.type, "y");
-  const z = dimensionForAxis(object.type, "z");
+export function layoutHandles(object: { type: string; kind?: string; dimensions: Record<string, number> }): HandleLayout | null {
+  const x = dimensionForAxis(object.type, "x", object.kind);
+  const y = dimensionForAxis(object.type, "y", object.kind);
+  const z = dimensionForAxis(object.type, "z", object.kind);
   if (!x || !y || !z) {
     return null;
   }

@@ -31,6 +31,10 @@ export type ObjectType =
   | "slab"
   | "door"
   | "window"
+  // Every parametric element kind in elements/catalog.ts - foundation,
+  // roof, stair, flooring, plumbing, electrical, furniture, landscape,
+  // rooms, ... - shares this one type; its `kind` says which.
+  | "element"
   | "roof"
   | "furniture"
   | "landscaping";

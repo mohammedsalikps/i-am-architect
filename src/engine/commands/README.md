@@ -57,7 +57,12 @@ shape itself before doing anything.
 | `wall.update` | `id`, `changes` (same shape `WallStore.update()` takes) | Routes through `WallHistoryController.update()` |
 | `wall.delete` | `id` | Routes through `WallHistoryController.remove()` |
 | `wall.duplicate` | `id` | Builds a copy via `duplicateWallData()`, routes through `WallHistoryController.add()` |
-| `update_object` | `objectId`, `changes` - all partial: `dimensions` the object already has, `position` (any of x/y/z), `rotation` (radians, or `{ y }`), `material`, `color` | Edits any type by id. Resolves the type with `resolveConstructionObject()`, merges the change over the object's current values, then runs that type's own `<type>.update` - so validation, the grounding rule, and the single history entry match a UI edit. Rejects an unknown id and any property the model doesn't have; never creates an object. |
+| `pillar.*`, `beam.*`, `slab.*`, `door.*`, `window.*` | The same four commands with that type's own options - `door.add`/`window.add` also take `hostId`, the wall the opening belongs to | Route through that type's own history controller |
+| `element.add` | `element: CreateElementOptions` - a catalog `kind` (required) plus any of `label`, `position`, `rotation`, `dimensions`, `params`, `material`, `color` | Rejects an unknown kind with a clear message; otherwise builds the element with the catalog's defaults and routes through `ElementHistoryController.add()` - the store validates it against its kind. One command for every element kind (see `elements/README.md`). |
+| `element.update` | `id`, `changes` (same shape `ElementStore.update()` takes; the kind can't change) | Routes through `ElementHistoryController.update()` |
+| `element.delete` | `id` | Routes through `ElementHistoryController.remove()` |
+| `element.duplicate` | `id` | Builds a copy via `duplicateElementData()`, routes through `ElementHistoryController.add()` |
+| `update_object` | `objectId`, `changes` - all partial: `dimensions` the object already has, `position` (any of x/y/z), `rotation` (radians, or `{ y }`), `material`, `color`; for an element also `label` and `params` (merged over its current parameters) | Edits any type by id. Resolves the type with `resolveConstructionObject()`, merges the change over the object's current values, then runs that type's own `<type>.update` - so validation, the grounding rule, and the single history entry match a UI edit. Rejects an unknown id and any property the model doesn't have; never creates an object. |
 
 Every `execute()` call returns a `CommandResult` -
 `{ success, objectId?, errors?, message? }` - instead of throwing, the
@@ -91,7 +96,11 @@ mutation path: every command still goes through `executor.execute()`.
 
 ## Extending this for a future object type
 
-Add that type's command interfaces to `types.ts` (namespaced, e.g.
-`"pillar.add"`), join them into the `Command` union, and add one case
-to `CommandExecutor`'s switch. No existing command shape or case needs
-to change.
+Most new objects need no new command at all: a new element kind is one
+entry in the element catalog (`elements/catalog.ts`), and `element.*`
+already creates, edits, duplicates, and deletes it.
+
+A genuinely new object *type* - with its own store - adds its command
+interfaces to `types.ts` (namespaced, e.g. `"pillar.add"`), joins them
+into the `Command` union, and adds one case to `CommandExecutor`'s
+switch. No existing command shape or case needs to change.

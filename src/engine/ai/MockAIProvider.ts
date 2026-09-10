@@ -6,6 +6,7 @@ import type { Command } from "../commands/types";
 // directly (ai/verify.ts, backend/mockBackend.ts) - see
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { DEFAULT_HOUSE_FOOTPRINT, HOUSE_FOOTPRINT_LIMITS, buildSimpleHousePlan, findHouseCenter } from "./housePlan.ts";
+import { ELEMENT_KINDS } from "../elements/catalog.ts";
 import type { HouseFootprint } from "./housePlan";
 
 interface KeywordCommand {
@@ -14,6 +15,23 @@ interface KeywordCommand {
   pattern: RegExp;
   build: () => Command;
 }
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * One entry per keyword of every element kind in the catalog ("boundary
+ * wall", "water pipe", "light switch", ...) - each builds an
+ * "element.add" of that kind with the catalog's defaults.
+ */
+const ELEMENT_KEYWORD_COMMANDS: readonly KeywordCommand[] = ELEMENT_KINDS.flatMap((definition) =>
+  definition.keywords.map((keyword) => ({
+    objectType: "element" as ObjectType,
+    pattern: new RegExp(String.raw`\b${escapeRegExp(keyword).replace(/ /g, String.raw`\s+`)}s?\b`, "i"),
+    build: (): Command => ({ type: "element.add", element: { kind: definition.kind } })
+  }))
+);
 
 // One entry per AI_SUPPORTED_OBJECT_TYPES member (see types.ts) - each
 // builds a "<type>.add" command with no options, the same empty-options
@@ -28,6 +46,27 @@ const KEYWORD_COMMANDS: readonly KeywordCommand[] = [
   { objectType: "door", pattern: /\bdoors?\b/i, build: () => ({ type: "door.add", door: {} }) },
   { objectType: "window", pattern: /\bwindows?\b/i, build: () => ({ type: "window.add", window: {} }) }
 ];
+
+/**
+ * The object a clause asks for: of every available keyword it mentions,
+ * the one mentioned first - and, where two start at the same word, the
+ * longer one. So "add a boundary wall" is a boundary wall, not a wall;
+ * "add a light switch" is a switch, not a light; and "add a wall around
+ * the garden" is still a wall.
+ */
+function matchKeyword(clause: string, availableObjectTypes: readonly ObjectType[]): KeywordCommand | undefined {
+  let best: { command: KeywordCommand; index: number; length: number } | undefined;
+  for (const command of [...KEYWORD_COMMANDS, ...ELEMENT_KEYWORD_COMMANDS]) {
+    if (!availableObjectTypes.includes(command.objectType)) {
+      continue;
+    }
+    const match = command.pattern.exec(clause);
+    if (match && (!best || match.index < best.index || (match.index === best.index && match[0].length > best.length))) {
+      best = { command, index: match.index, length: match[0].length };
+    }
+  }
+  return best?.command;
+}
 
 /** Splits "Create a wall and add a pillar" / "Create a wall, add a pillar; add a slab" into separate clauses, one instruction per recognizable object mention. */
 function splitIntoClauses(instruction: string): string[] {
@@ -226,7 +265,7 @@ function planHouse(request: AIProviderRequest): AIProviderResponse {
   if (!requested) {
     notes.push(`No footprint was given, so the default ${DEFAULT_HOUSE_FOOTPRINT.length} m × ${DEFAULT_HOUSE_FOOTPRINT.width} m was used.`);
   }
-  notes.push("Rooms aren't separate objects yet, so no interior walls were placed.");
+  notes.push("Rooms, finishes, and services weren't part of the plan, so no interior walls were placed - add them from the ribbon or ask for them.");
   return { commands, notes: notes.join(" ") };
 }
 
@@ -242,12 +281,15 @@ function planHouse(request: AIProviderRequest): AIProviderResponse {
  * ("10m × 8m", "10 x 8", "10 by 8 metres") and defaults to 10 m × 8 m.
  * The plan goes on the origin when that's free; otherwise the context's
  * geometry section decides where it goes, clear of every existing object.
- * Rooms aren't objects, so none are modeled - the notes say so.
+ * Rooms, finishes, and services aren't part of the plan - the notes say so.
  *
  * **Single objects.** Otherwise it matches whole-word object-type keywords
- * ("wall", "pillar", "beam", "slab", "door", "window") against each clause
- * of the instruction and emits one "<type>.add" command per recognized
- * clause, in the order the clauses appear, with default dimensions.
+ * ("wall", "pillar", "beam", "slab", "door", "window") and every element
+ * kind's catalog keywords ("roof", "water pipe", "light switch", "sofa",
+ * ...) against each clause of the instruction and emits one "<type>.add"
+ * or "element.add" command per recognized clause, in the order the clauses
+ * appear, with default dimensions - see matchKeyword() for which keyword
+ * wins when a clause mentions more than one.
  *
  * A clause whose object type isn't in `request.availableObjectTypes` is
  * treated the same as an unrecognized clause - it's reported back via
@@ -298,9 +340,7 @@ export class MockAIProvider implements AIProvider {
         continue;
       }
 
-      const match = KEYWORD_COMMANDS.find(
-        (candidate) => candidate.pattern.test(clause) && request.availableObjectTypes.includes(candidate.objectType)
-      );
+      const match = matchKeyword(clause, request.availableObjectTypes);
       if (match) {
         commands.push(match.build());
       } else {

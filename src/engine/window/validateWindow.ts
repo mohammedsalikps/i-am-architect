@@ -78,5 +78,10 @@ export function validateWindow(windowData: WindowData): WindowValidationResult {
     errors.push({ field: "assemblyId", message: "assemblyId must be a non-empty string, or null." });
   }
 
+  // Absent is treated as null, so a window built before hosting existed still validates.
+  if (windowData.hostId !== undefined && windowData.hostId !== null && !isNonEmptyString(windowData.hostId)) {
+    errors.push({ field: "hostId", message: "hostId must be a wall id, or null." });
+  }
+
   return { valid: errors.length === 0, errors };
 }

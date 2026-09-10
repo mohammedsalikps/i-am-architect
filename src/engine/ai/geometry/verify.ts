@@ -24,7 +24,8 @@
 // of an @types/node dependency.
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { analyzeConstructionGeometry, GEOMETRY_DECIMALS, LOCAL_AXIS_DIMENSIONS } from "./analyzeConstructionGeometry.ts";
+import { analyzeConstructionGeometry, GEOMETRY_DECIMALS, LOCAL_AXIS_DIMENSIONS, localAxesFor } from "./analyzeConstructionGeometry.ts";
+import { ELEMENT_KINDS } from "../../elements/catalog.ts";
 import type { ConstructionGeometryAnalysis, DirectionalRelation, GeometryError, ObjectGeometry } from "./types.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, compareIds } from "../types.ts";
 import type { AIContextObject, AIProjectSnapshot } from "../types.ts";
@@ -292,12 +293,26 @@ function run(): void {
   });
 
   check("the table covers exactly the AI-supported types, and exactly the dimensions each validator checks", () => {
-    assertSameJson(Object.keys(LOCAL_AXIS_DIMENSIONS).sort(), [...AI_SUPPORTED_OBJECT_TYPES].sort(), "table types");
+    // Elements take their axes from the element catalog, per kind - see the next check.
+    assertSameJson(
+      Object.keys(LOCAL_AXIS_DIMENSIONS).sort(),
+      AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "element").sort(),
+      "table types"
+    );
     for (const type of Object.keys(FILE_NAMES)) {
       const source = readSource(`../../${type}/validate${FILE_NAMES[type]}.ts`);
       const validated = [...source.matchAll(/isPositiveFinite\(\w+\.dimensions\?\.(\w+)\)/g)].map((match) => match[1]).sort();
       assertSameJson(Object.values(LOCAL_AXIS_DIMENSIONS[type]).sort(), validated, `${type} dimensions vs validate${FILE_NAMES[type]}`);
     }
+  });
+
+  check("an element's axes are its catalog kind's, and an element of an unknown kind has none", () => {
+    for (const definition of ELEMENT_KINDS) {
+      assertSameJson(localAxesFor("element", definition.kind), definition.axes, `${definition.kind} axes`);
+    }
+    assertEqual(localAxesFor("element", "spaceship"), undefined, "unknown kind");
+    assertEqual(localAxesFor("element"), undefined, "no kind");
+    assertSameJson(localAxesFor("wall"), LOCAL_AXIS_DIMENSIONS.wall, "the six original types still use the table");
   });
 
   // --- A. Unrotated wall ---
@@ -657,7 +672,8 @@ function run(): void {
     const directory = fileURLToPath(new URL(".", import.meta.url));
     const files = readdirSync(directory).filter((name) => name.endsWith(".ts") && name !== "verify.ts");
     assertTrue(files.length >= 2, "found the module's source files");
-    const allowedImports = new Set(["../types", "../types.ts", "./types", "../../objects/types"]);
+    // The element catalog is pure data (which dimension spans each axis of each element kind).
+    const allowedImports = new Set(["../types", "../types.ts", "./types", "../../objects/types", "../../elements/catalog.ts"]);
     for (const file of files) {
       const source = readFileSync(`${directory}/${file}`, "utf8");
       for (const [, specifier] of source.matchAll(/from\s+"([^"]+)"/g)) {

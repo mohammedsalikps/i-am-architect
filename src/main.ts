@@ -3,12 +3,20 @@ import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
 import { createProjectChooser } from "./ui/projectChooser";
 import type { ProjectOpenResult } from "./ui/projectChooser";
+import type { RibbonActions } from "./ui/ribbonTabs";
 import { clearProject, createProjectContext } from "./engine/project/ProjectContext";
 import { firstFreeSlot } from "./engine/project/placement";
 import { HttpProjectRepository } from "./engine/project/HttpProjectRepository";
 import { ProjectPersistenceController } from "./engine/project/ProjectPersistenceController";
 import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
+import { getElementKind } from "./engine/elements/catalog";
+import type { ElementCategory } from "./engine/elements/catalog";
+import { roomPresetOptions } from "./engine/elements/roomPresets";
+import type { CreateElementOptions } from "./engine/elements/createElement";
+import { placeOpeningOnWall, WINDOW_SILL_HEIGHT } from "./engine/openings/hostOpening";
+import { resolveConstructionObject } from "./engine/objects/resolveConstructionObject";
+import type { WallData } from "./engine/wall/types";
 import type {
   AddWallCommand,
   AddPillarCommand,
@@ -26,10 +34,9 @@ if (!appRoot) {
 }
 
 // One shared composition root - see src/engine/project/ProjectContext.ts.
-// assemblyStore/pillarStore/beamStore/slabStore/doorStore/windowStore
-// are the same instances commandExecutor uses internally (not
-// invisible defaults of their own) - the UI reads/writes them through
-// commandExecutor, same as wallStore.
+// Every store here is the same instance commandExecutor uses internally
+// (not an invisible default of its own) - the UI reads the stores and
+// writes through commandExecutor.
 const project = createProjectContext();
 const {
   wallStore,
@@ -38,6 +45,7 @@ const {
   slabStore,
   doorStore,
   windowStore,
+  elementStore,
   assemblyStore,
   selectionStore,
   history,
@@ -79,7 +87,17 @@ const aiService = new AIService({
   // The same shared history: a whole AI response is ONE undo step, and a
   // response that fails part-way is rolled back rather than half-applied.
   history,
-  snapshotSource: { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, assemblyStore, selectionStore }
+  snapshotSource: {
+    wallStore,
+    pillarStore,
+    beamStore,
+    slabStore,
+    doorStore,
+    windowStore,
+    elementStore,
+    assemblyStore,
+    selectionStore
+  }
 });
 
 /** Wired into the command bar's "AI Prompt" tab (see ui/commandBar.ts) - the only path from a typed instruction to AICommandPipeline. */
@@ -96,6 +114,9 @@ const projectRepository = new HttpProjectRepository({
   fetch: (url, init) => fetch(url, init)
 });
 const persistence = new ProjectPersistenceController({ repository: projectRepository, project });
+
+/** Every object store, for resolving a selected id to whatever it is. */
+const objectStores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore };
 
 // Each type has a row of default slots; a new object takes the first slot
 // no existing object of that type sits on (see engine/project/placement.ts),
@@ -162,13 +183,70 @@ function addSlab(): void {
   commandExecutor.execute(command);
 }
 
-// Successive doors are spaced along Z on the negative side, further out
-// than the wall stack, so a freshly-added door is never buried inside
-// a wall.
+/** The selected object, when it's a wall - doors and windows are then placed in it. */
+function selectedWall(): WallData | undefined {
+  const selectedId = selectionStore.get();
+  return selectedId ? wallStore.get(selectedId) : undefined;
+}
+
+/** Where successive openings go along one wall, from its center, so they don't stack (clamped to the wall's length). */
+const HOSTED_OFFSETS = [0, 1.5, -1.5, 3, -3];
+
+/**
+ * Adds a door or window hosted on `wall`: its hostId names the wall, and
+ * it sits flush against the wall's face, turned with it (a window at sill
+ * height) - see engine/openings/hostOpening.ts. Two commands, add then
+ * place, in one history group: one undo removes the opening, and if the
+ * placement were rejected nothing is left behind.
+ */
+function addHostedOpening(type: "door" | "window", wall: WallData): void {
+  const hostedCount = [...doorStore.getAll(), ...windowStore.getAll()].filter((opening) => opening.hostId === wall.id).length;
+  const offset = HOSTED_OFFSETS[hostedCount % HOSTED_OFFSETS.length];
+  const sill = type === "window" ? WINDOW_SILL_HEIGHT : 0;
+
+  history.beginGroup();
+  if (type === "door") {
+    const added = commandExecutor.execute({ type: "door.add", door: { hostId: wall.id } });
+    const door = added.success && added.objectId ? doorStore.get(added.objectId) : undefined;
+    const placed = door
+      ? commandExecutor.execute({ type: "door.update", id: door.id, changes: placeOpeningOnWall(wall, door.dimensions, { offset, sill }) })
+      : undefined;
+    if (placed?.success) {
+      history.endGroup();
+    } else {
+      history.cancelGroup();
+    }
+    return;
+  }
+  const added = commandExecutor.execute({ type: "window.add", window: { hostId: wall.id } });
+  const windowData = added.success && added.objectId ? windowStore.get(added.objectId) : undefined;
+  const placed = windowData
+    ? commandExecutor.execute({
+        type: "window.update",
+        id: windowData.id,
+        changes: placeOpeningOnWall(wall, windowData.dimensions, { offset, sill })
+      })
+    : undefined;
+  if (placed?.success) {
+    history.endGroup();
+  } else {
+    history.cancelGroup();
+  }
+}
+
+// Successive free-standing doors are spaced along Z on the negative side,
+// further out than the wall stack, so a freshly-added door is never
+// buried inside a wall.
 const DOOR_Z_START = -8;
 const DOOR_Z_SPACING = 1.5;
 
+/** With a wall selected, the door goes in that wall; otherwise it's placed free-standing, as before. */
 function addDoor(): void {
+  const wall = selectedWall();
+  if (wall) {
+    addHostedOpening("door", wall);
+    return;
+  }
   const index = firstFreeSlot(positionsOf(doorStore.getAll()), (slot) => ({ x: 0, z: DOOR_Z_START - slot * DOOR_Z_SPACING }));
   const command: AddDoorCommand = {
     type: "door.add",
@@ -177,13 +255,19 @@ function addDoor(): void {
   commandExecutor.execute(command);
 }
 
-// Successive windows are spaced along X on the positive side, further
-// out than the pillar stack, so a freshly-added window is never buried
-// inside a pillar.
+// Successive free-standing windows are spaced along X on the positive
+// side, further out than the pillar stack, so a freshly-added window is
+// never buried inside a pillar.
 const WINDOW_X_START = 8;
 const WINDOW_X_SPACING = 1.5;
 
+/** With a wall selected, the window goes in that wall at sill height; otherwise it's placed free-standing, as before. */
 function addWindow(): void {
+  const wall = selectedWall();
+  if (wall) {
+    addHostedOpening("window", wall);
+    return;
+  }
   const index = firstFreeSlot(positionsOf(windowStore.getAll()), (slot) => ({ x: WINDOW_X_START + slot * WINDOW_X_SPACING, z: 0 }));
   const command: AddWindowCommand = {
     type: "window.add",
@@ -192,13 +276,96 @@ function addWindow(): void {
   commandExecutor.execute(command);
 }
 
+/** House-scale kinds start centered on the origin - under, over, or around the house. */
+const HOUSE_SCALE_KINDS: ReadonlySet<string> = new Set(["foundation", "roof", "landscape"]);
+
+/**
+ * Every other element starts in its category's staging row, clear of the
+ * six original types' rows (which run along the X and Z axes through the
+ * origin) - move it into place from there. Spacing fits the category's
+ * largest default footprint.
+ */
+const ELEMENT_ROW_X_START = 3;
+const ELEMENT_ROWS: Readonly<Record<ElementCategory, { z: number; spacing: number }>> = {
+  structure: { z: -16, spacing: 4.5 },
+  openings: { z: -16, spacing: 4.5 },
+  rooms: { z: 11, spacing: 5.5 },
+  finish: { z: 16, spacing: 5 },
+  plumbing: { z: -11, spacing: 3.5 },
+  electrical: { z: -13, spacing: 3.5 },
+  interior: { z: 20, spacing: 3 },
+  exterior: { z: 24, spacing: 11 }
+};
+
+function elementSlot(kind: string): { x: number; z: number } {
+  const definition = getElementKind(kind);
+  if (!definition) {
+    return { x: 0, z: 0 };
+  }
+  if (HOUSE_SCALE_KINDS.has(kind)) {
+    const step = definition.dimensions[0].default + 2;
+    const occupied = positionsOf(elementStore.getAll().filter((element) => element.kind === kind));
+    const index = firstFreeSlot(occupied, (slot) => ({ x: slot * step, z: 0 }));
+    return { x: index * step, z: 0 };
+  }
+  const row = ELEMENT_ROWS[definition.category];
+  const occupied = positionsOf(
+    elementStore
+      .getAll()
+      .filter((element) => !HOUSE_SCALE_KINDS.has(element.kind) && getElementKind(element.kind)?.category === definition.category)
+  );
+  const index = firstFreeSlot(occupied, (slot) => ({ x: ELEMENT_ROW_X_START + slot * row.spacing, z: row.z }));
+  return { x: ELEMENT_ROW_X_START + index * row.spacing, z: row.z };
+}
+
+/** Adds one element of a catalog kind at its next free slot - an element.add command, so it validates, and undoes, like any other add. */
+function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}): void {
+  const slot = elementSlot(kind);
+  commandExecutor.execute({ type: "element.add", element: { ...options, kind, position: { x: slot.x, z: slot.z } } });
+}
+
+/** Whether the selection is an object Paint can repaint - any construction object. */
+function canPaintSelection(): boolean {
+  const selectedId = selectionStore.get();
+  return !!selectedId && resolveConstructionObject(selectedId, objectStores) !== null;
+}
+
+/**
+ * Paint: the selected object gets material "paint" and the chosen color
+ * through one update_object command - a painted wall is still the same
+ * wall, with the same id, size and assemblies, and one undo unpaints it.
+ */
+function paintSelected(color: string): void {
+  const selectedId = selectionStore.get();
+  if (!selectedId || !canPaintSelection()) {
+    return; // the button is disabled in this state, but guard anyway
+  }
+  commandExecutor.execute({ type: "update_object", objectId: selectedId, changes: { material: "paint", color } });
+}
+
+const ribbonActions: RibbonActions = {
+  addWall,
+  addPillar,
+  addBeam,
+  addSlab,
+  addDoor,
+  addWindow,
+  addElement: (kind) => addElement(kind),
+  addRoom: (preset) => {
+    const { kind, ...options } = roomPresetOptions(preset);
+    addElement(kind, options);
+  },
+  paintSelected,
+  canPaintSelection
+};
+
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 /** True when discarding the model would lose something: any object or assembly. */
 function modelHasContent(): boolean {
   return (
-    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore].some((store) => store.getAll().length > 0) ||
+    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore].some((store) => store.getAll().length > 0) ||
     assemblyStore.getAll().length > 0
   );
 }
@@ -244,13 +411,12 @@ const projectChooser = createProjectChooser({
 });
 
 /**
- * Duplicate/Delete now act on "whichever construction object is
- * currently selected" rather than "the selected wall" - selectionStore
- * is shared across every object type (see ProjectContext), so the
- * selected id could belong to any of the six stores. Checking each
- * store in turn mirrors the same "try each store in turn" shape
- * rightSidebar.ts and assemblyPanel.ts already use to resolve a
- * selected/member id without assuming its type.
+ * Duplicate/Delete act on "whichever construction object is currently
+ * selected" - selectionStore is shared across every object type (see
+ * ProjectContext), so the selected id could belong to any store. Checking
+ * each store in turn mirrors the same "try each store in turn" shape
+ * rightSidebar.ts and assemblyPanel.ts use to resolve an id without
+ * assuming its type.
  */
 function deleteSelected(): void {
   const selectedId = selectionStore.get();
@@ -272,6 +438,8 @@ function deleteSelected(): void {
     commandExecutor.execute({ type: "door.delete", id: selectedId });
   } else if (windowStore.get(selectedId)) {
     commandExecutor.execute({ type: "window.delete", id: selectedId });
+  } else if (elementStore.get(selectedId)) {
+    commandExecutor.execute({ type: "element.delete", id: selectedId });
   }
 }
 
@@ -280,36 +448,24 @@ function duplicateSelected(): void {
   if (!selectedId) {
     return; // the toolbar button is disabled in this state, but guard anyway
   }
+  let result: { success: boolean; objectId?: string } | undefined;
   if (wallStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "wall.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "wall.duplicate", id: selectedId });
   } else if (pillarStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "pillar.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "pillar.duplicate", id: selectedId });
   } else if (beamStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "beam.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "beam.duplicate", id: selectedId });
   } else if (slabStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "slab.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "slab.duplicate", id: selectedId });
   } else if (doorStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "door.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "door.duplicate", id: selectedId });
   } else if (windowStore.get(selectedId)) {
-    const result = commandExecutor.execute({ type: "window.duplicate", id: selectedId });
-    if (result.success && result.objectId) {
-      selectionStore.select(result.objectId);
-    }
+    result = commandExecutor.execute({ type: "window.duplicate", id: selectedId });
+  } else if (elementStore.get(selectedId)) {
+    result = commandExecutor.execute({ type: "element.duplicate", id: selectedId });
+  }
+  if (result?.success && result.objectId) {
+    selectionStore.select(result.objectId);
   }
 }
 
@@ -322,12 +478,7 @@ const shell = createAppShell({
   projectMeta,
   persistence,
   onViewChange: (preset) => sceneManager.current?.setView(preset),
-  onAddWall: addWall,
-  onAddPillar: addPillar,
-  onAddBeam: addBeam,
-  onAddSlab: addSlab,
-  onAddDoor: addDoor,
-  onAddWindow: addWindow,
+  ribbonActions,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
   onNewProject: newProject,
@@ -342,6 +493,7 @@ const shell = createAppShell({
   slabStore,
   doorStore,
   windowStore,
+  elementStore,
   assemblyStore,
   selectionStore,
   history,
@@ -360,6 +512,7 @@ sceneManager.current = new SceneManager(
   slabStore,
   doorStore,
   windowStore,
+  elementStore,
   selectionStore,
   commandExecutor,
   history

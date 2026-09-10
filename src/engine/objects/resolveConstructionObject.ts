@@ -5,6 +5,7 @@ import type { BeamStore } from "../beam/BeamStore";
 import type { SlabStore } from "../slab/SlabStore";
 import type { DoorStore } from "../door/DoorStore";
 import type { WindowStore } from "../window/WindowStore";
+import type { ElementStore } from "../elements/ElementStore";
 
 /** The stores this resolver knows how to check - extend alongside a new object type's store. */
 export interface ConstructionObjectStores {
@@ -14,6 +15,8 @@ export interface ConstructionObjectStores {
   slabStore: SlabStore;
   doorStore: DoorStore;
   windowStore: WindowStore;
+  /** Every catalog element kind - optional so callers built for the six original types keep working. */
+  elementStore?: ElementStore;
 }
 
 export interface ResolvedConstructionObjectRef {
@@ -24,23 +27,12 @@ export interface ResolvedConstructionObjectRef {
 /**
  * Resolves an arbitrary object id to which store (if any) currently
  * holds it, without the caller needing to know or guess the type in
- * advance. Checks each store in a fixed order (wall, then pillar, then
- * beam, then slab, then door, then window) and returns as soon as one
+ * advance. Checks each store in a fixed order (wall, pillar, beam, slab,
+ * door, window, then the element store) and returns as soon as one
  * matches.
  *
- * This is the shared version of a "try wall, then pillar" pattern that
- * already existed independently in a few UI modules (assemblyPanel.ts's
- * member-label lookup, rightSidebar.ts's selection lookup, main.ts's
- * duplicate/delete handlers) - assemblyPanel.ts's copy was the one that
- * had actually gone stale (it never got a pillar branch), which is what
- * this file exists to fix. The others already do the equivalent check
- * inline and aren't broken, so they aren't required to switch to this
- * - but a future one safely could.
- *
  * Pure, side-effect-free, no Three.js/DOM/UI knowledge - consistent
- * with everything else under src/engine/. Extend the parameter list
- * (and this file's one comment above) the same way every time a new
- * object-type store is added, per objects/README.md.
+ * with everything else under src/engine/.
  *
  * Returns undefined for an id that doesn't exist in any known store -
  * e.g. an assembly member whose underlying object was since deleted.
@@ -66,6 +58,9 @@ export function resolveConstructionObject(
   }
   if (stores.windowStore.get(id)) {
     return { type: "window", id };
+  }
+  if (stores.elementStore?.get(id)) {
+    return { type: "element", id };
   }
   return undefined;
 }

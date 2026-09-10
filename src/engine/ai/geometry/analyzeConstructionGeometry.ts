@@ -1,7 +1,9 @@
-// Explicit .ts extension on this value import (the others are type-only)
-// lets Node run this module directly - see geometry/verify.ts and
-// e2e/verify.ts. Harmless for Vite.
+// Explicit .ts extensions on these value imports (the others are
+// type-only) let Node run this module directly - see geometry/verify.ts
+// and e2e/verify.ts. Harmless for Vite. The element catalog is pure data:
+// it says which dimension spans each local axis of every element kind.
 import { compareIds } from "../types.ts";
+import { getElementKind } from "../../elements/catalog.ts";
 import type { AIContextObject, AIProjectSnapshot } from "../types";
 import type {
   AxisAlignedBox,
@@ -58,7 +60,15 @@ function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-function axesFor(type: string): Readonly<LocalAxisDimensions> | undefined {
+/**
+ * Which dimension spans each local axis of an object: the verified table
+ * above for the six original types, the element catalog for an element
+ * (by its kind). Undefined for anything else.
+ */
+export function localAxesFor(type: string, kind?: string): Readonly<LocalAxisDimensions> | undefined {
+  if (type === "element") {
+    return kind === undefined ? undefined : getElementKind(kind)?.axes;
+  }
   return Object.prototype.hasOwnProperty.call(LOCAL_AXIS_DIMENSIONS, type) ? LOCAL_AXIS_DIMENSIONS[type] : undefined;
 }
 
@@ -70,10 +80,14 @@ function axesFor(type: string): Readonly<LocalAxisDimensions> | undefined {
  */
 function validateGeometry(object: AIContextObject): GeometryError[] {
   const errors: GeometryError[] = [];
-  const axes = axesFor(object.type);
+  const axes = localAxesFor(object.type, object.kind);
 
   if (!axes) {
-    errors.push({ field: "type", message: `Geometry isn't defined for object type "${object.type}".` });
+    errors.push(
+      object.type === "element"
+        ? { field: "kind", message: `Geometry isn't defined for element kind "${object.kind}".` }
+        : { field: "type", message: `Geometry isn't defined for object type "${object.type}".` }
+    );
   }
 
   for (const axis of AXES) {
@@ -206,7 +220,7 @@ export function analyzeConstructionGeometry(snapshot: AIProjectSnapshot): Constr
   const invalidObjects: InvalidObjectGeometry[] = [];
   for (const object of sorted) {
     const errors = validateGeometry(object);
-    const axes = axesFor(object.type);
+    const axes = localAxesFor(object.type, object.kind);
     if (errors.length > 0 || !axes) {
       invalidObjects.push({ id: object.id, type: object.type, errors });
     } else {

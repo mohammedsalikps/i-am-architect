@@ -2,6 +2,7 @@
 // imports below) lets Node run this file directly - the backend and the
 // verify.ts scripts both do. Harmless for Vite.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
+import { getElementKind } from "../elements/catalog.ts";
 import type { ObjectType } from "../objects/types";
 import type { AIContextAssembly, AIContextObject, AIProjectSnapshot } from "./types";
 
@@ -113,11 +114,27 @@ function parseObject(raw: unknown, path: string): Parsed<AIContextObject> {
     return { ok: false, error: `"${path}.assemblyIds" must be an array of non-empty strings.` };
   }
 
+  // An element also names its catalog kind and label; the six original
+  // types carry neither, so their sanitized objects are unchanged.
+  let elementFields: { kind: string; label: string } | null = null;
+  if (type === "element") {
+    const kind = raw.kind;
+    if (typeof kind !== "string" || !getElementKind(kind)) {
+      return { ok: false, error: `"${path}.kind" must be a known element kind.` };
+    }
+    const label = raw.label;
+    if (typeof label !== "string") {
+      return { ok: false, error: `"${path}.label" must be a string.` };
+    }
+    elementFields = { kind, label };
+  }
+
   return {
     ok: true,
     value: {
       id,
       type: type as ObjectType,
+      ...(elementFields ?? {}),
       position: { x, y, z },
       rotation,
       dimensions: dimensionsCopy,

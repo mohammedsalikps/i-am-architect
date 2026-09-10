@@ -1,5 +1,11 @@
 import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
+import { ELEMENT_CATEGORIES, getElementKind } from "../engine/elements/catalog";
+import type { ElementKindDefinition, ParamSpec } from "../engine/elements/catalog";
+import { MATERIAL_LIBRARY, getMaterial, materialsFor } from "../engine/materials/materialLibrary";
+import type { MaterialDefinition } from "../engine/materials/materialLibrary";
+import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
+import { resolveConstructionObject } from "../engine/objects/resolveConstructionObject";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarData } from "../engine/pillar/types";
@@ -12,6 +18,8 @@ import type { DoorData } from "../engine/door/types";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowData } from "../engine/window/types";
 import type { WindowStore } from "../engine/window/WindowStore";
+import type { ElementData } from "../engine/elements/types";
+import type { ElementStore } from "../engine/elements/ElementStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type {
@@ -20,7 +28,8 @@ import type {
   UpdateBeamCommand,
   UpdateSlabCommand,
   UpdateDoorCommand,
-  UpdateWindowCommand
+  UpdateWindowCommand,
+  UpdateElementCommand
 } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
@@ -51,17 +60,26 @@ function commitOnEnter(input: HTMLInputElement): void {
   });
 }
 
+interface NumberInputOptions {
+  min?: number;
+  max?: number;
+  step: number;
+  /** Only whole numbers are accepted. */
+  integer?: boolean;
+}
+
 /**
  * A numeric field that commits on blur/Enter and reverts on invalid
  * input. `min` is optional: dimensions pass a positive floor, while
  * position/rotation fields omit it (negative values are valid there) -
- * either way NaN/non-finite input is always rejected.
+ * either way NaN/non-finite input is always rejected. An `onChange` that
+ * returns false (its command was rejected) also reverts the field.
  */
 function numberInputRow(
   label: string,
   value: number,
-  onChange: (value: number) => void,
-  options: { min?: number; step: number }
+  onChange: (value: number) => void | boolean,
+  options: NumberInputOptions
 ): HTMLElement {
   const input = el("input", {
     className: "property-row__input",
@@ -69,18 +87,23 @@ function numberInputRow(
       type: "number",
       value: String(value),
       step: String(options.step),
-      ...(options.min !== undefined ? { min: String(options.min) } : {})
+      "aria-label": label,
+      ...(options.min !== undefined ? { min: String(options.min) } : {}),
+      ...(options.max !== undefined ? { max: String(options.max) } : {})
     }
   });
 
   input.addEventListener("change", () => {
     const parsed = Number(input.value);
-    const isValid = Number.isFinite(parsed) && (options.min === undefined || parsed >= options.min);
-    if (isValid) {
-      onChange(parsed);
-    } else {
-      input.value = String(value); // revert invalid input
+    const isValid =
+      Number.isFinite(parsed) &&
+      (options.min === undefined || parsed >= options.min) &&
+      (options.max === undefined || parsed <= options.max) &&
+      (!options.integer || Number.isInteger(parsed));
+    if (isValid && onChange(parsed) !== false) {
+      return;
     }
+    input.value = String(value); // revert invalid (or rejected) input
   });
   commitOnEnter(input);
 
@@ -93,7 +116,7 @@ function numberInputRow(
 function colorInputRow(label: string, value: string, onChange: (value: string) => void): HTMLElement {
   const input = el("input", {
     className: "property-row__color-input",
-    attrs: { type: "color", value }
+    attrs: { type: "color", value, "aria-label": label }
   });
   // "change" (fires when the picker closes) rather than "input" (fires on every
   // drag tick) - the latter would trigger a re-render mid-interaction and could
@@ -106,7 +129,7 @@ function colorInputRow(label: string, value: string, onChange: (value: string) =
   ]);
 }
 
-/** A free-text field (e.g. material) that commits on blur/Enter. Blank input is reverted rather than stored. */
+/** A free-text field (e.g. an element's name) that commits on blur/Enter. Blank input is reverted rather than stored. */
 function textInputRow(label: string, value: string, onChange: (value: string) => void): HTMLElement {
   const input = el("input", {
     className: "property-row__input property-row__input--text",
@@ -128,6 +151,41 @@ function textInputRow(label: string, value: string, onChange: (value: string) =>
   ]);
 }
 
+/** A drop-down that commits as soon as a different option is chosen. */
+function selectRow(label: string, value: string, choices: readonly { value: string; label: string }[], onChange: (value: string) => void): HTMLElement {
+  const select = el(
+    "select",
+    { className: "property-row__input property-row__select", attrs: { "aria-label": label } },
+    choices.map((choice) => el("option", { text: choice.label, attrs: { value: choice.value } }))
+  );
+  select.value = value;
+  select.addEventListener("change", () => {
+    if (select.value !== value) {
+      onChange(select.value);
+    }
+  });
+
+  return el("div", { className: "property-row" }, [
+    el("span", { className: "property-row__label", text: label }),
+    select
+  ]);
+}
+
+/**
+ * The material drop-down: library materials suited to the object. A value
+ * that isn't among them - a free-text material saved on one of the six
+ * original types, or a library material outside the suggested categories -
+ * stays listed, so showing the panel never changes the object.
+ */
+function materialSelectRow(value: string, choices: readonly MaterialDefinition[], onChange: (value: string) => void): HTMLElement {
+  const options = choices.map((material) => ({ value: material.id, label: material.label }));
+  if (!choices.some((material) => material.id === value)) {
+    const library = getMaterial(value);
+    options.unshift({ value, label: library ? library.label : `${value} (custom)` });
+  }
+  return selectRow("Material", value, options, onChange);
+}
+
 function formatMeters(value: number): string {
   return `${value.toFixed(2)} m`;
 }
@@ -138,6 +196,15 @@ function radiansToDegrees(radians: number): number {
 
 function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
+}
+
+/** Rounded for display only - avoids showing float noise like "44.99999999999999". */
+function displayDegrees(radians: number): number {
+  return Math.round(radiansToDegrees(radians) * 100) / 100;
+}
+
+function displayNumber(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 let cachedActionsRow: { onDuplicateSelected: () => void; onDeleteSelected: () => void; row: HTMLElement } | null = null;
@@ -186,9 +253,7 @@ function buildWallPanels(
 
   const properties = section("Properties", [readOnlyRow("Name", "Wall"), readOnlyRow("Type", wall.type)]);
 
-  // Rounded for display only - onChange still converts the raw typed value,
-  // this just avoids showing float noise like "44.99999999999999".
-  const rotationDegrees = Math.round(radiansToDegrees(wall.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(wall.rotation);
 
   const updateWall = (changes: UpdateWallCommand["changes"]): void => {
     commandExecutor.execute({ type: "wall.update", id: wall.id, changes });
@@ -234,7 +299,7 @@ function buildWallPanels(
     )
   ]);
 
-  const material = section("Material", [textInputRow("Material", wall.material, (value) => updateWall({ material: value }))]);
+  const material = section("Material", [materialSelectRow(wall.material, materialsFor(), (value) => updateWall({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", wall.color, (value) => updateWall({ color: value }))]);
 
@@ -260,7 +325,7 @@ function buildPillarPanels(
 
   const properties = section("Properties", [readOnlyRow("Name", "Pillar"), readOnlyRow("Type", pillar.type)]);
 
-  const rotationDegrees = Math.round(radiansToDegrees(pillar.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(pillar.rotation);
 
   const updatePillar = (changes: UpdatePillarCommand["changes"]): void => {
     commandExecutor.execute({ type: "pillar.update", id: pillar.id, changes });
@@ -314,7 +379,7 @@ function buildPillarPanels(
     )
   ]);
 
-  const material = section("Material", [textInputRow("Material", pillar.material, (value) => updatePillar({ material: value }))]);
+  const material = section("Material", [materialSelectRow(pillar.material, materialsFor(), (value) => updatePillar({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", pillar.color, (value) => updatePillar({ color: value }))]);
 
@@ -338,7 +403,7 @@ function buildBeamPanels(
 
   const properties = section("Properties", [readOnlyRow("Name", "Beam"), readOnlyRow("Type", beam.type)]);
 
-  const rotationDegrees = Math.round(radiansToDegrees(beam.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(beam.rotation);
 
   const updateBeam = (changes: UpdateBeamCommand["changes"]): void => {
     commandExecutor.execute({ type: "beam.update", id: beam.id, changes });
@@ -389,7 +454,7 @@ function buildBeamPanels(
     )
   ]);
 
-  const material = section("Material", [textInputRow("Material", beam.material, (value) => updateBeam({ material: value }))]);
+  const material = section("Material", [materialSelectRow(beam.material, materialsFor(), (value) => updateBeam({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", beam.color, (value) => updateBeam({ color: value }))]);
 
@@ -413,7 +478,7 @@ function buildSlabPanels(
 
   const properties = section("Properties", [readOnlyRow("Name", "Slab"), readOnlyRow("Type", slab.type)]);
 
-  const rotationDegrees = Math.round(radiansToDegrees(slab.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(slab.rotation);
 
   const updateSlab = (changes: UpdateSlabCommand["changes"]): void => {
     commandExecutor.execute({ type: "slab.update", id: slab.id, changes });
@@ -464,7 +529,7 @@ function buildSlabPanels(
     )
   ]);
 
-  const material = section("Material", [textInputRow("Material", slab.material, (value) => updateSlab({ material: value }))]);
+  const material = section("Material", [materialSelectRow(slab.material, materialsFor(), (value) => updateSlab({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", slab.color, (value) => updateSlab({ color: value }))]);
 
@@ -478,19 +543,25 @@ function buildSlabPanels(
  * concrete, type-safe function means it never has to guess which
  * fields another type actually has. (Door and window happen to share
  * the same dimensions shape, but stay two separate functions anyway -
- * see rightSidebar's module doc.)
+ * see rightSidebar's module doc.) `hostLabel` says which wall, if any,
+ * the door belongs to.
  */
 function buildDoorPanels(
   door: DoorData,
+  hostLabel: string,
   commandExecutor: CommandExecutor,
   onDuplicateSelected: () => void,
   onDeleteSelected: () => void
 ): HTMLElement[] {
   const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
 
-  const properties = section("Properties", [readOnlyRow("Name", "Door"), readOnlyRow("Type", door.type)]);
+  const properties = section("Properties", [
+    readOnlyRow("Name", "Door"),
+    readOnlyRow("Type", door.type),
+    readOnlyRow("Host wall", hostLabel)
+  ]);
 
-  const rotationDegrees = Math.round(radiansToDegrees(door.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(door.rotation);
 
   const updateDoor = (changes: UpdateDoorCommand["changes"]): void => {
     commandExecutor.execute({ type: "door.update", id: door.id, changes });
@@ -541,7 +612,7 @@ function buildDoorPanels(
     )
   ]);
 
-  const material = section("Material", [textInputRow("Material", door.material, (value) => updateDoor({ material: value }))]);
+  const material = section("Material", [materialSelectRow(door.material, materialsFor(), (value) => updateDoor({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", door.color, (value) => updateDoor({ color: value }))]);
 
@@ -554,15 +625,20 @@ function buildDoorPanels(
  */
 function buildWindowPanels(
   windowData: WindowData,
+  hostLabel: string,
   commandExecutor: CommandExecutor,
   onDuplicateSelected: () => void,
   onDeleteSelected: () => void
 ): HTMLElement[] {
   const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
 
-  const properties = section("Properties", [readOnlyRow("Name", "Window"), readOnlyRow("Type", windowData.type)]);
+  const properties = section("Properties", [
+    readOnlyRow("Name", "Window"),
+    readOnlyRow("Type", windowData.type),
+    readOnlyRow("Host wall", hostLabel)
+  ]);
 
-  const rotationDegrees = Math.round(radiansToDegrees(windowData.rotation) * 100) / 100;
+  const rotationDegrees = displayDegrees(windowData.rotation);
 
   const updateWindow = (changes: UpdateWindowCommand["changes"]): void => {
     commandExecutor.execute({ type: "window.update", id: windowData.id, changes });
@@ -617,7 +693,7 @@ function buildWindowPanels(
   ]);
 
   const material = section("Material", [
-    textInputRow("Material", windowData.material, (value) => updateWindow({ material: value }))
+    materialSelectRow(windowData.material, materialsFor(), (value) => updateWindow({ material: value }))
   ]);
 
   const color = section("Color", [
@@ -627,11 +703,188 @@ function buildWindowPanels(
   return [actions, properties, transform, dimensions, material, color];
 }
 
+/** An object as the room section lists it. */
+interface ListedObject {
+  id: string;
+  type: string;
+  kind?: string;
+  label?: string;
+  position: { x: number; y: number; z: number };
+}
+
+function describeListed(object: ListedObject): string {
+  const name = object.label ?? object.type.charAt(0).toUpperCase() + object.type.slice(1);
+  return `${name} — ${object.id}`;
+}
+
+/** A linear element's two ends, from its center, length and rotation (local X runs along world (cos t, 0, -sin t)). */
+function linearEnds(element: ElementData): { start: { x: number; z: number }; end: { x: number; z: number } } {
+  const half = (element.dimensions.length ?? 0) / 2;
+  const dx = Math.cos(element.rotation) * half;
+  const dz = -Math.sin(element.rotation) * half;
+  return {
+    start: { x: displayNumber(element.position.x - dx), z: displayNumber(element.position.z - dz) },
+    end: { x: displayNumber(element.position.x + dx), z: displayNumber(element.position.z + dz) }
+  };
+}
+
+/** The center, rotation and length of a straight run from `start` to `end`, at height `y`. */
+function runBetween(start: { x: number; z: number }, end: { x: number; z: number }, y: number) {
+  const dx = end.x - start.x;
+  const dz = end.z - start.z;
+  return {
+    position: { x: (start.x + end.x) / 2, y, z: (start.z + end.z) / 2 },
+    rotation: Math.atan2(-dz, dx),
+    length: Math.hypot(dx, dz)
+  };
+}
+
+function paramRow(spec: ParamSpec, value: number | string, onChange: (value: number | string) => boolean): HTMLElement {
+  if (spec.kind === "integer") {
+    return numberInputRow(spec.label, Number(value), (next) => onChange(next), { min: spec.min, max: spec.max, step: 1, integer: true });
+  }
+  return selectRow(
+    spec.label,
+    String(value),
+    spec.options.map((option) => ({ value: option, label: option.charAt(0).toUpperCase() + option.slice(1) })),
+    (next) => {
+      onChange(next);
+    }
+  );
+}
+
+/**
+ * One panel builder for every element kind, driven by its catalog entry:
+ * name, the kind's own dimensions (with its minimums and steps), its
+ * parameters, the materials that suit it, and color. A room also shows
+ * its area and the objects standing in it; a linear element (pipe,
+ * conduit, cable) also shows - and edits - its start and end points.
+ * Every edit is an element.update command.
+ */
+function buildElementPanels(
+  element: ElementData,
+  definition: ElementKindDefinition,
+  context: {
+    commandExecutor: CommandExecutor;
+    selectionStore: SelectionStore;
+    allObjects: () => ListedObject[];
+    onDuplicateSelected: () => void;
+    onDeleteSelected: () => void;
+  }
+): HTMLElement[] {
+  const actions = buildActionsRow(context.onDuplicateSelected, context.onDeleteSelected);
+
+  const update = (changes: UpdateElementCommand["changes"]): boolean =>
+    context.commandExecutor.execute({ type: "element.update", id: element.id, changes }).success;
+
+  const categoryLabel = ELEMENT_CATEGORIES.find((category) => category.id === definition.category)?.label ?? definition.category;
+  const panels: HTMLElement[] = [
+    actions,
+    section("Properties", [
+      textInputRow("Name", element.label, (value) => {
+        update({ label: value });
+      }),
+      readOnlyRow("Type", definition.label),
+      readOnlyRow("Category", categoryLabel),
+      readOnlyRow("Id", element.id)
+    ])
+  ];
+
+  if (isRoom(element)) {
+    const objects = context.allObjects();
+    const insideIds = objectsInRoom(element, objects);
+    const byId = new Map(objects.map((object) => [object.id, object]));
+    const items = insideIds.map((id) => {
+      const object = byId.get(id);
+      const button = el("button", {
+        className: "room-contents__item",
+        text: object ? describeListed(object) : id,
+        attrs: { type: "button" }
+      });
+      button.addEventListener("click", () => context.selectionStore.select(id));
+      return button;
+    });
+    panels.push(
+      section("Room", [
+        readOnlyRow("Floor area", `${roomArea(element).toFixed(2)} m²`),
+        readOnlyRow("Contains", `${insideIds.length} object${insideIds.length === 1 ? "" : "s"}`),
+        el("div", { className: "room-contents" }, items)
+      ])
+    );
+  }
+
+  panels.push(
+    section("Transform", [
+      numberInputRow("Position X", element.position.x, (value) => update({ position: { ...element.position, x: value } }), { step: 0.1 }),
+      numberInputRow("Position Y", element.position.y, (value) => update({ position: { ...element.position, y: value } }), { step: 0.1 }),
+      numberInputRow("Position Z", element.position.z, (value) => update({ position: { ...element.position, z: value } }), { step: 0.1 }),
+      numberInputRow("Rotation Y", displayDegrees(element.rotation), (value) => update({ rotation: degreesToRadians(value) }), { step: 1 })
+    ])
+  );
+
+  if (definition.linear) {
+    const { start, end } = linearEnds(element);
+    const reroute = (nextStart: { x: number; z: number }, nextEnd: { x: number; z: number }): boolean => {
+      const run = runBetween(nextStart, nextEnd, element.position.y);
+      return update({ position: run.position, rotation: run.rotation, dimensions: { ...element.dimensions, length: run.length } });
+    };
+    panels.push(
+      section("Run", [
+        numberInputRow("Start X", start.x, (value) => reroute({ x: value, z: start.z }, end), { step: 0.1 }),
+        numberInputRow("Start Z", start.z, (value) => reroute({ x: start.x, z: value }, end), { step: 0.1 }),
+        numberInputRow("End X", end.x, (value) => reroute(start, { x: value, z: end.z }), { step: 0.1 }),
+        numberInputRow("End Z", end.z, (value) => reroute(start, { x: end.x, z: value }), { step: 0.1 })
+      ])
+    );
+  }
+
+  panels.push(
+    section(
+      "Dimensions",
+      definition.dimensions.map((spec) =>
+        numberInputRow(
+          spec.label,
+          element.dimensions[spec.key],
+          (value) => update({ dimensions: { ...element.dimensions, [spec.key]: value } }),
+          { min: spec.min, step: spec.step }
+        )
+      )
+    )
+  );
+
+  if (definition.params.length > 0) {
+    panels.push(
+      section(
+        "Parameters",
+        definition.params.map((spec) =>
+          paramRow(spec, element.params[spec.key], (value) => update({ params: { ...element.params, [spec.key]: value } }))
+        )
+      )
+    );
+  }
+
+  const suited = materialsFor(definition.materialCategories.length > 0 ? definition.materialCategories : ["generic"]);
+  panels.push(
+    section("Material", [
+      materialSelectRow(element.material, suited, (value) => {
+        update({ material: value });
+      })
+    ]),
+    section("Color", [
+      colorInputRow("Color", element.color, (value) => {
+        update({ color: value });
+      })
+    ])
+  );
+
+  return panels;
+}
+
 function buildEmptyState(): HTMLElement {
   return el("div", { className: "sidebar__section" }, [
     el("p", {
       className: "sidebar__placeholder",
-      text: "Select a wall, pillar, beam, slab, door, or window to view and edit its properties."
+      text: "Select an object - in the viewport or the Project hierarchy - to view and edit its properties."
     })
   ]);
 }
@@ -643,74 +896,180 @@ export type RightSidebarOptions = {
   slabStore: SlabStore;
   doorStore: DoorStore;
   windowStore: WindowStore;
+  elementStore: ElementStore;
   selectionStore: SelectionStore;
   commandExecutor: CommandExecutor;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
 };
 
+const MATERIAL_CATEGORY_LABELS: Readonly<Record<string, string>> = {
+  generic: "Generic",
+  structural: "Structural",
+  masonry: "Masonry",
+  finish: "Finishes",
+  wood: "Wood",
+  glass: "Glass",
+  metal: "Metal",
+  ceramic: "Ceramic & tile",
+  stone: "Stone",
+  roofing: "Roofing",
+  plumbing: "Plumbing",
+  electrical: "Electrical",
+  fabric: "Fabric",
+  landscape: "Landscape"
+};
+
+/**
+ * The Materials tab: the whole material library, by category. "Apply"
+ * gives the selected object that material and its typical color - one
+ * update_object command, so it is undoable like any edit, and the object
+ * stays the same object.
+ */
+function createMaterialsPanel(options: RightSidebarOptions): HTMLElement {
+  const stores = {
+    wallStore: options.wallStore,
+    pillarStore: options.pillarStore,
+    beamStore: options.beamStore,
+    slabStore: options.slabStore,
+    doorStore: options.doorStore,
+    windowStore: options.windowStore,
+    elementStore: options.elementStore
+  };
+  const status = el("p", { className: "sidebar__placeholder material-library__status" });
+  const applyButtons: HTMLButtonElement[] = [];
+
+  const categories: string[] = [];
+  for (const material of MATERIAL_LIBRARY) {
+    if (!categories.includes(material.category)) {
+      categories.push(material.category);
+    }
+  }
+
+  const sections = categories.map((category) =>
+    section(
+      MATERIAL_CATEGORY_LABELS[category] ?? category,
+      MATERIAL_LIBRARY.filter((material) => material.category === category).map((material) => {
+        const apply = el("button", {
+          className: "toolbar-button material-row__apply",
+          text: "Apply",
+          attrs: { type: "button", "aria-label": `Apply ${material.label} to the selected object` }
+        });
+        apply.addEventListener("click", () => {
+          const objectId = options.selectionStore.get();
+          if (objectId) {
+            options.commandExecutor.execute({
+              type: "update_object",
+              objectId,
+              changes: { material: material.id, color: material.color }
+            });
+          }
+        });
+        applyButtons.push(apply);
+        return el("div", { className: "material-row", attrs: { "data-material": material.id } }, [
+          el("span", { className: "material-row__swatch", attrs: { style: `background: ${material.color}` } }),
+          el("span", { className: "material-row__label", text: material.label }),
+          apply
+        ]);
+      })
+    )
+  );
+
+  const sync = (): void => {
+    const selectedId = options.selectionStore.get();
+    const selected = selectedId ? resolveConstructionObject(selectedId, stores) : null;
+    status.textContent = selected
+      ? `Applying to ${selectedId}.`
+      : "Select an object, then apply a material to it.";
+    for (const button of applyButtons) {
+      button.disabled = !selected;
+    }
+  };
+  options.selectionStore.subscribe(sync);
+
+  return el("div", { className: "material-library" }, [el("div", { className: "sidebar__section" }, [status]), ...sections]);
+}
+
 /**
  * Right sidebar / inspector. Tabbed: Properties/Materials/Blocks/
- * Colors. Properties resolves the current selection against wallStore,
- * then pillarStore, then beamStore, then slabStore, then doorStore,
- * then windowStore - the same "try each store in turn" shape
- * assemblyPanel.ts's resolveMemberLabel already uses (both could use
- * the shared resolveConstructionObject() helper instead; they don't
- * need to, since neither is broken - see that file's docs) - and
- * renders the matching type-specific panel (buildWallPanels /
- * buildPillarPanels / buildBeamPanels / buildSlabPanels /
- * buildDoorPanels / buildWindowPanels), or the empty state if the
- * selected id belongs to none of them (or nothing is selected). Each
- * object type's rendering stays a fully separate, type-safe function -
- * this module never merges their shapes into one generic form.
+ * Colors. Properties resolves the current selection against each store
+ * in turn - the six original types, then elements - and renders the
+ * matching panel: a type-specific one for each original type
+ * (buildWallPanels ... buildWindowPanels), and one catalog-driven panel
+ * for every element kind (buildElementPanels). The Materials tab applies
+ * a library material to the selected object.
  *
  * Reads come straight from the stores; edits go through
- * commandExecutor.execute() ("wall.update"/"pillar.update"/
- * "beam.update"/"slab.update"/"door.update"/"window.update" commands)
- * rather than touching the stores or history controllers directly -
- * this module never touches Three.js directly either.
+ * commandExecutor.execute() ("wall.update" ... "element.update", and
+ * "update_object" for the Materials tab) rather than touching the stores
+ * or history controllers directly - this module never touches Three.js
+ * directly either.
  */
 export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const properties = el("div", { className: "property-panel" });
 
-  const render = (): void => {
-    const selectedId = options.selectionStore.get();
-    const wall = selectedId ? options.wallStore.get(selectedId) : undefined;
-    const pillar = !wall && selectedId ? options.pillarStore.get(selectedId) : undefined;
-    const beam = !wall && !pillar && selectedId ? options.beamStore.get(selectedId) : undefined;
-    const slab = !wall && !pillar && !beam && selectedId ? options.slabStore.get(selectedId) : undefined;
-    const door = !wall && !pillar && !beam && !slab && selectedId ? options.doorStore.get(selectedId) : undefined;
-    const windowData =
-      !wall && !pillar && !beam && !slab && !door && selectedId ? options.windowStore.get(selectedId) : undefined;
-
-    let content: HTMLElement[];
-    if (wall) {
-      content = buildWallPanels(wall, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
-    } else if (pillar) {
-      content = buildPillarPanels(
-        pillar,
-        options.commandExecutor,
-        options.onDuplicateSelected,
-        options.onDeleteSelected
-      );
-    } else if (beam) {
-      content = buildBeamPanels(beam, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
-    } else if (slab) {
-      content = buildSlabPanels(slab, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
-    } else if (door) {
-      content = buildDoorPanels(door, options.commandExecutor, options.onDuplicateSelected, options.onDeleteSelected);
-    } else if (windowData) {
-      content = buildWindowPanels(
-        windowData,
-        options.commandExecutor,
-        options.onDuplicateSelected,
-        options.onDeleteSelected
-      );
-    } else {
-      content = [buildEmptyState()];
+  const hostLabel = (hostId: string | null): string => {
+    if (hostId === null) {
+      return "None (free-standing)";
     }
+    return options.wallStore.get(hostId) ? hostId : `${hostId} (deleted)`;
+  };
 
-    properties.replaceChildren(...content);
+  const allObjects = (): ListedObject[] => [
+    ...options.wallStore.getAll(),
+    ...options.pillarStore.getAll(),
+    ...options.beamStore.getAll(),
+    ...options.slabStore.getAll(),
+    ...options.doorStore.getAll(),
+    ...options.windowStore.getAll(),
+    ...options.elementStore.getAll()
+  ];
+
+  const panelsFor = (selectedId: string | null): HTMLElement[] => {
+    if (!selectedId) {
+      return [buildEmptyState()];
+    }
+    const { commandExecutor, onDuplicateSelected, onDeleteSelected } = options;
+    const wall = options.wallStore.get(selectedId);
+    if (wall) {
+      return buildWallPanels(wall, commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const pillar = options.pillarStore.get(selectedId);
+    if (pillar) {
+      return buildPillarPanels(pillar, commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const beam = options.beamStore.get(selectedId);
+    if (beam) {
+      return buildBeamPanels(beam, commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const slab = options.slabStore.get(selectedId);
+    if (slab) {
+      return buildSlabPanels(slab, commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const door = options.doorStore.get(selectedId);
+    if (door) {
+      return buildDoorPanels(door, hostLabel(door.hostId), commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const windowData = options.windowStore.get(selectedId);
+    if (windowData) {
+      return buildWindowPanels(windowData, hostLabel(windowData.hostId), commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const element = options.elementStore.get(selectedId);
+    const definition = element ? getElementKind(element.kind) : undefined;
+    if (element && definition) {
+      return buildElementPanels(element, definition, {
+        commandExecutor,
+        selectionStore: options.selectionStore,
+        allObjects,
+        onDuplicateSelected,
+        onDeleteSelected
+      });
+    }
+    return [buildEmptyState()];
+  };
+
+  const render = (): void => {
+    properties.replaceChildren(...panelsFor(options.selectionStore.get()));
   };
 
   options.wallStore.subscribe(render);
@@ -719,12 +1078,15 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   options.slabStore.subscribe(render);
   options.doorStore.subscribe(render);
   options.windowStore.subscribe(render);
+  options.elementStore.subscribe(render);
   options.selectionStore.subscribe(render);
+
+  const materials = createMaterialsPanel(options);
 
   const { strip, panel } = createTabStrip(
     [
       { id: "properties", label: "Properties", build: () => properties },
-      { id: "materials", label: "Materials", build: () => comingSoon("The material library"), disabled: true },
+      { id: "materials", label: "Materials", build: () => materials },
       { id: "blocks", label: "Blocks", build: () => comingSoon("Reusable blocks"), disabled: true },
       { id: "colors", label: "Colors", build: () => comingSoon("Saved color palettes"), disabled: true }
     ],

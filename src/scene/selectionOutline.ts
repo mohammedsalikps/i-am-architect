@@ -8,8 +8,8 @@ import * as THREE from "three";
  * that a second object type (pillar) needs the exact same thing.
  */
 
-const OUTLINE_COLOR = 0xffb020; // amber - distinct from any construction object's own material color
-const OUTLINE_SCALE = 1.02; // slightly larger than the mesh so it reads clearly at any angle
+export const OUTLINE_COLOR = 0xffb020; // amber - distinct from any construction object's own material color
+export const OUTLINE_SCALE = 1.02; // slightly larger than the mesh so it reads clearly at any angle
 
 /** Builds a hidden-by-default edge outline as a selection indicator for a mesh. */
 export function buildSelectionOutline(mesh: THREE.Mesh): THREE.LineSegments {

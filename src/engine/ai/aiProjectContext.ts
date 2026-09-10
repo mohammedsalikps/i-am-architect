@@ -62,6 +62,10 @@ export function buildAIProjectContext(snapshot: AIProjectSnapshot): AIProjectCon
     objects: snapshot.objects.map((object) => ({
       id: object.id,
       type: object.type,
+      // An element also carries its catalog kind and label (the backend's
+      // sanitizer requires the kind); the six original types have
+      // neither, so their copy is unchanged.
+      ...(object.kind !== undefined ? { kind: object.kind, label: object.label ?? "" } : {}),
       position: { x: object.position.x, y: object.position.y, z: object.position.z },
       rotation: object.rotation,
       dimensions: copyDimensions(object.dimensions),

@@ -17,6 +17,8 @@ export type ManipulationGesture =
 export interface ManipulatedObject {
   id: string;
   type: string;
+  /** Elements only: the catalog kind, which decides which dimension each resize handle drives. */
+  kind?: string;
   position: Point3;
   rotation: number;
   dimensions: Record<string, number>;
@@ -103,7 +105,7 @@ export class ObjectManipulator {
 
     let dimension: string | null = null;
     if (gesture.kind === "resize") {
-      const found = dimensionForAxis(start.type, gesture.axis);
+      const found = dimensionForAxis(start.type, gesture.axis, start.kind);
       if (!found || !Object.prototype.hasOwnProperty.call(start.dimensions, found)) {
         return false;
       }
@@ -209,6 +211,7 @@ export function createStoreObjectReader(stores: ConstructionObjectStores): (id: 
     return {
       id: record.id,
       type: record.type,
+      ...(typeof record.kind === "string" ? { kind: record.kind } : {}),
       position: { x: record.position.x, y: record.position.y, z: record.position.z },
       rotation: record.rotation,
       dimensions: Object.fromEntries(Object.entries(record.dimensions)) as Record<string, number>
@@ -220,7 +223,7 @@ function readRecord(
   type: string,
   id: string,
   stores: ConstructionObjectStores
-): { id: string; type: string; position: Point3; rotation: number; dimensions: object } | undefined {
+): { id: string; type: string; kind?: string; position: Point3; rotation: number; dimensions: object } | undefined {
   switch (type) {
     case "wall":
       return stores.wallStore.get(id);
@@ -234,6 +237,8 @@ function readRecord(
       return stores.doorStore.get(id);
     case "window":
       return stores.windowStore.get(id);
+    case "element":
+      return stores.elementStore?.get(id);
     default:
       return undefined;
   }

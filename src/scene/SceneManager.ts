@@ -8,6 +8,7 @@ import { BeamLayer } from "./beam/BeamLayer";
 import { SlabLayer } from "./slab/SlabLayer";
 import { DoorLayer } from "./door/DoorLayer";
 import { WindowLayer } from "./window/WindowLayer";
+import { ElementLayer } from "./elements/ElementLayer";
 import { SelectionRaycaster } from "./SelectionRaycaster";
 import { ManipulationHandles } from "./manipulation/ManipulationHandles";
 import { ManipulationController } from "./manipulation/ManipulationController";
@@ -20,6 +21,7 @@ import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
+import type { ElementStore } from "../engine/elements/ElementStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 /** Camera view presets the UI's view-control buttons can request. */
@@ -38,9 +40,10 @@ const VIEW_CAMERA_POSITIONS: Record<ViewPreset, THREE.Vector3Tuple> = {
  * *data* logic (walls, bricks, dimensions, etc.) belongs in src/engine.
  * Rendering of construction objects is delegated to dedicated layers
  * (WallLayer, PillarLayer, BeamLayer, SlabLayer, DoorLayer,
- * WindowLayer, ...) rather than inlined here, so this class stays a
- * general-purpose scene host. Click-to-select is likewise delegated to
- * one shared SelectionRaycaster spanning every layer.
+ * WindowLayer, and ElementLayer for every catalog element kind) rather
+ * than inlined here, so this class stays a general-purpose scene host.
+ * Click-to-select is likewise delegated to one shared SelectionRaycaster
+ * spanning every layer.
  */
 export class SceneManager {
   private readonly scene: THREE.Scene;
@@ -57,6 +60,7 @@ export class SceneManager {
     slabStore: SlabStore,
     doorStore: DoorStore,
     windowStore: WindowStore,
+    elementStore: ElementStore,
     selectionStore: SelectionStore,
     /** The shared CommandExecutor and HistoryManager - mouse manipulation edits the model only through these. */
     commandExecutor: { execute(input: unknown): CommandResult },
@@ -96,6 +100,7 @@ export class SceneManager {
     const slabLayer = new SlabLayer(this.scene, slabStore, selectionStore);
     const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore);
     const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore);
+    const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore);
 
     // One shared raycaster combines every layer's meshes into a single
     // click handler - see SelectionRaycaster.ts for why independent
@@ -107,18 +112,19 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => slabLayer.getMeshes());
     selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
     selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => elementLayer.getMeshes());
 
     // Mouse manipulation of the selected object: handles render from the
     // stores like any layer, and every drag becomes update_object commands
     // through the shared CommandExecutor, one history entry per gesture.
     // See engine/manipulation/ObjectManipulator.ts. Kept alive by their
     // own listeners, like the layers above.
-    const stores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore };
+    const stores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore };
     const readObject = createStoreObjectReader(stores);
     const handles = new ManipulationHandles({
       scene: this.scene,
       selectionStore,
-      stores: [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore],
+      stores: [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore],
       readObject
     });
     new ManipulationController({
@@ -133,7 +139,8 @@ export class SceneManager {
         ...beamLayer.getMeshes(),
         ...slabLayer.getMeshes(),
         ...doorLayer.getMeshes(),
-        ...windowLayer.getMeshes()
+        ...windowLayer.getMeshes(),
+        ...elementLayer.getMeshes()
       ],
       manipulator: new ObjectManipulator({ commandExecutor, history, readObject })
     });

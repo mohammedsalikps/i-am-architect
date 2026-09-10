@@ -10,32 +10,32 @@ import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
+import type { ElementStore } from "../engine/elements/ElementStore";
 import type { ObjectId, ObjectType } from "../engine/objects/types";
 
-/** Truncates a long id for display; today's ids (e.g. "wall-1") are already short, so this is usually a no-op. */
+/** Truncates a long id for display; today's ids (e.g. "wall-1", "water-pipe-3") are already short, so this is usually a no-op. */
 function shortId(id: string): string {
-  return id.length <= 10 ? id : `${id.slice(0, 8)}…`;
+  return id.length <= 18 ? id : `${id.slice(0, 16)}…`;
 }
 
-// Only wall/pillar/beam/slab/door/window are resolvable today (see
-// resolveConstructionObject.ts) - this map only needs an entry for each
-// type that resolver can actually return. A new object type's store
-// joining the resolver adds one line here.
+// One entry per type resolveConstructionObject() can return. An element
+// is listed by its own name instead ("Living Room", "Water Pipe").
 const TYPE_LABELS: Partial<Record<ObjectType, string>> = {
   wall: "Wall",
   pillar: "Pillar",
   beam: "Beam",
   slab: "Slab",
   door: "Door",
-  window: "Window"
+  window: "Window",
+  element: "Element"
 };
 
 /**
  * Resolves a member object id to a readable label, using
- * resolveConstructionObject() to check every implemented object-type
- * store (today: wall, pillar, beam, slab, door, window) rather than
- * assuming everything is a wall. Never removes anything; an id that
- * matches no known store just reads as "Unknown object."
+ * resolveConstructionObject() to check every object store (the six
+ * original types and elements) rather than assuming everything is a
+ * wall. Never removes anything; an id that matches no known store just
+ * reads as "Unknown object."
  */
 function resolveMemberLabel(
   objectId: ObjectId,
@@ -44,7 +44,8 @@ function resolveMemberLabel(
   beamStore: BeamStore,
   slabStore: SlabStore,
   doorStore: DoorStore,
-  windowStore: WindowStore
+  windowStore: WindowStore,
+  elementStore: ElementStore
 ): { label: string; selectableId: ObjectId | null } {
   const resolved = resolveConstructionObject(objectId, {
     wallStore,
@@ -52,10 +53,11 @@ function resolveMemberLabel(
     beamStore,
     slabStore,
     doorStore,
-    windowStore
+    windowStore,
+    elementStore
   });
   if (resolved) {
-    const typeLabel = TYPE_LABELS[resolved.type] ?? resolved.type;
+    const typeLabel = resolved.type === "element" ? elementStore.get(objectId)?.label ?? "Element" : TYPE_LABELS[resolved.type] ?? resolved.type;
     return { label: `${typeLabel} — ${shortId(objectId)}`, selectableId: objectId };
   }
   return { label: `Unknown object — ${shortId(objectId)}`, selectableId: null };
@@ -102,7 +104,8 @@ export function createAssemblyPanel(
   beamStore: BeamStore,
   slabStore: SlabStore,
   doorStore: DoorStore,
-  windowStore: WindowStore
+  windowStore: WindowStore,
+  elementStore: ElementStore
 ): HTMLElement {
   const assemblySelection = new SelectionStore();
 
@@ -188,7 +191,8 @@ export function createAssemblyPanel(
   function liveMemberIds(assembly: AssemblyData): ObjectId[] {
     return assembly.objectIds.filter(
       (objectId) =>
-        resolveMemberLabel(objectId, wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore).selectableId !== null
+        resolveMemberLabel(objectId, wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore)
+          .selectableId !== null
     );
   }
 
@@ -261,6 +265,7 @@ export function createAssemblyPanel(
   slabStore.subscribe(renderList);
   doorStore.subscribe(renderList);
   windowStore.subscribe(renderList);
+  elementStore.subscribe(renderList);
 
   // --- Selected assembly detail: name, count, member list ---
 
@@ -329,7 +334,8 @@ export function createAssemblyPanel(
                 beamStore,
                 slabStore,
                 doorStore,
-                windowStore
+                windowStore,
+                elementStore
               );
               const item = el("li", { className: "assembly-members__item" });
 
@@ -360,6 +366,7 @@ export function createAssemblyPanel(
   slabStore.subscribe(renderSelectedAssemblyDetail);
   doorStore.subscribe(renderSelectedAssemblyDetail);
   windowStore.subscribe(renderSelectedAssemblyDetail);
+  elementStore.subscribe(renderSelectedAssemblyDetail);
 
   return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Assemblies" }),

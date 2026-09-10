@@ -16,8 +16,12 @@ export interface WindowDimensions {
  * and src/engine/door/types.ts for the sibling object type this was
  * built to mirror exactly.
  *
- * A window exists today as an independent, editable construction
- * object - not yet hosted by a wall or cut as an opening into one (see
- * README.md's "Not yet implemented" section).
+ * A window is an independent, editable construction object. It can be
+ * hosted by a wall: `hostId` is then that wall's id, and the window sits
+ * flush on the wall's face at sill height (see
+ * engine/openings/hostOpening.ts). It isn't cut into the wall yet.
  */
-export type WindowData = ConstructionObjectBase<"window", WindowDimensions>;
+export type WindowData = ConstructionObjectBase<"window", WindowDimensions> & {
+  /** The wall this window belongs to, or null for a free-standing window. */
+  hostId: string | null;
+};

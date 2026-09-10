@@ -1,6 +1,7 @@
 import { el } from "./dom";
 import { createAssemblyPanel } from "./assemblyPanel";
 import { createTabStrip, comingSoon } from "./tabStrip";
+import { ELEMENT_KINDS } from "../engine/elements/catalog";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
@@ -10,12 +11,22 @@ import type { BeamStore } from "../engine/beam/BeamStore";
 import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
+import type { ElementStore } from "../engine/elements/ElementStore";
 
 const HIERARCHY_SECTIONS = ["Building", "Floors", "Rooms", "Objects"];
 
+interface HierarchyObject {
+  id: string;
+  kind?: string;
+  label?: string;
+}
+
 interface ObjectSource {
-  label: string;
-  store: { getAll(): readonly { id: string }[]; subscribe(listener: () => void): unknown };
+  store: { getAll(): readonly HierarchyObject[]; subscribe(listener: () => void): unknown };
+  /** The name listed before the id. */
+  labelOf(object: HierarchyObject): string;
+  /** Orders the source's objects. */
+  orderOf(object: HierarchyObject): number;
 }
 
 /** "wall-12" -> 12, so "wall-2" lists before "wall-10". */
@@ -24,13 +35,24 @@ function idNumber(id: string): number {
   return match ? Number(match[1]) : 0;
 }
 
+/** Elements list in catalog order (structure first ... exterior last), then by id number. */
+function elementOrder(object: HierarchyObject): number {
+  const index = ELEMENT_KINDS.findIndex((definition) => definition.kind === object.kind);
+  return (index < 0 ? ELEMENT_KINDS.length : index) * 1_000_000 + idNumber(object.id);
+}
+
+function originalSource(label: string, store: ObjectSource["store"]): ObjectSource {
+  return { store, labelOf: () => label, orderOf: (object) => idNumber(object.id) };
+}
+
 /**
- * The hierarchy scaffold plus a live list of every construction object,
- * grouped by type (wall, pillar, beam, slab, door, window) in id order.
- * Clicking one selects it through the shared selectionStore - the same
- * selection a click in the viewport makes - which is the dependable way
- * to reach an object hidden behind or inside another. Read-only: it
- * never writes to any store.
+ * The hierarchy scaffold plus a live list of every construction object:
+ * the six original types, then every element (by catalog order, named by
+ * its own label - "Living Room", "Water Pipe") in id order. Clicking one
+ * selects it through the shared selectionStore - the same selection a
+ * click in the viewport makes - which is the dependable way to reach an
+ * object hidden behind or inside another. Read-only: it never writes to
+ * any store.
  */
 function buildProjectHierarchy(selectionStore: SelectionStore, sources: readonly ObjectSource[]): HTMLElement {
   const objectList = el("div", { className: "hierarchy-objects" });
@@ -38,17 +60,18 @@ function buildProjectHierarchy(selectionStore: SelectionStore, sources: readonly
 
   const render = (): void => {
     const selectedId = selectionStore.get();
-    const items = sources.flatMap(({ label, store }) =>
-      store
+    const items = sources.flatMap((source) =>
+      source.store
         .getAll()
-        .map((object) => ({ id: object.id, label }))
-        .sort((a, b) => idNumber(a.id) - idNumber(b.id))
+        .map((object) => ({ id: object.id, label: source.labelOf(object), order: source.orderOf(object) }))
+        .sort((a, b) => a.order - b.order)
     );
 
-    // Only rebuild when the list or the selection changed - not on every
-    // edit to some object's size or position. Rebuilding mid-click (a
-    // pending field edit commits when the press starts) would swallow it.
-    const key = JSON.stringify([selectedId, items.map((item) => item.id)]);
+    // Only rebuild when the list, a name, or the selection changed - not
+    // on every edit to some object's size or position. Rebuilding
+    // mid-click (a pending field edit commits when the press starts)
+    // would swallow it.
+    const key = JSON.stringify([selectedId, items.map((item) => [item.id, item.label])]);
     if (key === renderedKey) {
       return;
     }
@@ -64,7 +87,7 @@ function buildProjectHierarchy(selectionStore: SelectionStore, sources: readonly
         const button = el("button", {
           className: `hierarchy-objects__item${item.id === selectedId ? " hierarchy-objects__item--selected" : ""}`,
           text: `${item.label} — ${item.id}`,
-          attrs: { type: "button" }
+          attrs: { type: "button", "data-object-id": item.id }
         });
         button.addEventListener("click", () => selectionStore.select(item.id));
         return button;
@@ -93,16 +116,15 @@ function buildProjectHierarchy(selectionStore: SelectionStore, sources: readonly
  * Views/Measurements/Documents) that switches a single panel below it.
  * "Project" shows the project hierarchy scaffold with a live, clickable
  * list of every object (see buildProjectHierarchy); "Assemblies" shows
- * the existing, unmodified assembly panel (assemblyPanel.ts); the rest
- * are "Coming soon" placeholders - this milestone doesn't add real
- * asset/layer/view/measurement/document management, only somewhere for
- * it to eventually live.
+ * the assembly panel (assemblyPanel.ts); the rest are "Coming soon"
+ * placeholders - this milestone doesn't add real asset/layer/view/
+ * measurement/document management, only somewhere for it to eventually
+ * live.
  *
- * `selectionStore`, `wallStore`, `pillarStore`, `beamStore`,
- * `slabStore`, `doorStore`, and `windowStore` are threaded straight
- * through to the assembly panel, which resolves a member id against
- * all six stores (see resolveConstructionObject.ts) rather than
- * assuming every member is a wall.
+ * The object stores are threaded straight through to the assembly
+ * panel, which resolves a member id against all of them (see
+ * resolveConstructionObject.ts) rather than assuming every member is a
+ * wall.
  */
 export function createLeftSidebar(
   assemblyStore: AssemblyStore,
@@ -113,15 +135,17 @@ export function createLeftSidebar(
   beamStore: BeamStore,
   slabStore: SlabStore,
   doorStore: DoorStore,
-  windowStore: WindowStore
+  windowStore: WindowStore,
+  elementStore: ElementStore
 ): HTMLElement {
   const objectSources: ObjectSource[] = [
-    { label: "Wall", store: wallStore },
-    { label: "Pillar", store: pillarStore },
-    { label: "Beam", store: beamStore },
-    { label: "Slab", store: slabStore },
-    { label: "Door", store: doorStore },
-    { label: "Window", store: windowStore }
+    originalSource("Wall", wallStore),
+    originalSource("Pillar", pillarStore),
+    originalSource("Beam", beamStore),
+    originalSource("Slab", slabStore),
+    originalSource("Door", doorStore),
+    originalSource("Window", windowStore),
+    { store: elementStore, labelOf: (object) => object.label ?? object.kind ?? "Element", orderOf: elementOrder }
   ];
 
   const { strip, panel } = createTabStrip(
@@ -140,7 +164,8 @@ export function createLeftSidebar(
             beamStore,
             slabStore,
             doorStore,
-            windowStore
+            windowStore,
+            elementStore
           )
       },
       { id: "assets", label: "Assets", build: () => comingSoon("Asset management"), disabled: true },

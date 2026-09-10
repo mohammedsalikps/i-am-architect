@@ -9,6 +9,8 @@ export interface CreateDoorOptions {
   thickness?: number;
   material?: string;
   color?: string;
+  /** The wall hosting this door, if any - see engine/openings/hostOpening.ts. */
+  hostId?: string | null;
 }
 
 const DEFAULTS = {
@@ -55,7 +57,8 @@ export function createDoorData(options: CreateDoorOptions = {}): DoorData {
     },
     material: options.material ?? DEFAULTS.material,
     color: options.color ?? DEFAULTS.color,
-    assemblyId: null
+    assemblyId: null,
+    hostId: options.hostId ?? null
   };
 
   return door;
@@ -67,7 +70,8 @@ const DUPLICATE_OFFSET = 0.75;
 /**
  * Creates an independent copy of a door: same dimensions, material,
  * color and rotation, a fresh unique id (via createDoorData's own
- * counter), and a small position offset so the two don't overlap.
+ * counter), and a small position offset so the two don't overlap. The
+ * offset takes it off its wall's face, so the copy isn't hosted.
  */
 export function duplicateDoorData(door: DoorData): DoorData {
   return createDoorData({

@@ -82,6 +82,12 @@ needs no such rule).
 
 ## Adding a new object type later
 
+Most new construction objects don't need a new type at all: an element
+kind is one entry in `elements/catalog.ts`, and the element system's
+single store, commands, history, scene layer, Properties panel,
+persistence, and AI support cover it (see `elements/README.md`). The
+steps below are for a genuinely new *type* with its own store.
+
 1. Add the type name to the `ObjectType` union in `types.ts`, if it
    isn't already listed (most are pre-listed as reserved extension
    points, so this step is usually already done).
@@ -126,13 +132,13 @@ changes.
 | Field-level validation (e.g. a wall's dimensions must be positive finite numbers) | `validate<Type>.ts` (e.g. `validateWall.ts`), called by `<Type>Store` before every write | No |
 | Undo/redo | `HistoryManager` (generic) + `<type>History.ts` (e.g. `wallHistory.ts`, `pillarHistory.ts`) - all types share one `HistoryManager` instance, so undo/redo interleaves across types | No |
 | Selection | `SelectionStore` (generic, shared across all object types - one selected object at a time, regardless of type) | No |
-| Mesh creation/sync/disposal | `<Type>Layer` (e.g. `WallLayer`, `PillarLayer`) + its mesh-builder module | Yes |
+| Mesh creation/sync/disposal | `<Type>Layer` (e.g. `WallLayer`, `PillarLayer`) + its mesh-builder module; for every element kind, `ElementLayer` + `buildElementMesh.ts` (one recipe per catalog `shape`) | Yes |
 | Click-to-select raycasting | `SelectionRaycaster` (generic, shared across all layers) - each `<Type>Layer` only exposes `getMeshes()`; it does not listen for clicks itself. See `SelectionRaycaster.ts`'s docs for why this moved out of `WallLayer` once a second selectable type existed | Yes |
 | Selection-outline mesh | `selectionOutline.ts` (generic, shared across all layers) | Yes |
 | Scene/camera/renderer/controls lifecycle | `SceneManager` | Yes |
 | Mouse move/resize/rotate - gesture math and turning a gesture into `update_object` commands, one history group per gesture | `src/engine/manipulation/` (`manipulationMath.ts`, `ObjectManipulator.ts`) | No |
 | Manipulation handles (drawn from store state) and pointer handling | `src/scene/manipulation/` (`ManipulationHandles`, `ManipulationController`) - never writes a store or moves a construction mesh | Yes |
-| Reading/editing object data as UI | `rightSidebar.ts`, `constructionRibbon.ts` | No (goes through the store/history layer) |
+| Reading/editing object data as UI | `rightSidebar.ts` (one catalog-driven panel for every element kind), `constructionRibbon.ts` + `ribbonTabs.ts` (the category tabs and their tools) | No (goes through the store/history layer) |
 
 `src/engine/` never imports from `src/scene/` or `src/ui/` - data flows
 one way: engine stores are the source of truth, `src/scene/*Layer`
