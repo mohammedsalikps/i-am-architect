@@ -13,7 +13,70 @@ import type { WindowStore } from "../engine/window/WindowStore";
 
 const HIERARCHY_SECTIONS = ["Building", "Floors", "Rooms", "Objects"];
 
-function buildProjectHierarchy(): HTMLElement {
+interface ObjectSource {
+  label: string;
+  store: { getAll(): readonly { id: string }[]; subscribe(listener: () => void): unknown };
+}
+
+/** "wall-12" -> 12, so "wall-2" lists before "wall-10". */
+function idNumber(id: string): number {
+  const match = /(\d+)$/.exec(id);
+  return match ? Number(match[1]) : 0;
+}
+
+/**
+ * The hierarchy scaffold plus a live list of every construction object,
+ * grouped by type (wall, pillar, beam, slab, door, window) in id order.
+ * Clicking one selects it through the shared selectionStore - the same
+ * selection a click in the viewport makes - which is the dependable way
+ * to reach an object hidden behind or inside another. Read-only: it
+ * never writes to any store.
+ */
+function buildProjectHierarchy(selectionStore: SelectionStore, sources: readonly ObjectSource[]): HTMLElement {
+  const objectList = el("div", { className: "hierarchy-objects" });
+  let renderedKey: string | null = null;
+
+  const render = (): void => {
+    const selectedId = selectionStore.get();
+    const items = sources.flatMap(({ label, store }) =>
+      store
+        .getAll()
+        .map((object) => ({ id: object.id, label }))
+        .sort((a, b) => idNumber(a.id) - idNumber(b.id))
+    );
+
+    // Only rebuild when the list or the selection changed - not on every
+    // edit to some object's size or position. Rebuilding mid-click (a
+    // pending field edit commits when the press starts) would swallow it.
+    const key = JSON.stringify([selectedId, items.map((item) => item.id)]);
+    if (key === renderedKey) {
+      return;
+    }
+    renderedKey = key;
+
+    if (items.length === 0) {
+      objectList.replaceChildren(el("p", { className: "sidebar__placeholder", text: "No objects in the scene yet." }));
+      return;
+    }
+
+    objectList.replaceChildren(
+      ...items.map((item) => {
+        const button = el("button", {
+          className: `hierarchy-objects__item${item.id === selectedId ? " hierarchy-objects__item--selected" : ""}`,
+          text: `${item.label} — ${item.id}`,
+          attrs: { type: "button" }
+        });
+        button.addEventListener("click", () => selectionStore.select(item.id));
+        return button;
+      })
+    );
+  };
+
+  for (const { store } of sources) {
+    store.subscribe(render);
+  }
+  selectionStore.subscribe(render);
+
   return el("div", { className: "sidebar__section" }, [
     el("h3", { className: "sidebar__section-title", text: "Hierarchy" }),
     el(
@@ -21,14 +84,15 @@ function buildProjectHierarchy(): HTMLElement {
       { className: "hierarchy-list" },
       HIERARCHY_SECTIONS.map((label) => el("li", { className: "hierarchy-list__item", text: label }))
     ),
-    el("p", { className: "sidebar__placeholder", text: "No objects in the scene yet." })
+    objectList
   ]);
 }
 
 /**
  * Left workspace: a narrow icon rail (Project/Assets/Assemblies/Layers/
  * Views/Measurements/Documents) that switches a single panel below it.
- * "Project" shows the project hierarchy scaffold; "Assemblies" shows
+ * "Project" shows the project hierarchy scaffold with a live, clickable
+ * list of every object (see buildProjectHierarchy); "Assemblies" shows
  * the existing, unmodified assembly panel (assemblyPanel.ts); the rest
  * are "Coming soon" placeholders - this milestone doesn't add real
  * asset/layer/view/measurement/document management, only somewhere for
@@ -51,9 +115,18 @@ export function createLeftSidebar(
   doorStore: DoorStore,
   windowStore: WindowStore
 ): HTMLElement {
+  const objectSources: ObjectSource[] = [
+    { label: "Wall", store: wallStore },
+    { label: "Pillar", store: pillarStore },
+    { label: "Beam", store: beamStore },
+    { label: "Slab", store: slabStore },
+    { label: "Door", store: doorStore },
+    { label: "Window", store: windowStore }
+  ];
+
   const { strip, panel } = createTabStrip(
     [
-      { id: "project", label: "Project", build: buildProjectHierarchy },
+      { id: "project", label: "Project", build: () => buildProjectHierarchy(selectionStore, objectSources) },
       {
         id: "assemblies",
         label: "Assemblies",

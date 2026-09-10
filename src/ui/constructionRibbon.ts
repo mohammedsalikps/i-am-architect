@@ -59,7 +59,14 @@ export function createConstructionRibbon(
         "button",
         {
           className: "app-ribbon__item",
-          attrs: { type: "button", ...(isEnabled ? {} : { title: "Coming soon" }) }
+          attrs: {
+            type: "button",
+            // The visible label is short ("Wall"); the tooltip and accessible
+            // name say what the button does.
+            ...(isEnabled
+              ? { title: `Add a ${label.toLowerCase()}`, "aria-label": `Add a ${label.toLowerCase()}` }
+              : { title: "Coming soon" })
+          }
         },
         [
           el("span", { className: "app-ribbon__icon", text: label.charAt(0) }),

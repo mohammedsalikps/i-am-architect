@@ -1,7 +1,8 @@
 import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
-import { createProjectContext } from "./engine/project/ProjectContext";
+import { clearProject, createProjectContext } from "./engine/project/ProjectContext";
+import { firstFreeSlot } from "./engine/project/placement";
 import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
 import type {
@@ -25,6 +26,7 @@ if (!appRoot) {
 // are the same instances commandExecutor uses internally (not
 // invisible defaults of their own) - the UI reads/writes them through
 // commandExecutor, same as wallStore.
+const project = createProjectContext();
 const {
   wallStore,
   pillarStore,
@@ -36,7 +38,7 @@ const {
   selectionStore,
   history,
   commandExecutor
-} = createProjectContext();
+} = project;
 
 // The AI proxy backend's base URL (see backend/README.md) - a
 // non-secret value (just where to send requests, never a credential),
@@ -77,13 +79,18 @@ function submitAiInstruction(instruction: string): Promise<AIPipelineResult> {
   return aiService.submit(instruction);
 }
 
+// Each type has a row of default slots; a new object takes the first slot
+// no existing object of that type sits on (see engine/project/placement.ts),
+// so adding after a delete never lands on top of a survivor.
+const positionsOf = (objects: readonly { position: { x: number; z: number } }[]) => objects.map((object) => object.position);
+
 // Successive walls are spaced along Z so "Add Wall" produces a visibly
 // separate wall each time instead of stacking exactly on top of another.
 const WALL_Z_START = -4;
 const WALL_Z_SPACING = 2.5;
 
 function addWall(): void {
-  const index = wallStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(wallStore.getAll()), (slot) => ({ x: 0, z: WALL_Z_START + slot * WALL_Z_SPACING }));
   const command: AddWallCommand = {
     type: "wall.add",
     wall: { position: { z: WALL_Z_START + index * WALL_Z_SPACING } }
@@ -98,7 +105,7 @@ const PILLAR_X_START = 4;
 const PILLAR_X_SPACING = 1.5;
 
 function addPillar(): void {
-  const index = pillarStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(pillarStore.getAll()), (slot) => ({ x: PILLAR_X_START + slot * PILLAR_X_SPACING, z: 0 }));
   const command: AddPillarCommand = {
     type: "pillar.add",
     pillar: { position: { x: PILLAR_X_START + index * PILLAR_X_SPACING } }
@@ -113,7 +120,7 @@ const BEAM_Z_START = 4;
 const BEAM_Z_SPACING = 1.5;
 
 function addBeam(): void {
-  const index = beamStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(beamStore.getAll()), (slot) => ({ x: 0, z: BEAM_Z_START + slot * BEAM_Z_SPACING }));
   const command: AddBeamCommand = {
     type: "beam.add",
     beam: { position: { z: BEAM_Z_START + index * BEAM_Z_SPACING } }
@@ -129,7 +136,7 @@ const SLAB_X_START = -4;
 const SLAB_X_SPACING = 5;
 
 function addSlab(): void {
-  const index = slabStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(slabStore.getAll()), (slot) => ({ x: SLAB_X_START - slot * SLAB_X_SPACING, z: 0 }));
   const command: AddSlabCommand = {
     type: "slab.add",
     slab: { position: { x: SLAB_X_START - index * SLAB_X_SPACING } }
@@ -144,7 +151,7 @@ const DOOR_Z_START = -8;
 const DOOR_Z_SPACING = 1.5;
 
 function addDoor(): void {
-  const index = doorStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(doorStore.getAll()), (slot) => ({ x: 0, z: DOOR_Z_START - slot * DOOR_Z_SPACING }));
   const command: AddDoorCommand = {
     type: "door.add",
     door: { position: { z: DOOR_Z_START - index * DOOR_Z_SPACING } }
@@ -159,7 +166,7 @@ const WINDOW_X_START = 8;
 const WINDOW_X_SPACING = 1.5;
 
 function addWindow(): void {
-  const index = windowStore.getAll().length;
+  const index = firstFreeSlot(positionsOf(windowStore.getAll()), (slot) => ({ x: WINDOW_X_START + slot * WINDOW_X_SPACING, z: 0 }));
   const command: AddWindowCommand = {
     type: "window.add",
     window: { position: { x: WINDOW_X_START + index * WINDOW_X_SPACING } }
@@ -169,6 +176,22 @@ function addWindow(): void {
 
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
+
+/**
+ * "New Project": empties the in-memory model - objects, assemblies,
+ * selection, and undo history - through clearProject() (see
+ * ProjectContext.ts). Nothing is saved anywhere, so when there is
+ * anything to lose the user confirms first.
+ */
+function newProject(): void {
+  const hasContent =
+    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore].some((store) => store.getAll().length > 0) ||
+    assemblyStore.getAll().length > 0;
+  if (hasContent && !window.confirm("Start a new project? The current model, its assemblies, and its undo history will be discarded.")) {
+    return;
+  }
+  clearProject(project);
+}
 
 /**
  * Duplicate/Delete now act on "whichever construction object is
@@ -256,6 +279,7 @@ const shell = createAppShell({
   onAddWindow: addWindow,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
+  onNewProject: newProject,
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   onSubmitAiInstruction: submitAiInstruction,

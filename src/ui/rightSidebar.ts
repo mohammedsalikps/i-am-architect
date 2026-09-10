@@ -38,6 +38,20 @@ function readOnlyRow(label: string, value: string): HTMLElement {
 }
 
 /**
+ * Makes Enter commit a field. A number input doesn't fire "change" on
+ * Enter by itself - only on blur - which left an edit pending until the
+ * next click, and that click's commit re-rendered the UI under it and
+ * swallowed it. Blurring on Enter fires the ordinary "change".
+ */
+function commitOnEnter(input: HTMLInputElement): void {
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      input.blur();
+    }
+  });
+}
+
+/**
  * A numeric field that commits on blur/Enter and reverts on invalid
  * input. `min` is optional: dimensions pass a positive floor, while
  * position/rotation fields omit it (negative values are valid there) -
@@ -68,6 +82,7 @@ function numberInputRow(
       input.value = String(value); // revert invalid input
     }
   });
+  commitOnEnter(input);
 
   return el("div", { className: "property-row" }, [
     el("span", { className: "property-row__label", text: label }),
@@ -91,6 +106,28 @@ function colorInputRow(label: string, value: string, onChange: (value: string) =
   ]);
 }
 
+/** A free-text field (e.g. material) that commits on blur/Enter. Blank input is reverted rather than stored. */
+function textInputRow(label: string, value: string, onChange: (value: string) => void): HTMLElement {
+  const input = el("input", {
+    className: "property-row__input property-row__input--text",
+    attrs: { type: "text", value, "aria-label": label }
+  });
+  input.addEventListener("change", () => {
+    const next = input.value.trim();
+    if (next.length > 0 && next !== value) {
+      onChange(next);
+    } else {
+      input.value = value; // revert blank (or unchanged) input
+    }
+  });
+  commitOnEnter(input);
+
+  return el("div", { className: "property-row" }, [
+    el("span", { className: "property-row__label", text: label }),
+    input
+  ]);
+}
+
 function formatMeters(value: number): string {
   return `${value.toFixed(2)} m`;
 }
@@ -103,8 +140,23 @@ function degreesToRadians(degrees: number): number {
   return (degrees * Math.PI) / 180;
 }
 
-/** Shared by both buildWallPanels and buildPillarPanels - identical Duplicate/Delete action row for whichever type is selected. */
+let cachedActionsRow: { onDuplicateSelected: () => void; onDeleteSelected: () => void; row: HTMLElement } | null = null;
+
+/**
+ * The Duplicate/Delete action row every type's panel starts with. Built
+ * once and reused by every re-render: pressing Delete while a field edit
+ * is still pending commits that edit (blur), which re-renders the panel
+ * mid-click - a freshly built button would then swallow the click.
+ */
 function buildActionsRow(onDuplicateSelected: () => void, onDeleteSelected: () => void): HTMLElement {
+  if (
+    cachedActionsRow &&
+    cachedActionsRow.onDuplicateSelected === onDuplicateSelected &&
+    cachedActionsRow.onDeleteSelected === onDeleteSelected
+  ) {
+    return cachedActionsRow.row;
+  }
+
   const duplicateButton = el("button", {
     className: "toolbar-button",
     text: "Duplicate",
@@ -119,7 +171,9 @@ function buildActionsRow(onDuplicateSelected: () => void, onDeleteSelected: () =
   });
   deleteButton.addEventListener("click", onDeleteSelected);
 
-  return el("div", { className: "property-panel__actions" }, [duplicateButton, deleteButton]);
+  const row = el("div", { className: "property-panel__actions" }, [duplicateButton, deleteButton]);
+  cachedActionsRow = { onDuplicateSelected, onDeleteSelected, row };
+  return row;
 }
 
 function buildWallPanels(
@@ -180,7 +234,7 @@ function buildWallPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", wall.material)]);
+  const material = section("Material", [textInputRow("Material", wall.material, (value) => updateWall({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", wall.color, (value) => updateWall({ color: value }))]);
 
@@ -260,7 +314,7 @@ function buildPillarPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", pillar.material)]);
+  const material = section("Material", [textInputRow("Material", pillar.material, (value) => updatePillar({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", pillar.color, (value) => updatePillar({ color: value }))]);
 
@@ -335,7 +389,7 @@ function buildBeamPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", beam.material)]);
+  const material = section("Material", [textInputRow("Material", beam.material, (value) => updateBeam({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", beam.color, (value) => updateBeam({ color: value }))]);
 
@@ -410,7 +464,7 @@ function buildSlabPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", slab.material)]);
+  const material = section("Material", [textInputRow("Material", slab.material, (value) => updateSlab({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", slab.color, (value) => updateSlab({ color: value }))]);
 
@@ -487,7 +541,7 @@ function buildDoorPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", door.material)]);
+  const material = section("Material", [textInputRow("Material", door.material, (value) => updateDoor({ material: value }))]);
 
   const color = section("Color", [colorInputRow("Color", door.color, (value) => updateDoor({ color: value }))]);
 
@@ -562,7 +616,9 @@ function buildWindowPanels(
     )
   ]);
 
-  const material = section("Material", [readOnlyRow("Material", windowData.material)]);
+  const material = section("Material", [
+    textInputRow("Material", windowData.material, (value) => updateWindow({ material: value }))
+  ]);
 
   const color = section("Color", [
     colorInputRow("Color", windowData.color, (value) => updateWindow({ color: value }))

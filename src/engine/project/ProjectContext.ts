@@ -73,6 +73,30 @@ export interface ProjectContext {
   commandExecutor: CommandExecutor;
 }
 
+/**
+ * Empties a project for "New Project": every construction object and
+ * every assembly is removed through the same commands the UI uses (so
+ * each store's own rules apply), then the selection and the undo history
+ * are cleared - a new project starts with nothing to undo, exactly like a
+ * fresh page load. Ids keep counting up, so nothing ever reuses an id.
+ */
+export function clearProject(context: ProjectContext): void {
+  const deletions = [
+    ...context.wallStore.getAll().map((object) => ({ type: "wall.delete", id: object.id })),
+    ...context.pillarStore.getAll().map((object) => ({ type: "pillar.delete", id: object.id })),
+    ...context.beamStore.getAll().map((object) => ({ type: "beam.delete", id: object.id })),
+    ...context.slabStore.getAll().map((object) => ({ type: "slab.delete", id: object.id })),
+    ...context.doorStore.getAll().map((object) => ({ type: "door.delete", id: object.id })),
+    ...context.windowStore.getAll().map((object) => ({ type: "window.delete", id: object.id })),
+    ...context.assemblyStore.getAll().map((assembly) => ({ type: "assembly.delete", id: assembly.id }))
+  ];
+  for (const command of deletions) {
+    context.commandExecutor.execute(command);
+  }
+  context.selectionStore.clear();
+  context.history.clearHistory();
+}
+
 /** Builds one fresh, fully-wired ProjectContext. Each call produces independent instances - nothing here is a module-level singleton. */
 export function createProjectContext(): ProjectContext {
   const wallStore = new WallStore();

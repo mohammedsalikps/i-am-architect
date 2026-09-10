@@ -35,7 +35,10 @@
 // of an @types/node dependency.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { createProjectContext } from "../../project/ProjectContext.ts";
+import { clearProject, createProjectContext } from "../../project/ProjectContext.ts";
+import { firstFreeSlot } from "../../project/placement.ts";
+import { resolveConstructionObject } from "../../objects/resolveConstructionObject.ts";
+import { parseAIProjectSnapshot } from "../parseProjectSnapshot.ts";
 import type { ProjectContext } from "../../project/ProjectContext.ts";
 import { AIService } from "../AIService.ts";
 import { AiPromptController } from "../AiPromptController.ts";
@@ -1208,6 +1211,265 @@ async function run(): Promise<void> {
       assertSameJson(readObject(id), before, `${type}: two undos (one per gesture) restore it exactly`);
       assertEqual(context.history.canUndo(), false, `${type}: exactly two entries`);
     }
+  });
+
+  // --- Manual home-building workflow (the house MVP) ---
+  // Everything below goes through the same entry points the UI uses: the
+  // ribbon's <type>.add commands, the Properties panel's per-type updates,
+  // the Delete/Duplicate buttons' commands, ObjectManipulator for mouse
+  // gestures, the assembly panel's assembly.* commands, and the shared
+  // HistoryManager for Undo/Redo.
+
+  /** 10 m x 8 m footprint centered on the origin: long walls on Z = +/-4, short walls (turned 90 degrees) on X = +/-5. */
+  function buildHouse(context: ProjectContext) {
+    const add = (command: Record<string, unknown>) => addThroughExecutor(context, command);
+    const walls = [
+      add({ type: "wall.add", wall: { length: 10, height: 3, thickness: 0.2, position: { x: 0, z: -4 } } }),
+      add({ type: "wall.add", wall: { length: 10, height: 3, thickness: 0.2, position: { x: 0, z: 4 } } }),
+      add({ type: "wall.add", wall: { length: 8, height: 3, thickness: 0.2, rotation: Math.PI / 2, position: { x: -5, z: 0 } } }),
+      add({ type: "wall.add", wall: { length: 8, height: 3, thickness: 0.2, rotation: Math.PI / 2, position: { x: 5, z: 0 } } })
+    ];
+    const slab = add({ type: "slab.add", slab: { length: 10, width: 8, thickness: 0.2, position: { x: 0, z: 0 } } });
+    const pillars = [
+      [-5, -4],
+      [5, -4],
+      [-5, 4],
+      [5, 4]
+    ].map(([x, z]) => add({ type: "pillar.add", pillar: { width: 0.4, depth: 0.4, height: 3, position: { x, z } } }));
+    const door = add({ type: "door.add", door: { position: { x: 0, z: -4 } } });
+    const windows = [
+      add({ type: "window.add", window: { position: { x: -2.5, y: 1.5, z: 4 } } }),
+      add({ type: "window.add", window: { rotation: Math.PI / 2, position: { x: 5, y: 1.5, z: 0 } } })
+    ];
+    return { walls, slab, pillars, door, windows, all: [...walls, slab, ...pillars, door, ...windows] };
+  }
+
+  const objectsJson = (context: ProjectContext) => JSON.stringify(buildAIProjectSnapshot(context).objects);
+
+  await check("house MVP: 4 walls, a slab, 4 pillars, a door and 2 windows form one coherent, valid model", async () => {
+    const context = createProjectContext();
+    const house = buildHouse(context);
+    const stores = context;
+
+    assertEqual(context.wallStore.getAll().length, 4, "walls");
+    assertEqual(context.slabStore.getAll().length, 1, "slab");
+    assertEqual(context.pillarStore.getAll().length, 4, "pillars");
+    assertEqual(context.doorStore.getAll().length, 1, "door");
+    assertEqual(context.windowStore.getAll().length, 2, "windows");
+    assertEqual(context.beamStore.getAll().length, 0, "no beams");
+    assertEqual(new Set(house.all).size, 12, "12 distinct ids");
+
+    const expectedTypes = ["wall", "wall", "wall", "wall", "slab", "pillar", "pillar", "pillar", "pillar", "door", "window", "window"];
+    house.all.forEach((id, index) => {
+      assertTrue(new RegExp(`^${expectedTypes[index]}-\\d+$`).test(id), `stable, typed id: ${id}`);
+      assertEqual(resolveConstructionObject(id, stores)?.type, expectedTypes[index], `${id} lives in the ${expectedTypes[index]} store`);
+      context.selectionStore.select(id);
+      assertEqual(context.selectionStore.get(), id, `${id} is selectable`);
+    });
+
+    const snapshot = buildAIProjectSnapshot(context);
+    const parsed = parseAIProjectSnapshot(JSON.parse(JSON.stringify(snapshot)));
+    assertTrue(parsed.ok, "the model snapshot passes the shared validator");
+    assertEqual(snapshot.objects.length, 12, "12 objects in the snapshot");
+    for (const object of snapshot.objects) {
+      assertTrue(Object.values(object.dimensions).every((value) => Number.isFinite(value) && value > 0), `${object.id} has valid dimensions`);
+    }
+
+    const geometry = analyzeConstructionGeometry(snapshot);
+    assertEqual(geometry.invalidObjects.length, 0, "no invalid objects");
+    assertEqual(geometry.objects.length, 12, "every object has a box");
+    assertEqual(geometry.relationships.length, 66, "12 * 11 / 2 pairs");
+    assertSameJson(
+      geometry.objects.find((object) => object.id === house.slab)?.aabb,
+      { min: { x: -5, y: 0, z: -4 }, max: { x: 5, y: 0.2, z: 4 } },
+      "the slab covers the 10 x 8 footprint"
+    );
+    assertSameJson(
+      geometry.objects.find((object) => object.id === house.walls[2])?.size,
+      { x: 0.2, y: 3, z: 8 },
+      "the turned short wall runs 8 m along Z"
+    );
+  });
+
+  await check("house MVP: move/resize/rotate walls, move the door, resize a window - all survive, and undo/redo walks them exactly", async () => {
+    const context = createProjectContext();
+    const house = buildHouse(context);
+    const manipulator = manipulatorFor(context);
+    context.history.clearHistory();
+    const built = objectsJson(context);
+
+    manipulator.begin(house.walls[1], { kind: "move" }, { x: 0, y: 1.5, z: 4 });
+    dragThrough(manipulator, [{ x: 0, y: 1.5, z: 4.3 }, { x: 0, y: 1.5, z: 4.5 }]);
+    manipulator.begin(house.walls[0], { kind: "resize", axis: "x", side: 1 }, { x: 5.35, y: 0.15, z: -4 });
+    dragThrough(manipulator, [{ x: 6.35, y: 0.15, z: -4 }]);
+    manipulator.begin(house.walls[2], { kind: "rotate" }, { x: -2, y: 0, z: 0 });
+    dragThrough(manipulator, [{ x: -5, y: 0, z: -3 }]);
+    manipulator.begin(house.door, { kind: "move" }, { x: 0, y: 1.05, z: -4 });
+    dragThrough(manipulator, [{ x: 1, y: 1.05, z: -4 }]);
+    manipulator.begin(house.windows[0], { kind: "resize", axis: "x", side: 1 }, { x: -1.55, y: 1.05, z: 4 });
+    dragThrough(manipulator, [{ x: -1.15, y: 1.05, z: 4 }]);
+
+    assertEqual(context.wallStore.get(house.walls[1])?.position.z, 4.5, "back wall moved to z = 4.5");
+    assertEqual(context.wallStore.get(house.walls[0])?.dimensions.length, 11, "front wall resized to 11 m");
+    assertEqual(context.wallStore.get(house.walls[0])?.position.x, 0.5, "with its -X end fixed");
+    assertTrue(Math.abs((context.wallStore.get(house.walls[2])?.rotation ?? 0) - Math.PI) < 1e-6, "side wall turned another 90 degrees");
+    assertEqual(context.doorStore.get(house.door)?.position.x, 1, "door moved to x = 1");
+    assertEqual(context.windowStore.get(house.windows[0])?.dimensions.width, 1.6, "window widened to 1.6 m");
+    const manipulated = objectsJson(context);
+
+    for (let step = 0; step < 5; step += 1) {
+      context.history.undo();
+    }
+    assertEqual(objectsJson(context), built, "five undos - one per gesture - return the house exactly as built");
+    assertEqual(context.history.canUndo(), false, "and that was the whole history");
+    for (let step = 0; step < 5; step += 1) {
+      context.history.redo();
+    }
+    assertEqual(objectsJson(context), manipulated, "five redos restore every change");
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 12, "still 12 objects");
+    assertSameJson(buildAIProjectSnapshot(context).objects.map((object) => object.id).sort(), [...house.all].sort(), "same ids");
+  });
+
+  await check("mixed workflow: add wall, move, resize, rotate, add door, move door, delete window - undo reverses in order, redo replays", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const windowId = addThroughExecutor(context, { type: "window.add", window: { position: { x: 8, z: 0 } } });
+    context.history.clearHistory();
+    const states = [objectsJson(context)];
+
+    const wallId = addThroughExecutor(context, { type: "wall.add", wall: { position: { x: 0, z: 0 } } });
+    states.push(objectsJson(context));
+    manipulator.begin(wallId, { kind: "move" }, { x: 0, y: 1.35, z: 0 });
+    dragThrough(manipulator, [{ x: 1, y: 1.35, z: 1 }]);
+    states.push(objectsJson(context));
+    manipulator.begin(wallId, { kind: "resize", axis: "x", side: 1 }, { x: 3.35, y: 0.15, z: 1 });
+    dragThrough(manipulator, [{ x: 4.35, y: 0.15, z: 1 }]);
+    states.push(objectsJson(context));
+    manipulator.begin(wallId, { kind: "rotate" }, { x: 4.5, y: 0, z: 1 });
+    dragThrough(manipulator, [{ x: 1.5, y: 0, z: -2 }]);
+    states.push(objectsJson(context));
+    const doorId = addThroughExecutor(context, { type: "door.add", door: { position: { x: -3, z: 0 } } });
+    states.push(objectsJson(context));
+    manipulator.begin(doorId, { kind: "move" }, { x: -3, y: 1.05, z: 0 });
+    dragThrough(manipulator, [{ x: -3, y: 1.05, z: 2 }]);
+    states.push(objectsJson(context));
+    assertTrue(context.commandExecutor.execute({ type: "window.delete", id: windowId }).success, "window deleted");
+    states.push(objectsJson(context));
+    assertEqual(new Set(states).size, states.length, "precondition: every step changed the model");
+
+    for (let step = states.length - 2; step >= 0; step -= 1) {
+      context.history.undo();
+      assertEqual(objectsJson(context), states[step], `undo back to state ${step}`);
+    }
+    assertEqual(context.history.canUndo(), false, "exactly seven entries - one per action");
+    for (let step = 1; step < states.length; step += 1) {
+      context.history.redo();
+      assertEqual(objectsJson(context), states[step], `redo forward to state ${step}`);
+    }
+  });
+
+  await check("all six types: add, select, delete, undo restores the same object, redo removes it again", async () => {
+    const context = createProjectContext();
+    for (const type of ["wall", "pillar", "beam", "slab", "door", "window"]) {
+      const id = addThroughExecutor(context, { type: `${type}.add`, [type]: {} });
+      assertEqual(resolveConstructionObject(id, context)?.type, type, `${type} added to its store`);
+      context.selectionStore.select(id);
+      const before = objectsJson(context);
+
+      assertTrue(context.commandExecutor.execute({ type: `${type}.delete`, id }).success, `${type} deleted`);
+      assertEqual(resolveConstructionObject(id, context), undefined, `${type} gone from its store`);
+      assertEqual(context.selectionStore.get(), null, `${type}: selection cleared`);
+
+      context.history.undo();
+      assertEqual(objectsJson(context), before, `${type}: undo restores it exactly, same id`);
+      assertEqual(context.selectionStore.get(), id, `${type}: and selects it again`);
+
+      context.history.redo();
+      assertEqual(resolveConstructionObject(id, context), undefined, `${type}: redo deletes it again`);
+      context.history.undo();
+    }
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 6, "one of each type remains");
+  });
+
+  await check("duplicate makes an independent object: new id, its own transform, its own history", async () => {
+    const context = createProjectContext();
+    const manipulator = manipulatorFor(context);
+    const original = addThroughExecutor(context, { type: "wall.add", wall: { length: 5, position: { x: 0, z: 0 } } });
+    context.history.clearHistory();
+    const originalBefore = JSON.stringify(context.wallStore.get(original));
+
+    const copy = context.commandExecutor.execute({ type: "wall.duplicate", id: original }).objectId as string;
+    assertTrue(copy && copy !== original, "a new id");
+    assertEqual(context.wallStore.get(copy)?.dimensions.length, 5, "same dimensions");
+
+    manipulator.begin(copy, { kind: "rotate" }, { x: 3.75, y: 0, z: 0.75 });
+    dragThrough(manipulator, [{ x: 0.75, y: 0, z: -2.25 }]);
+    manipulator.begin(copy, { kind: "move" }, { x: 0.75, y: 1.35, z: 0.75 });
+    dragThrough(manipulator, [{ x: 0.75, y: 1.35, z: 3.75 }]);
+
+    assertEqual(JSON.stringify(context.wallStore.get(original)), originalBefore, "the original never changed");
+    assertTrue(Math.abs((context.wallStore.get(copy)?.rotation ?? 0) - Math.PI / 2) < 1e-6, "the copy rotated");
+    assertEqual(context.wallStore.get(copy)?.position.z, 3.75, "and moved");
+
+    context.history.undo();
+    context.history.undo();
+    assertEqual(context.wallStore.get(copy)?.position.z, 0.75, "undoing the copy's gestures touches only the copy");
+    context.history.undo();
+    assertEqual(context.wallStore.get(copy), undefined, "one more undo removes the duplicate");
+    assertEqual(JSON.stringify(context.wallStore.get(original)), originalBefore, "the original is untouched throughout");
+  });
+
+  await check("assemblies for a house: create, rename, add members, remove one; a deleted member drops out and undo brings it back; deleting the assembly keeps its objects", async () => {
+    const context = createProjectContext();
+    const house = buildHouse(context);
+    const liveMembers = (assemblyId: string) =>
+      (context.assemblyStore.get(assemblyId)?.objectIds ?? []).filter((id) => resolveConstructionObject(id, context) !== undefined);
+
+    const assemblyId = addThroughExecutor(context, { type: "assembly.create", assembly: { name: "Assembly 1" } });
+    assertTrue(context.commandExecutor.execute({ type: "assembly.update", id: assemblyId, changes: { name: "Ground Floor" } }).success, "renamed");
+    assertEqual(context.assemblyStore.get(assemblyId)?.name, "Ground Floor", "name");
+    for (const id of [...house.walls, house.door]) {
+      assertTrue(context.commandExecutor.execute({ type: "assembly.addObject", assemblyId, objectId: id }).success, `added ${id}`);
+    }
+    assertTrue(context.commandExecutor.execute({ type: "assembly.removeObject", assemblyId, objectId: house.door }).success, "door removed");
+    assertSameJson(liveMembers(assemblyId), house.walls, "four walls");
+    context.selectionStore.select(house.walls[2]);
+    assertEqual(context.selectionStore.get(), house.walls[2], "a member can be selected");
+
+    assertTrue(context.commandExecutor.execute({ type: "wall.delete", id: house.walls[0] }).success, "a member wall deleted");
+    assertSameJson(liveMembers(assemblyId), house.walls.slice(1), "the deleted wall is no longer a (live) member");
+    context.history.undo();
+    assertSameJson(liveMembers(assemblyId), house.walls, "undo restores the wall - and with it its membership");
+
+    assertTrue(context.commandExecutor.execute({ type: "assembly.delete", id: assemblyId }).success, "assembly deleted");
+    assertEqual(context.assemblyStore.getAll().length, 0, "no assemblies left");
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 12, "all 12 objects still there");
+  });
+
+  await check("New Project empties objects, assemblies, selection and history; ids are never reused", async () => {
+    const context = createProjectContext();
+    const house = buildHouse(context);
+    addThroughExecutor(context, { type: "assembly.create", assembly: { name: "Ground Floor" } });
+    context.selectionStore.select(house.walls[0]);
+
+    clearProject(context);
+
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 0, "no objects");
+    assertEqual(context.assemblyStore.getAll().length, 0, "no assemblies");
+    assertEqual(context.selectionStore.get(), null, "nothing selected");
+    assertEqual(context.history.canUndo(), false, "nothing to undo");
+    assertEqual(context.history.canRedo(), false, "nothing to redo");
+    const next = addThroughExecutor(context, { type: "wall.add", wall: {} });
+    assertTrue(!house.all.includes(next), `a fresh id (${next})`);
+  });
+
+  await check("default placement takes the first free slot, so adding after a delete never lands on a survivor", async () => {
+    const slot = (index: number) => ({ x: 0, z: -4 + index * 2.5 });
+    assertEqual(firstFreeSlot([], slot), 0, "empty: first slot");
+    assertEqual(firstFreeSlot([slot(0), slot(2)], slot), 1, "the gap left by a delete");
+    assertEqual(firstFreeSlot([slot(0), slot(1), slot(2)], slot), 3, "all taken: the next one");
+    assertEqual(firstFreeSlot([{ x: 3, z: -4 }], slot), 0, "an object moved away frees its slot");
+    assertEqual(firstFreeSlot([{ x: 0.3, z: -4.2 }], slot), 1, "one still sitting near its slot keeps it");
   });
 
   // --- Secrets and harness discipline ---

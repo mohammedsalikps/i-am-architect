@@ -178,6 +178,20 @@ export function createAssemblyPanel(
     return id ? assemblyStore.get(id) : undefined;
   }
 
+  /**
+   * The members that exist right now. A deleted object's id stays in the
+   * assembly's list (assembly edits aren't undoable, so dropping it would
+   * make Undo unable to restore the membership) but is left out here - to
+   * the user, deleting an object removes it from its assemblies, and
+   * undoing the delete puts it back.
+   */
+  function liveMemberIds(assembly: AssemblyData): ObjectId[] {
+    return assembly.objectIds.filter(
+      (objectId) =>
+        resolveMemberLabel(objectId, wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore).selectableId !== null
+    );
+  }
+
   function updateMembershipButtons(): void {
     const assembly = getSelectedAssembly();
     const selectedObjectId = selectionStore.get();
@@ -195,16 +209,28 @@ export function createAssemblyPanel(
   selectionStore.subscribe(updateMembershipButtons);
 
   const list = el("div", { className: "assembly-list" });
+  let renderedListKey: string | null = null;
 
   function renderList(): void {
     const assemblies = assemblyStore.getAll();
+    const selectedId = assemblySelection.get();
+    if (selectedId && !assemblies.some((assembly) => assembly.id === selectedId)) {
+      assemblySelection.clear(); // the selected assembly is gone (deleted, or a New Project) - re-renders via its subscription
+      return;
+    }
+
+    // Rebuild only when something shown changed (see leftSidebar.ts's
+    // hierarchy for why a needless rebuild can swallow a click).
+    const key = JSON.stringify([selectedId, assemblies.map((assembly) => [assembly.id, assembly.name, liveMemberIds(assembly).length])]);
+    if (key === renderedListKey) {
+      return;
+    }
+    renderedListKey = key;
 
     if (assemblies.length === 0) {
       list.replaceChildren(el("p", { className: "sidebar__placeholder", text: "No assemblies yet." }));
       return;
     }
-
-    const selectedId = assemblySelection.get();
 
     list.replaceChildren(
       ...assemblies.map((assembly) => {
@@ -217,7 +243,7 @@ export function createAssemblyPanel(
           },
           [
             el("span", { className: "assembly-list__name", text: assembly.name }),
-            el("span", { className: "assembly-list__count", text: String(assembly.objectIds.length) })
+            el("span", { className: "assembly-list__count", text: String(liveMemberIds(assembly).length) })
           ]
         );
         item.addEventListener("click", () => assemblySelection.select(assembly.id));
@@ -228,13 +254,30 @@ export function createAssemblyPanel(
 
   assemblyStore.subscribe(renderList);
   assemblySelection.subscribe(renderList);
+  // Counts show live members, so deleting (or undoing a delete of) an object changes them.
+  wallStore.subscribe(renderList);
+  pillarStore.subscribe(renderList);
+  beamStore.subscribe(renderList);
+  slabStore.subscribe(renderList);
+  doorStore.subscribe(renderList);
+  windowStore.subscribe(renderList);
 
   // --- Selected assembly detail: name, count, member list ---
 
   const detail = el("div", { className: "assembly-detail" });
+  let renderedDetailKey: string | null = null;
 
   function renderSelectedAssemblyDetail(): void {
     const assembly = getSelectedAssembly();
+    const members = assembly ? liveMemberIds(assembly) : [];
+
+    // Rebuild only when the name or the live members changed - which also
+    // keeps a half-typed name intact while other objects are edited.
+    const key = JSON.stringify(assembly ? [assembly.id, assembly.name, members] : null);
+    if (key === renderedDetailKey) {
+      return;
+    }
+    renderedDetailKey = key;
 
     if (!assembly) {
       detail.hidden = true;
@@ -243,9 +286,29 @@ export function createAssemblyPanel(
     }
     detail.hidden = false;
 
-    const objectCount = assembly.objectIds.length;
+    const objectCount = members.length;
+
+    // Renames through assembly.update on blur/Enter; a blank name is reverted.
+    const nameInput = el("input", {
+      className: "assembly-detail__name-input",
+      attrs: { type: "text", value: assembly.name, "aria-label": "Assembly name" }
+    });
+    nameInput.addEventListener("change", () => {
+      const name = nameInput.value.trim();
+      if (name.length > 0 && name !== assembly.name) {
+        commandExecutor.execute({ type: "assembly.update", id: assembly.id, changes: { name } });
+      } else {
+        nameInput.value = assembly.name;
+      }
+    });
+    nameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        nameInput.blur(); // commit via "change", like the Properties fields
+      }
+    });
+
     const header = el("div", { className: "assembly-detail__header" }, [
-      el("span", { className: "assembly-detail__name", text: assembly.name }),
+      nameInput,
       el("span", {
         className: "assembly-detail__count",
         text: `${objectCount} object${objectCount === 1 ? "" : "s"}`
@@ -258,7 +321,7 @@ export function createAssemblyPanel(
         : el(
             "ul",
             { className: "assembly-members" },
-            assembly.objectIds.map((objectId) => {
+            members.map((objectId) => {
               const { label, selectableId } = resolveMemberLabel(
                 objectId,
                 wallStore,

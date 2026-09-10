@@ -3,6 +3,7 @@ import type { HistoryManager } from "../engine/history/HistoryManager";
 
 export type TopBarOptions = {
   projectName: string;
+  onNewProject: () => void;
   onUndo: () => void;
   onRedo: () => void;
   history: HistoryManager;
@@ -14,10 +15,10 @@ export type TopBarOptions = {
  * relocated here), the project name, a search field, and a
  * notifications/settings/profile icon cluster.
  *
- * "New Project"/"Save" remain visual placeholders, same as before this
- * milestone. Search and the icon cluster are new and intentionally
- * disabled (styled-but-inert, the same pattern already used for the AI
- * command input) rather than clickable no-ops.
+ * "New Project" empties the in-memory model (see main.ts's newProject).
+ * "Save" is disabled - there is no persistence yet - as are search and
+ * the icon cluster (styled-but-inert, the same pattern already used for
+ * the AI command input) rather than clickable no-ops.
  */
 export function createTopBar(options: TopBarOptions): HTMLElement {
   const branding = el("div", { className: "app-header__brand" }, [
@@ -44,9 +45,16 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     redoButton.disabled = !options.history.canRedo();
   });
 
+  const newProjectButton = el("button", { className: "toolbar-button", text: "New Project", attrs: { type: "button" } });
+  newProjectButton.addEventListener("click", options.onNewProject);
+
   const quickAccess = el("div", { className: "app-header__actions" }, [
-    el("button", { className: "toolbar-button", text: "New Project", attrs: { type: "button" } }),
-    el("button", { className: "toolbar-button", text: "Save", attrs: { type: "button" } }),
+    newProjectButton,
+    el("button", {
+      className: "toolbar-button",
+      text: "Save",
+      attrs: { type: "button", disabled: "true", title: "Coming soon" }
+    }),
     undoButton,
     redoButton
   ]);

@@ -30,6 +30,8 @@ export type AppShellOptions = {
   onAddWindow: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
+  /** Empties the in-memory project - see main.ts's newProject. */
+  onNewProject: () => void;
   onUndo: () => void;
   onRedo: () => void;
   /** Sends one command-bar AI instruction through AICommandPipeline - see main.ts (constructed from AIService.submit) and commandBar.ts's "AI Prompt" tab. */
@@ -70,6 +72,7 @@ export type AppShell = {
 export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
     projectName: options.projectName,
+    onNewProject: options.onNewProject,
     onUndo: options.onUndo,
     onRedo: options.onRedo,
     history: options.history

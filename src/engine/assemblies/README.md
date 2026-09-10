@@ -60,6 +60,15 @@ object that's later deleted. Reconciling that (e.g. pruning stale ids,
 or blocking deletion of an object that's part of an assembly) is out
 of scope for this milestone.
 
+### Deleted members
+
+Deleting an object leaves its id in every assembly that lists it.
+Assembly edits aren't undoable, so removing the id would leave Undo
+unable to put the membership back. The assembly panel lists and counts
+only the members that currently exist. To the user, deleting an object
+removes it from its assemblies, and undoing the delete puts it straight
+back. `src/engine/ai/e2e/verify.ts` covers this.
+
 ## Commands
 
 Assembly commands live in the existing command layer

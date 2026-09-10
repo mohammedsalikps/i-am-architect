@@ -466,6 +466,40 @@ button {
   color: var(--color-text);
 }
 
+/* Live object list under the hierarchy - one button per object, selects it. */
+.hierarchy-objects {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hierarchy-objects__item {
+  display: block;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--color-text);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hierarchy-objects__item:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.hierarchy-objects__item--selected,
+.hierarchy-objects__item--selected:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
 /* ---------- Right sidebar tabs ---------- */
 
 .sidebar-tabs {
@@ -596,12 +630,20 @@ button {
   margin-bottom: 6px;
 }
 
-.assembly-detail__name {
-  font-weight: 500;
+.assembly-detail__name-input {
+  flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.assembly-detail__name-input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
 }
 
 .assembly-detail__count {
@@ -697,6 +739,11 @@ button {
   color: var(--color-text);
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.property-row__input--text {
+  width: 110px;
+  text-align: left;
 }
 
 .property-row__input:focus {
