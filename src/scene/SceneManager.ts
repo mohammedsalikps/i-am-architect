@@ -14,6 +14,8 @@ import { ManipulationHandles } from "./manipulation/ManipulationHandles";
 import { ManipulationController } from "./manipulation/ManipulationController";
 import { ObjectManipulator, createStoreObjectReader } from "../engine/manipulation/ObjectManipulator";
 import type { ManipulationHistory } from "../engine/manipulation/ObjectManipulator";
+import { createStoreSnapper } from "../engine/snapping/storeSnapper";
+import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -64,7 +66,9 @@ export class SceneManager {
     selectionStore: SelectionStore,
     /** The shared CommandExecutor and HistoryManager - mouse manipulation edits the model only through these. */
     commandExecutor: { execute(input: unknown): CommandResult },
-    history: ManipulationHistory
+    history: ManipulationHistory,
+    /** Whether drags snap - see engine/snapping/. */
+    snapSettings: SnapSettings
   ) {
     this.container = container;
 
@@ -94,7 +98,8 @@ export class SceneManager {
     // Not stored on `this`: every *Layer stays alive via the
     // subscriptions it registers with its store/selectionStore, which
     // outlive this constructor.
-    const wallLayer = new WallLayer(this.scene, wallStore, selectionStore);
+    // Walls also follow the door and window stores: they're drawn with a hole for each hosted opening.
+    const wallLayer = new WallLayer(this.scene, wallStore, doorStore, windowStore, selectionStore);
     const pillarLayer = new PillarLayer(this.scene, pillarStore, selectionStore);
     const beamLayer = new BeamLayer(this.scene, beamStore, selectionStore);
     const slabLayer = new SlabLayer(this.scene, slabStore, selectionStore);
@@ -142,7 +147,13 @@ export class SceneManager {
         ...windowLayer.getMeshes(),
         ...elementLayer.getMeshes()
       ],
-      manipulator: new ObjectManipulator({ commandExecutor, history, readObject })
+      manipulator: new ObjectManipulator({
+        commandExecutor,
+        history,
+        readObject,
+        // Endpoints, corners, centers, alignment, the grid, wall faces - see engine/snapping/.
+        snapper: createStoreSnapper(stores, snapSettings)
+      })
     });
 
     window.addEventListener("resize", this.handleResize);

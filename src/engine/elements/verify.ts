@@ -21,7 +21,7 @@ import { ElementStore } from "./ElementStore.ts";
 import { isInsideRoom, isRoom, objectsInRoom, roomArea } from "./rooms.ts";
 import { ROOM_PRESETS, roomPresetOptions } from "./roomPresets.ts";
 import { MATERIAL_LIBRARY, getMaterial, materialsFor } from "../materials/materialLibrary.ts";
-import { placeOpeningOnWall, WINDOW_SILL_HEIGHT } from "../openings/hostOpening.ts";
+import { WINDOW_SILL_HEIGHT, hostedTransform } from "../openings/hostOpening.ts";
 import { createDoorData } from "../door/createDoor.ts";
 import { validateDoor } from "../door/validateDoor.ts";
 import { createProjectContext } from "../project/ProjectContext.ts";
@@ -140,7 +140,14 @@ function exerciseKind(definition: ElementKindDefinition): void {
   const read = createStoreObjectReader(storesOf(project))(id);
   assertTrue(read && read.type === "element" && read.kind === kind, `${kind}: the manipulation reader resolves it with its kind`);
   const layout = layoutHandles({ type: "element", kind, dimensions: created.dimensions });
-  assertTrue(layout && layout.resize.length === 5, `${kind}: five resize handles and a rotation ring`);
+  if (definition.linear) {
+    assertTrue(
+      layout && layout.resize.length === 3 && layout.endpoints.length === 2 && layout.rotate,
+      `${kind}: two endpoint handles (in place of the lengthwise ones), three cross-section handles, and a rotation ring`
+    );
+  } else {
+    assertTrue(layout && layout.resize.length === 5 && layout.endpoints.length === 0 && layout.rotate, `${kind}: five resize handles and a rotation ring`);
+  }
 
   // --- Geometry ---
   const geometry = analyzeConstructionGeometry(buildAIProjectSnapshot(project));
@@ -158,7 +165,11 @@ function exerciseKind(definition: ElementKindDefinition): void {
   const grown = elementStore.get(id);
   assertTrue(grown, `${kind}: still stored`);
   assertClose(grown.dimensions[yKey], taller, `${kind}: ${yKey} updated`);
-  assertClose(grown.position.y - taller / 2, definition.baseY, `${kind}: the base stays put when it grows`);
+  if (definition.linear) {
+    assertClose(grown.position.y, created.position.y, `${kind}: its axis - and every joint on it - stays put when it gets thicker`);
+  } else {
+    assertClose(grown.position.y - taller / 2, definition.baseY, `${kind}: the base stays put when it grows`);
+  }
 
   // --- update_object: name, material, color, parameters ---
   succeed(project, { type: "update_object", objectId: id, changes: { label: `My ${definition.label}` } });
@@ -361,26 +372,23 @@ async function run(): Promise<void> {
 
   // --- Openings hosted by walls ---
 
-  await check("doors and windows can belong to a wall: flush on its face, turned with it, hostId kept through save/reopen, unhosted when the wall is gone", () => {
+  await check("doors and windows can belong to a wall: in it, turned with it, hostId and placement kept through save/reopen, gone with the wall", () => {
     const wall = { position: { x: 0, y: 1.5, z: 0 }, rotation: Math.PI / 2, dimensions: { length: 4, height: 3, thickness: 0.2 } };
-    const door = placeOpeningOnWall(wall, { width: 0.9, height: 2.1, thickness: 0.05 });
-    assertClose(door.position.x, 0.125, "a turned wall's face normal is +X: the door sits 0.1 + 0.025 m out");
+    const door = hostedTransform(wall, { width: 0.9, height: 2.1, thickness: 0.05 }, { offset: 0, sill: 0 });
+    assertClose(door.position.x, 0, "centered in the wall's thickness");
     assertClose(door.position.y, 1.05, "on the wall's base");
     assertClose(door.position.z, 0, "centered along the wall");
     assertClose(door.rotation, Math.PI / 2, "turned with the wall");
-    const window = placeOpeningOnWall(wall, { width: 0.9, height: 1.2, thickness: 0.05 }, { offset: 10, sill: WINDOW_SILL_HEIGHT, side: -1 });
-    assertClose(window.position.z, -1.55, "an offset past the wall's end is clamped to keep the opening on the wall");
-    assertClose(window.position.x, -0.125, "the other face");
+    const window = hostedTransform(wall, { width: 0.9, height: 1.2, thickness: 0.05 }, { offset: 1, sill: WINDOW_SILL_HEIGHT });
+    assertClose(window.position.z, -1, "1 m along a wall turned 90 degrees is 1 m toward -Z");
     assertClose(window.position.y, WINDOW_SILL_HEIGHT + 0.6, "at sill height");
 
     const project = createProjectContext();
     const wallId = create(project, { type: "wall.add", wall: {} });
     const doorId = create(project, { type: "door.add", door: { hostId: wallId } });
     assertEqual(project.doorStore.get(doorId)?.hostId, wallId, "hostId stored");
-    const hostWall = project.wallStore.get(wallId);
-    const doorData = project.doorStore.get(doorId);
-    assertTrue(hostWall && doorData, "both exist");
-    succeed(project, { type: "door.update", id: doorId, changes: placeOpeningOnWall(hostWall, doorData.dimensions) });
+    assertSameJson(project.doorStore.get(doorId)?.hostPlacement, { offset: 0, sill: 0 }, "a door goes in at the wall's center, on its base");
+    succeed(project, { type: "door.update", id: doorId, changes: { hostPlacement: { offset: 0.5, sill: 0 } } });
     assertEqual(project.doorStore.get(doorId)?.hostId, wallId, "placing it keeps the host");
     const freeWindow = create(project, { type: "window.add", window: {} });
     assertEqual(project.windowStore.get(freeWindow)?.hostId, null, "free-standing by default");
@@ -398,8 +406,9 @@ async function run(): Promise<void> {
     assertTrue(!parsed.ok && parsed.error.includes("is not a wall"), `a document naming a missing host is rejected (${parsed.ok ? "accepted" : parsed.error})`);
 
     succeed(project, { type: "wall.delete", id: wallId });
-    const orphan = serializeProject(project).objects.find((object) => object.id === doorId) as { hostId: string | null } | undefined;
-    assertEqual(orphan?.hostId, null, "an opening whose wall was deleted is saved unhosted");
+    assertEqual(project.doorStore.get(doorId), undefined, "deleting the wall deletes the door in it");
+    project.history.undo();
+    assertEqual(project.doorStore.get(doorId)?.hostId, wallId, "and one undo brings both back, still hosted");
 
     assertTrue(!validateDoor({ ...createDoorData(), hostId: "" }).valid, "a blank hostId is invalid");
     assertTrue(validateDoor({ ...createDoorData(), hostId: null }).valid, "null is free-standing");
@@ -591,19 +600,10 @@ async function run(): Promise<void> {
     place("roof");
     place("stair", { position: { x: -3.6, z: -0.8 } });
 
-    // Openings: a window hosted on the east wall, a door hosted on the front wall.
-    const hostedWindow = create(project, { type: "window.add", window: { hostId: sideWall.id } });
-    const windowData = project.windowStore.get(hostedWindow);
-    assertTrue(windowData, "hosted window");
-    succeed(project, {
-      type: "window.update",
-      id: hostedWindow,
-      changes: placeOpeningOnWall(sideWall, windowData.dimensions, { offset: -1.5, sill: WINDOW_SILL_HEIGHT })
-    });
-    const hostedDoor = create(project, { type: "door.add", door: { hostId: frontWall.id } });
-    const doorData = project.doorStore.get(hostedDoor);
-    assertTrue(doorData, "hosted door");
-    succeed(project, { type: "door.update", id: hostedDoor, changes: placeOpeningOnWall(frontWall, doorData.dimensions, { offset: 3 }) });
+    // Openings: a window in the east wall, a door and a window in the front wall - each one command.
+    const hostedWindow = create(project, { type: "window.add", window: { hostId: sideWall.id, offset: -1.5, sill: WINDOW_SILL_HEIGHT } });
+    const hostedDoor = create(project, { type: "door.add", door: { hostId: frontWall.id, offset: 3 } });
+    const frontWindow = create(project, { type: "window.add", window: { hostId: frontWall.id, offset: -2.5 } });
 
     // Rooms, each with a floor finish on the slab; one ceiling; a painted wall.
     const roomAt: Record<string, { x: number; z: number }> = {
@@ -623,11 +623,16 @@ async function run(): Promise<void> {
     place("ceiling", { dimensions: { length: 9.6, width: 7.6 } });
     succeed(project, { type: "update_object", objectId: frontWall.id, changes: { material: "paint", color: "#e8dcc8" } });
 
-    // Plumbing: tank and pump outside, supply and drain runs, and the bathroom fixtures.
+    // Plumbing: tank and pump outside, supply and drain runs of connected segments, and the bathroom fixtures.
     place("water-tank", { position: { x: 6.5, z: -3 } });
     place("pump", { position: { x: 6.5, z: -1.6 } });
-    place("water-pipe", { position: { x: 5.6, y: 0.3, z: -2.4 }, params: { system: "cold" } });
-    place("drain-pipe", { position: { x: 4, z: -4.6 } });
+    const supplyA = place("water-pipe", { position: { x: 5.6, y: 0.3, z: -2.4 }, params: { system: "cold" } });
+    const supplyB = place("water-pipe", { position: { x: 8.7, y: 0.3, z: -2.4 }, params: { system: "cold" } });
+    const drainA = place("drain-pipe", { position: { x: 4, z: -4.6 } });
+    const drainB = place("drain-pipe", { position: { x: 7.1, z: -4.6 } });
+    // 0.1 m apart: element.connect snaps the first segment's end onto the second's start.
+    succeed(project, { type: "element.connect", from: { id: supplyA, endpoint: "end" }, to: { id: supplyB, endpoint: "start" } });
+    succeed(project, { type: "element.connect", from: { id: drainA }, to: { id: drainB } });
     const fixtures = [
       place("sink", { position: { x: 3, z: -2.3 } }),
       place("toilet", { position: { x: 4.2, z: -3.4 } }),
@@ -637,8 +642,12 @@ async function run(): Promise<void> {
 
     // Electrical.
     place("distribution-board", { position: { x: -4.7, z: 3.7 } });
-    place("conduit", { position: { x: 0, z: 0 } });
-    place("cable", { position: { x: 0, z: 1 } });
+    const conduitA = place("conduit", { position: { x: 0, z: 0 } });
+    const conduitB = place("conduit", { position: { x: 3.05, z: 0 } });
+    const cableA = place("cable", { position: { x: 0, z: 1 } });
+    const cableB = place("cable", { position: { x: -3.05, z: 1 } });
+    succeed(project, { type: "element.connect", from: { id: conduitA }, to: { id: conduitB } });
+    succeed(project, { type: "element.connect", from: { id: cableB, endpoint: "end" }, to: { id: cableA, endpoint: "start" } });
     place("switch", { position: { x: -0.5, z: 3.85 } });
     place("socket", { position: { x: -3, z: 3.85 } });
     place("light", { position: { x: -2.4, z: 1.6 } });
@@ -724,6 +733,16 @@ async function run(): Promise<void> {
 
     assertEqual(project.windowStore.get(hostedWindow)?.hostId, sideWall.id, "the window belongs to the east wall");
     assertEqual(project.doorStore.get(hostedDoor)?.hostId, frontWall.id, "the door belongs to the front wall");
+    assertEqual(project.windowStore.get(frontWindow)?.hostId, frontWall.id, "and so does the front window");
+
+    // Relationships: every hosted opening fits its wall, every connection meets.
+    assertEqual(analysis.hosts.length, 3, "three hosted openings");
+    assertTrue(analysis.hosts.every((host) => host.valid), `every host relationship is valid: ${JSON.stringify(analysis.hosts)}`);
+    assertEqual(analysis.connections.length, 4, "four connections: supply, drain, conduit, cable");
+    assertTrue(analysis.connections.every((connection) => connection.valid), `every connection is valid: ${JSON.stringify(analysis.connections)}`);
+    for (const [a, b] of [[supplyA, supplyB], [drainA, drainB], [conduitA, conduitB], [cableB, cableA]]) {
+      assertTrue(project.elementStore.get(a)?.connections.some((connection) => connection.objectId === b), `${a} is connected to ${b}`);
+    }
     assertEqual(project.wallStore.get(frontWall.id)?.material, "paint", "the front wall is painted - and still the same wall");
 
     const reopened = createProjectContext();

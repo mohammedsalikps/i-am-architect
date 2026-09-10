@@ -129,12 +129,44 @@ function parseObject(raw: unknown, path: string): Parsed<AIContextObject> {
     elementFields = { kind, label };
   }
 
+  // A hosted door or window names its wall.
+  let hostFields: { hostId: string } | null = null;
+  if (raw.hostId !== undefined) {
+    if ((type !== "door" && type !== "window") || !isNonEmptyString(raw.hostId)) {
+      return { ok: false, error: `"${path}.hostId" is only for a door or window, and must be a wall id.` };
+    }
+    hostFields = { hostId: raw.hostId };
+  }
+
+  // A connected linear element lists its endpoint connections.
+  let connectionFields: { connections: { endpoint: "start" | "end"; objectId: string; objectEndpoint: "start" | "end" }[] } | null = null;
+  if (raw.connections !== undefined) {
+    if (type !== "element" || !Array.isArray(raw.connections)) {
+      return { ok: false, error: `"${path}.connections" is only for an element, and must be an array.` };
+    }
+    const connections: { endpoint: "start" | "end"; objectId: string; objectEndpoint: "start" | "end" }[] = [];
+    for (const connection of raw.connections as unknown[]) {
+      if (
+        !isPlainObject(connection) ||
+        (connection.endpoint !== "start" && connection.endpoint !== "end") ||
+        (connection.objectEndpoint !== "start" && connection.objectEndpoint !== "end") ||
+        !isNonEmptyString(connection.objectId)
+      ) {
+        return { ok: false, error: `"${path}.connections" entries must be { endpoint, objectId, objectEndpoint }.` };
+      }
+      connections.push({ endpoint: connection.endpoint, objectId: connection.objectId, objectEndpoint: connection.objectEndpoint });
+    }
+    connectionFields = { connections };
+  }
+
   return {
     ok: true,
     value: {
       id,
       type: type as ObjectType,
       ...(elementFields ?? {}),
+      ...(hostFields ?? {}),
+      ...(connectionFields ?? {}),
       position: { x, y, z },
       rotation,
       dimensions: dimensionsCopy,

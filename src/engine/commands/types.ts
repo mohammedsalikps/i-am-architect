@@ -17,7 +17,7 @@ import type { CreateWindowOptions } from "../window/createWindow";
 import type { WindowData, WindowId } from "../window/types";
 import type { WindowValidationResult } from "../window/validateWindow";
 import type { CreateElementOptions } from "../elements/createElement";
-import type { ElementData, ElementId } from "../elements/types";
+import type { ElementData, ElementId, Endpoint } from "../elements/types";
 import type { ElementValidationResult } from "../elements/validateElement";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
@@ -187,8 +187,61 @@ export interface AddElementCommand {
 export interface UpdateElementCommand {
   type: "element.update";
   id: ElementId;
-  /** Same shape ElementStore.update() takes - nested fields are complete replacements, and the kind can't change. */
-  changes: Partial<Omit<ElementData, "id" | "type" | "kind">>;
+  /**
+   * Same shape ElementStore.update() takes - nested fields are complete
+   * replacements, and the kind can't change. Connections change only
+   * through element.connect / element.disconnect. Moving a connected
+   * endpoint moves every endpoint joined to it.
+   */
+  changes: Partial<Omit<ElementData, "id" | "type" | "kind" | "connections">>;
+}
+
+/** One endpoint of a linear element. `endpoint` may be left out where the command can pick the nearest. */
+export interface EndpointReference {
+  id: ElementId;
+  endpoint?: Endpoint;
+}
+
+/**
+ * Connects an endpoint of `from` to an endpoint of `to` - two linear
+ * elements of compatible kinds (water pipe to water pipe, drain to drain,
+ * conduit to conduit, cable to cable). Omitted endpoints: the nearest
+ * pair. The endpoints must be within CONNECTION_TOLERANCE of each other;
+ * `from`'s endpoint is snapped onto `to`'s, and the connection is recorded
+ * on both. One undo step.
+ */
+export interface ConnectElementsCommand {
+  type: "element.connect";
+  from: EndpointReference;
+  to: EndpointReference;
+}
+
+/** Removes the connection(s) between `from` and `to` - only those at the given endpoints, when given. */
+export interface DisconnectElementsCommand {
+  type: "element.disconnect";
+  from: EndpointReference;
+  to: EndpointReference;
+}
+
+/** Moves object `id` so its center lines up with `targetId`'s on X, Z, or both. A door or window in a wall slides along it. */
+export interface AlignObjectsCommand {
+  type: "object.align";
+  id: ObjectId;
+  targetId: ObjectId;
+  axis: "x" | "z" | "both";
+}
+
+/**
+ * Snaps object `id` to `targetId`. "endpoint": moves it so its nearest key
+ * point (endpoint, corner, or center) lands on the target's nearest one -
+ * and, for two connectable elements, connects those endpoints. "wall":
+ * puts a door or window into the target wall.
+ */
+export interface SnapObjectCommand {
+  type: "object.snap";
+  id: ObjectId;
+  targetId: ObjectId;
+  mode: "endpoint" | "wall";
 }
 
 export interface DeleteElementCommand {
@@ -260,6 +313,10 @@ export type Command =
   | UpdateElementCommand
   | DeleteElementCommand
   | DuplicateElementCommand
+  | ConnectElementsCommand
+  | DisconnectElementsCommand
+  | AlignObjectsCommand
+  | SnapObjectCommand
   | CreateAssemblyCommand
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
@@ -294,6 +351,8 @@ export interface ObjectChanges {
   label?: string;
   /** Elements only: any of the kind's parameters. */
   params?: Record<string, number | string>;
+  /** Doors and windows only: the wall to put it in, or null to take it out of its wall. */
+  hostId?: string | null;
 }
 
 /**
@@ -368,6 +427,19 @@ export interface WindowHistoryLike {
   add(windowData: WindowData): WindowValidationResult;
   update(id: WindowId, changes: Partial<Omit<WindowData, "id" | "type">>): WindowValidationResult;
   remove(id: WindowId): void;
+}
+
+/**
+ * The subset of HistoryManager CommandExecutor uses to make a change that
+ * spans several objects - a wall and the openings in it, a pipe and the
+ * ones joined to it - ONE undo step: it opens a group when none is open,
+ * and otherwise lets the open one (a drag, an AI batch) collect the lot.
+ */
+export interface HistoryGroupsLike {
+  beginGroup(): void;
+  endGroup(): void;
+  cancelGroup(): void;
+  isGrouping(): boolean;
 }
 
 /** The element equivalent of WallHistoryLike - one controller for every element kind. */

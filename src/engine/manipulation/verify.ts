@@ -249,12 +249,15 @@ function run(): void {
     assertSameJson(layout.resize[0].position, { x: 0.55, y: -1.35, z: 0 }, "outside the +X face (0.2 + 0.35), on the base plane lifted 0.15");
     assertSameJson(layout.resize[2].position, { x: 0, y: -1.35, z: 0.75 }, "outside the +Z face (0.4 + 0.35), on the base plane");
     assertSameJson(layout.resize[4].position, { x: 0, y: 1.85, z: 0 }, "above the top (1.5 + 0.35)");
-    assertEqual(layout.rotate.y, -1.5, "ring at the base");
-    assertClose(layout.rotate.radius, Math.hypot(0.2, 0.4) + 0.8, "ring clears the corners");
+    const ring = layout.rotate;
+    assertTrue(ring, "a pillar gets a rotation ring");
+    assertEqual(ring.y, -1.5, "ring at the base");
+    assertClose(ring.radius, Math.hypot(0.2, 0.4) + 0.8, "ring clears the corners");
+    assertSameJson(layout.endpoints, [], "no endpoint handles - it isn't a linear element");
     for (const handle of layout.resize.slice(0, 4)) {
       const reach = Math.hypot(handle.position.x, handle.position.z);
       // 0.2 m handle hit sphere + 0.25 m ring hit band (src/scene/manipulation/ManipulationHandles.ts) never overlap.
-      assertTrue(layout.rotate.radius - reach >= 0.2 + 0.25, `side handle ${handle.axis}${handle.side} stays clear of the ring`);
+      assertTrue(ring.radius - reach >= 0.2 + 0.25, `side handle ${handle.axis}${handle.side} stays clear of the ring`);
     }
     assertEqual(layoutHandles({ type: "roof", dimensions: { length: 4 } }), null, "no handles for an unknown type");
     assertEqual(layoutHandles({ type: "wall", dimensions: { height: 2.7, length: 0, thickness: 0.2 } }), null, "no handles on a degenerate shape");

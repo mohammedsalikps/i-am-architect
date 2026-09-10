@@ -66,6 +66,17 @@ export function buildAIProjectContext(snapshot: AIProjectSnapshot): AIProjectCon
       // sanitizer requires the kind); the six original types have
       // neither, so their copy is unchanged.
       ...(object.kind !== undefined ? { kind: object.kind, label: object.label ?? "" } : {}),
+      // Relationships: a hosted opening's wall, a linear element's connections.
+      ...(object.hostId !== undefined ? { hostId: object.hostId } : {}),
+      ...(object.connections !== undefined
+        ? {
+            connections: object.connections.map((connection) => ({
+              endpoint: connection.endpoint,
+              objectId: connection.objectId,
+              objectEndpoint: connection.objectEndpoint
+            }))
+          }
+        : {}),
       position: { x: object.position.x, y: object.position.y, z: object.position.z },
       rotation: object.rotation,
       dimensions: copyDimensions(object.dimensions),

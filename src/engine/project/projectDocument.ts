@@ -10,14 +10,17 @@ import { validateWindow } from "../window/validateWindow.ts";
 import { validateElement } from "../elements/validateElement.ts";
 import { getElementKind } from "../elements/catalog.ts";
 import { validateAssembly } from "../assemblies/AssemblyStore.ts";
+import { hostedTransform, hostingProblems, placementFromWorld } from "../openings/hostOpening.ts";
+import { connectionProblems } from "../connections/connections.ts";
 import type { WallData } from "../wall/types";
 import type { PillarData } from "../pillar/types";
 import type { BeamData } from "../beam/types";
 import type { SlabData } from "../slab/types";
 import type { DoorData } from "../door/types";
 import type { WindowData } from "../window/types";
-import type { ElementData } from "../elements/types";
+import type { ElementConnection, ElementData, Endpoint } from "../elements/types";
 import type { AssemblyData } from "../assemblies/types";
+import type { HostPlacement } from "../openings/hostOpening";
 
 /**
  * The persisted form of one project's construction model: ONE project,
@@ -25,6 +28,11 @@ import type { AssemblyData } from "../assemblies/types";
  * construction object as its store keeps it, and every assembly - and
  * nothing else: no meshes, no DOM, no selection, no undo history. The
  * scene is rebuilt from it the same way it is from any store change.
+ *
+ * Relationships are part of the objects: a door or window in a wall has
+ * `hostId` and its relative `hostPlacement` (offset along the wall, sill);
+ * a connected pipe, conduit, or cable has `connections`. A loaded project
+ * never brings back a broken relationship - see parseProjectDocument().
  *
  * It depends on nothing in the AI layer. The AI snapshot is a different,
  * derived view (sorted, assembly membership copied onto objects,
@@ -106,6 +114,10 @@ function isOpening(object: PersistedObject): object is DoorData | WindowData {
   return object.type === "door" || object.type === "window";
 }
 
+function isElement(object: PersistedObject): object is ElementData {
+  return object.type === "element";
+}
+
 /** A record's fields copied one key list at a time, in that order. */
 function pick(source: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
   const copy: Record<string, unknown> = {};
@@ -113,6 +125,14 @@ function pick(source: Record<string, unknown>, keys: readonly string[]): Record<
     copy[key] = source[key];
   }
   return copy;
+}
+
+function copyConnections(connections: readonly ElementConnection[] | undefined): ElementConnection[] {
+  return (connections ?? []).map((connection) => ({
+    endpoint: connection.endpoint,
+    objectId: connection.objectId,
+    objectEndpoint: connection.objectEndpoint
+  }));
 }
 
 /**
@@ -139,7 +159,8 @@ export function toPersistedObject(record: PersistedObject): PersistedObject {
       params: pick(record.params, paramKeys),
       material: record.material,
       color: record.color,
-      assemblyId: record.assemblyId
+      assemblyId: record.assemblyId,
+      connections: copyConnections(record.connections)
     } as unknown as PersistedObject;
   }
 
@@ -153,7 +174,15 @@ export function toPersistedObject(record: PersistedObject): PersistedObject {
     color: record.color,
     assemblyId: record.assemblyId
   };
-  return (isOpening(record) ? { ...base, hostId: record.hostId ?? null } : base) as unknown as PersistedObject;
+  if (!isOpening(record)) {
+    return base as unknown as PersistedObject;
+  }
+  const placement = record.hostPlacement ?? null;
+  return {
+    ...base,
+    hostId: record.hostId ?? null,
+    hostPlacement: placement === null ? null : { offset: placement.offset, sill: placement.sill }
+  } as unknown as PersistedObject;
 }
 
 /** The checks every object shares - position, rotation, material, color, assemblyId. */
@@ -202,6 +231,24 @@ function parseDimensions(raw: unknown, expected: readonly string[], typeLabel: s
     ordered[key] = value;
   }
   return { ok: true, value: ordered };
+}
+
+/** A list of connection entries, copied field by field (validateElement and connectionProblems check the rest). Absent: none. */
+function parseConnections(raw: unknown, where: string): Parsed<ElementConnection[]> {
+  if (raw === undefined) {
+    return { ok: true, value: [] };
+  }
+  if (!Array.isArray(raw)) {
+    return fail(`${where}: connections must be a list.`);
+  }
+  const connections: ElementConnection[] = [];
+  for (const entry of raw) {
+    if (!isPlainObject(entry) || typeof entry.endpoint !== "string" || typeof entry.objectId !== "string" || typeof entry.objectEndpoint !== "string") {
+      return fail(`${where}: each connection must be { endpoint, objectId, objectEndpoint }.`);
+    }
+    connections.push({ endpoint: entry.endpoint as Endpoint, objectId: entry.objectId, objectEndpoint: entry.objectEndpoint as Endpoint });
+  }
+  return { ok: true, value: connections };
 }
 
 function parseElement(raw: Record<string, unknown>, path: string): Parsed<PersistedObject> {
@@ -255,6 +302,11 @@ function parseElement(raw: Record<string, unknown>, path: string): Parsed<Persis
     params[key] = value;
   }
 
+  const connections = parseConnections(raw.connections, where);
+  if (!connections.ok) {
+    return connections;
+  }
+
   const element: ElementData = {
     id,
     type: "element",
@@ -266,7 +318,8 @@ function parseElement(raw: Record<string, unknown>, path: string): Parsed<Persis
     params,
     material: common.value.material,
     color: common.value.color,
-    assemblyId: common.value.assemblyId
+    assemblyId: common.value.assemblyId,
+    connections: connections.value
   };
   const validation = validateElement(element);
   if (!validation.valid) {
@@ -275,7 +328,12 @@ function parseElement(raw: Record<string, unknown>, path: string): Parsed<Persis
   return { ok: true, value: element };
 }
 
-function parseObject(raw: unknown, path: string): Parsed<PersistedObject> {
+/**
+ * `derivePlacement` collects the ids of hosted openings saved before
+ * placements were stored: their placement is worked out from their
+ * position once their wall is known (see resolveHosting).
+ */
+function parseObject(raw: unknown, path: string, derivePlacement: Set<string>): Parsed<PersistedObject> {
   if (!isPlainObject(raw)) {
     return fail(`${path} must be an object.`);
   }
@@ -320,7 +378,23 @@ function parseObject(raw: unknown, path: string): Parsed<PersistedObject> {
     if (hostId !== null && !isNonEmptyString(hostId)) {
       return fail(`${where}: hostId must be a wall id or null.`);
     }
+    const rawPlacement = raw.hostPlacement === undefined ? null : raw.hostPlacement;
+    let placement: HostPlacement | null = null;
+    if (rawPlacement !== null) {
+      if (!isPlainObject(rawPlacement) || !isFiniteNumber(rawPlacement.offset) || !isFiniteNumber(rawPlacement.sill)) {
+        return fail(`${where}: hostPlacement must have a finite offset and sill.`);
+      }
+      if (hostId === null) {
+        return fail(`${where}: a free-standing ${objectType} has no hostPlacement.`);
+      }
+      placement = { offset: rawPlacement.offset, sill: rawPlacement.sill };
+    } else if (hostId !== null) {
+      // Saved before placements were stored - worked out from its position once its wall is known.
+      derivePlacement.add(id);
+      placement = { offset: 0, sill: 0 };
+    }
     record.hostId = hostId;
+    record.hostPlacement = placement;
   }
 
   const object = record as unknown as PersistedObject;
@@ -384,6 +458,45 @@ function parseAssembly(raw: unknown, path: string): Parsed<AssemblyData> {
 }
 
 /**
+ * The hosted openings, re-derived from their walls: a placement saved
+ * without one is worked out from the opening's position, and every hosted
+ * opening's position and rotation are recomputed from its wall and
+ * placement - so a loaded opening always sits exactly where its wall says.
+ * Then each must fit its wall and overlap no other opening in it.
+ */
+function resolveHosting(objects: PersistedObject[], derivePlacement: ReadonlySet<string>): string | null {
+  const walls = new Map(objects.filter((object) => object.type === "wall").map((wall) => [wall.id, wall as WallData]));
+  for (let index = 0; index < objects.length; index += 1) {
+    const object = objects[index];
+    if (!isOpening(object) || object.hostId === null) {
+      continue;
+    }
+    const wall = walls.get(object.hostId);
+    if (!wall) {
+      return `${object.id}: hostId "${object.hostId}" is not a wall in this project.`;
+    }
+    const placement = derivePlacement.has(object.id)
+      ? placementFromWorld(wall, object.dimensions, object.position)
+      : (object.hostPlacement as HostPlacement);
+    const transform = hostedTransform(wall, object.dimensions, placement);
+    objects[index] = { ...object, hostPlacement: placement, position: transform.position, rotation: transform.rotation };
+  }
+
+  const hosted = objects.filter((object): object is DoorData | WindowData => isOpening(object) && object.hostId !== null);
+  for (const opening of hosted) {
+    const wall = walls.get(opening.hostId as string) as WallData;
+    const siblings = hosted
+      .filter((other) => other.id !== opening.id && other.hostId === opening.hostId)
+      .map((other) => ({ id: other.id, size: other.dimensions, placement: other.hostPlacement as HostPlacement }));
+    const problems = hostingProblems(wall, { id: opening.id, size: opening.dimensions }, opening.hostPlacement as HostPlacement, siblings);
+    if (problems.length > 0) {
+      return `${opening.id}: ${problems[0]}`;
+    }
+  }
+  return null;
+}
+
+/**
  * Validates an untrusted project document - a request body, a stored
  * record, anything - and returns a sanitized copy containing only the
  * fields ProjectDocument defines. Nothing is loaded or stored unless the
@@ -397,9 +510,13 @@ function parseAssembly(raw: unknown, path: string): Parsed<AssemblyData> {
  *   element's unknown or invalid parameters
  * - a non-finite position or rotation, a blank material, a bad color -
  *   and anything else the type's own validator rejects
- * - an assembly member that isn't an object in the document, an object
- *   whose assemblyId names no assembly in it, or a door/window whose
- *   hostId names no wall in it
+ * - an assembly member that isn't an object in the document, or an object
+ *   whose assemblyId names no assembly in it
+ * - a door or window whose hostId names no wall in it, that doesn't fit
+ *   its wall, or that overlaps another opening in it (a hosted opening's
+ *   position is re-derived from its wall - see resolveHosting)
+ * - a connection to a missing element, between incompatible kinds, not
+ *   recorded on both elements, or between endpoints that don't meet
  */
 export function parseProjectDocument(value: unknown): ParsedProjectDocument {
   if (!isPlainObject(value)) {
@@ -420,8 +537,9 @@ export function parseProjectDocument(value: unknown): ParsedProjectDocument {
 
   const objects: PersistedObject[] = [];
   const objectIds = new Set<string>();
+  const derivePlacement = new Set<string>();
   for (let index = 0; index < value.objects.length; index += 1) {
-    const parsed = parseObject(value.objects[index], `objects[${index}]`);
+    const parsed = parseObject(value.objects[index], `objects[${index}]`, derivePlacement);
     if (!parsed.ok) {
       return { ok: false, error: parsed.error };
     }
@@ -458,10 +576,14 @@ export function parseProjectDocument(value: unknown): ParsedProjectDocument {
     return { ok: false, error: `${orphan.id}: assemblyId "${orphan.assemblyId}" is not an assembly in this project.` };
   }
 
-  const wallIds = new Set(objects.filter((object) => object.type === "wall").map((object) => object.id));
-  const unhosted = objects.find((object) => isOpening(object) && object.hostId !== null && !wallIds.has(object.hostId));
-  if (unhosted && isOpening(unhosted)) {
-    return { ok: false, error: `${unhosted.id}: hostId "${unhosted.hostId}" is not a wall in this project.` };
+  const hostingError = resolveHosting(objects, derivePlacement);
+  if (hostingError !== null) {
+    return { ok: false, error: hostingError };
+  }
+
+  const connectionError = connectionProblems(objects.filter(isElement))[0];
+  if (connectionError !== undefined) {
+    return { ok: false, error: connectionError };
   }
 
   return { ok: true, document: { version: PROJECT_DOCUMENT_VERSION, objects, assemblies } };

@@ -5,6 +5,22 @@ export type ElementId = ObjectId;
 /** Non-dimensional parameters a kind declares (see ParamSpec in catalog.ts) - e.g. a stair's step count. */
 export type ElementParams = Record<string, number | string>;
 
+/** The two ends of a linear element (pipe, conduit, cable): start is its local -X end, end its local +X end. */
+export type Endpoint = "start" | "end";
+
+/**
+ * One endpoint connection: this element's `endpoint` is joined to
+ * `objectId`'s `objectEndpoint`. Every connection is recorded on BOTH
+ * elements, mirrored, and the two endpoints always coincide - see
+ * engine/connections/connections.ts. Only element.connect and
+ * element.disconnect change connections.
+ */
+export interface ElementConnection {
+  endpoint: Endpoint;
+  objectId: string;
+  objectEndpoint: Endpoint;
+}
+
 /**
  * One parametric construction element - a foundation, roof, stair,
  * flooring, pipe, socket, bed, tree, room, and every other kind in the
@@ -17,6 +33,9 @@ export type ElementParams = Record<string, number | string>;
  * - `label`: the name shown to people (a room's name, "Master Bedroom").
  *   Defaults to the kind's label.
  * - `params`: the kind's non-dimensional parameters.
+ * - `connections`: endpoint connections to other elements of a
+ *   compatible kind (water pipe to water pipe, cable to cable, ...).
+ *   Always empty for kinds without endpoints.
  *
  * `type` is always "element": the six original types keep their own
  * stores; every newer kind shares ElementStore, commands, history, and
@@ -26,4 +45,5 @@ export interface ElementData extends ConstructionObjectBase<"element", Record<st
   kind: string;
   label: string;
   params: ElementParams;
+  connections: ElementConnection[];
 }

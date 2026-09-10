@@ -57,10 +57,17 @@ shape itself before doing anything.
 | `wall.update` | `id`, `changes` (same shape `WallStore.update()` takes) | Routes through `WallHistoryController.update()` |
 | `wall.delete` | `id` | Routes through `WallHistoryController.remove()` |
 | `wall.duplicate` | `id` | Builds a copy via `duplicateWallData()`, routes through `WallHistoryController.add()` |
-| `pillar.*`, `beam.*`, `slab.*`, `door.*`, `window.*` | The same four commands with that type's own options - `door.add`/`window.add` also take `hostId`, the wall the opening belongs to | Route through that type's own history controller |
+| `pillar.*`, `beam.*`, `slab.*`, `door.*`, `window.*` | The same four commands with that type's own options | Route through that type's own history controller |
+| `door.add` / `window.add` with `hostId` | Plus optional `offset` (along the wall from its center) and `sill` (above its base) | Puts the opening INTO that wall: its `hostPlacement` is stored and its position/rotation derived from the wall. Without offset: the first free spot. Refused if the host isn't an existing wall, the opening doesn't fit, or it overlaps another opening in the wall. |
+| `door.update` / `window.update` on a hosted opening | `hostPlacement` (offset/sill), `position` (projected onto the wall), `hostId` (another wall, or `null` to take it out) | Stays constrained to its wall; a rotation of its own is refused. |
+| `wall.update` / `wall.delete` | as before | The wall's openings follow it (one undo step); a change that leaves an opening that no longer fits is refused. Deleting a wall deletes its openings. |
+| `element.connect` | `from`, `to`: `{ id, endpoint? }` - two linear elements of compatible kinds | Joins the nearest (or the named) endpoints if within 0.3 m: snaps `from`'s endpoint onto `to`'s and records the connection on both. One undo step. |
+| `element.disconnect` | `from`, `to` (endpoints optional) | Removes the connection(s) from both elements. |
+| `object.align` | `id`, `targetId`, `axis`: `"x"`, `"z"`, or `"both"` | Lines `id`'s center up with the target's, through `update_object`. |
+| `object.snap` | `id`, `targetId`, `mode`: `"endpoint"` or `"wall"` | `endpoint`: moves `id` so its nearest key point lands on the target's (connecting two compatible pipes); `wall`: puts a door or window into the target wall. |
 | `element.add` | `element: CreateElementOptions` - a catalog `kind` (required) plus any of `label`, `position`, `rotation`, `dimensions`, `params`, `material`, `color` | Rejects an unknown kind with a clear message; otherwise builds the element with the catalog's defaults and routes through `ElementHistoryController.add()` - the store validates it against its kind. One command for every element kind (see `elements/README.md`). |
-| `element.update` | `id`, `changes` (same shape `ElementStore.update()` takes; the kind can't change) | Routes through `ElementHistoryController.update()` |
-| `element.delete` | `id` | Routes through `ElementHistoryController.remove()` |
+| `element.update` | `id`, `changes` (same shape `ElementStore.update()` takes; the kind and connections can't change) | Routes through `ElementHistoryController.update()`; for a connected element, the joined endpoints follow (one undo step) |
+| `element.delete` | `id` | Routes through `ElementHistoryController.remove()`, first removing its connections from its neighbors |
 | `element.duplicate` | `id` | Builds a copy via `duplicateElementData()`, routes through `ElementHistoryController.add()` |
 | `update_object` | `objectId`, `changes` - all partial: `dimensions` the object already has, `position` (any of x/y/z), `rotation` (radians, or `{ y }`), `material`, `color`; for an element also `label` and `params` (merged over its current parameters) | Edits any type by id. Resolves the type with `resolveConstructionObject()`, merges the change over the object's current values, then runs that type's own `<type>.update` - so validation, the grounding rule, and the single history entry match a UI edit. Rejects an unknown id and any property the model doesn't have; never creates an object. |
 

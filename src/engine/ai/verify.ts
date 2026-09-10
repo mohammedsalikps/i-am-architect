@@ -1661,7 +1661,8 @@ async function run(): Promise<void> {
   });
 
   await check("G. an empty project gets a valid, empty geometry section", async () => {
-    assertDeepEqual(emptyContext.geometry, { objects: [], relationships: [], invalidObjects: [] }, "empty geometry");
+    // hosts and connections arrived with wall hosting and endpoint connections.
+    assertDeepEqual(emptyContext.geometry, { objects: [], relationships: [], invalidObjects: [], hosts: [], connections: [] }, "empty geometry");
 
     const provider = makeRecordingProvider();
     await new AICommandPipeline(provider, makeExecutorSpy()).run("What is here?", emptySnapshot);

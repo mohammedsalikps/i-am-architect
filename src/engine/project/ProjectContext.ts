@@ -146,7 +146,11 @@ export function createProjectContext(): ProjectContext {
     windowStore,
     windowHistory,
     elementStore,
-    elementHistory
+    elementHistory,
+    // The same HistoryManager every controller records into: a change that
+    // spans several objects (a wall and its openings, joined pipes) is one
+    // undo step.
+    history
   );
   const projectMeta = new ProjectMetaStore();
 

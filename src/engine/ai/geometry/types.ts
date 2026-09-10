@@ -108,6 +108,34 @@ export interface InvalidObjectGeometry {
   errors: GeometryError[];
 }
 
+/** A door or window hosted by a wall, checked against that wall. */
+export interface HostRelationship {
+  /** The door's or window's id. */
+  opening: string;
+  /** Its hostId. */
+  wall: string;
+  /** Along the wall from its center, in meters - null when the wall is missing. */
+  offset: number | null;
+  /** Height of the opening's bottom above the wall's base - null when the wall is missing. */
+  sill: number | null;
+  /** True when the wall exists and the opening sits in it: centered in its thickness, turned with it, within its length and height, overlapping no other opening in it. */
+  valid: boolean;
+  problems: string[];
+}
+
+/** One connection between two endpoints, reported once per pair. */
+export interface ConnectionRelationship {
+  a: string;
+  aEndpoint: "start" | "end";
+  b: string;
+  bEndpoint: "start" | "end";
+  /** Distance between the two endpoints, in meters - null when b is missing. */
+  gap: number | null;
+  /** True when b exists, the kinds connect, the connection is recorded on both, and the endpoints meet. */
+  valid: boolean;
+  problems: string[];
+}
+
 export interface ConstructionGeometryAnalysis {
   /** Every object with valid geometry, sorted by id. */
   objects: ObjectGeometry[];
@@ -115,4 +143,8 @@ export interface ConstructionGeometryAnalysis {
   relationships: ObjectPairRelationship[];
   /** Objects whose geometry couldn't be derived, sorted by id. Always empty for a snapshot built from the real stores, which reject such objects. */
   invalidObjects: InvalidObjectGeometry[];
+  /** Every hosted door and window, sorted by opening id. A hosted opening's box legitimately overlaps its wall's. */
+  hosts: HostRelationship[];
+  /** Every endpoint connection, once per pair, sorted by a, then b. */
+  connections: ConnectionRelationship[];
 }

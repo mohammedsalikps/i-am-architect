@@ -48,16 +48,12 @@ positions, never stored, so nothing goes stale when objects move.
 [roomPresets.ts](roomPresets.ts) holds the Living Room, Kitchen, Master
 Bedroom, Bedroom, Bathroom, and Dining Room presets the ribbon offers.
 
-## Openings hosted by walls
+## Openings hosted by walls, and connections
 
-Doors and windows have a `hostId`: the wall they belong to, or `null` for a
-free-standing one (the default, and every duplicate).
-[openings/hostOpening.ts](../openings/hostOpening.ts) places a hosted
-opening flush against its wall's face, turned with it, at sill height for a
-window. Walls are not cut (no boolean geometry yet); the relationship is
-what future hosting builds on. A saved project never references a missing
-wall: an opening whose wall was deleted is saved unhosted, and a document
-naming a wall it doesn't contain is rejected.
+Doors and windows can sit in a wall (`hostId` + a relative
+`hostPlacement`), move and turn with it, and are drawn as holes in it.
+Pipes, conduits and cables have endpoints that connect to compatible
+ones. See [relationships/README.md](../relationships/README.md).
 
 ## Finishes and paint
 
@@ -79,7 +75,7 @@ duplicate → delete → undo → redo → save/reopen lifecycle.
 
 ## Not modeled (yet)
 
-No boolean cuts for openings, no connections or flow between pipes and
-fittings, no circuits, no structural, hydraulic, or electrical load
+No CSG openings in non-rectangular walls, no fittings or flow between
+pipes, no circuits, no structural, hydraulic, or electrical load
 calculations, no code compliance, and no terrain. Room membership is by
 object center only.

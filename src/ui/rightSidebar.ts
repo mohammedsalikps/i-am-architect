@@ -5,6 +5,7 @@ import type { ElementKindDefinition, ParamSpec } from "../engine/elements/catalo
 import { MATERIAL_LIBRARY, getMaterial, materialsFor } from "../engine/materials/materialLibrary";
 import type { MaterialDefinition } from "../engine/materials/materialLibrary";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
+import { isConnectable, kindsConnect } from "../engine/connections/connections";
 import { resolveConstructionObject } from "../engine/objects/resolveConstructionObject";
 import type { WallData } from "../engine/wall/types";
 import type { WallStore } from "../engine/wall/WallStore";
@@ -81,11 +82,15 @@ function numberInputRow(
   onChange: (value: number) => void | boolean,
   options: NumberInputOptions
 ): HTMLElement {
+  // Shown to 4 decimals - a derived value (a hosted door's position in a
+  // turned wall) would otherwise show float noise. Display only: the model
+  // changes only when a new value is typed.
+  const shown = String(Math.round(value * 10000) / 10000);
   const input = el("input", {
     className: "property-row__input",
     attrs: {
       type: "number",
-      value: String(value),
+      value: shown,
       step: String(options.step),
       "aria-label": label,
       ...(options.min !== undefined ? { min: String(options.min) } : {}),
@@ -103,7 +108,7 @@ function numberInputRow(
     if (isValid && onChange(parsed) !== false) {
       return;
     }
-    input.value = String(value); // revert invalid (or rejected) input
+    input.value = shown; // revert invalid (or rejected) input
   });
   commitOnEnter(input);
 
@@ -555,11 +560,7 @@ function buildDoorPanels(
 ): HTMLElement[] {
   const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
 
-  const properties = section("Properties", [
-    readOnlyRow("Name", "Door"),
-    readOnlyRow("Type", door.type),
-    readOnlyRow("Host wall", hostLabel)
-  ]);
+  const properties = section("Properties", [readOnlyRow("Name", "Door"), readOnlyRow("Type", door.type)]);
 
   const rotationDegrees = displayDegrees(door.rotation);
 
@@ -586,9 +587,12 @@ function buildDoorPanels(
       (value) => updateDoor({ position: { ...door.position, z: value } }),
       { step: 0.1 }
     ),
-    numberInputRow("Rotation Y", rotationDegrees, (value) => updateDoor({ rotation: degreesToRadians(value) }), {
-      step: 1
-    })
+    // A door in a wall turns with the wall - its rotation isn't its own.
+    door.hostId
+      ? readOnlyRow("Rotation Y", `${rotationDegrees}° (turns with ${hostLabel})`)
+      : numberInputRow("Rotation Y", rotationDegrees, (value) => updateDoor({ rotation: degreesToRadians(value) }), {
+          step: 1
+        })
   ]);
 
   const dimensions = section("Dimensions", [
@@ -632,11 +636,7 @@ function buildWindowPanels(
 ): HTMLElement[] {
   const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
 
-  const properties = section("Properties", [
-    readOnlyRow("Name", "Window"),
-    readOnlyRow("Type", windowData.type),
-    readOnlyRow("Host wall", hostLabel)
-  ]);
+  const properties = section("Properties", [readOnlyRow("Name", "Window"), readOnlyRow("Type", windowData.type)]);
 
   const rotationDegrees = displayDegrees(windowData.rotation);
 
@@ -663,12 +663,15 @@ function buildWindowPanels(
       (value) => updateWindow({ position: { ...windowData.position, z: value } }),
       { step: 0.1 }
     ),
-    numberInputRow(
-      "Rotation Y",
-      rotationDegrees,
-      (value) => updateWindow({ rotation: degreesToRadians(value) }),
-      { step: 1 }
-    )
+    // A window in a wall turns with the wall - its rotation isn't its own.
+    windowData.hostId
+      ? readOnlyRow("Rotation Y", `${rotationDegrees}° (turns with ${hostLabel})`)
+      : numberInputRow(
+          "Rotation Y",
+          rotationDegrees,
+          (value) => updateWindow({ rotation: degreesToRadians(value) }),
+          { step: 1 }
+        )
   ]);
 
   const dimensions = section("Dimensions", [
@@ -1068,8 +1071,173 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     return [buildEmptyState()];
   };
 
+  // --- Relationships: host wall, a wall's openings, connections, alignment ---
+
+  /** Shows a command's refusal under the controls that issued it (a success re-renders the panel anyway). */
+  const feedback = (result: { success: boolean; message?: string }, note: HTMLElement): boolean => {
+    note.textContent = result.success ? "" : result.message ?? "That change was refused.";
+    return result.success;
+  };
+
+  const hostSection = (opening: DoorData | WindowData, type: "door" | "window"): HTMLElement => {
+    const note = el("p", { className: "relation-note", attrs: { role: "status" } });
+    const update = (changes: Record<string, unknown>): boolean =>
+      feedback(options.commandExecutor.execute({ type: `${type}.update`, id: opening.id, changes }), note);
+    const walls = options.wallStore.getAll();
+    const rows: HTMLElement[] = [
+      selectRow(
+        "Host wall",
+        opening.hostId ?? "",
+        [{ value: "", label: "None (free-standing)" }, ...walls.map((wall) => ({ value: wall.id, label: wall.id }))],
+        (value) => {
+          update({ hostId: value === "" ? null : value });
+        }
+      )
+    ];
+    if (opening.hostId && opening.hostPlacement) {
+      const placement = opening.hostPlacement;
+      rows.push(
+        numberInputRow("Along wall", placement.offset, (value) => update({ hostPlacement: { offset: value, sill: placement.sill } }), { step: 0.1 }),
+        numberInputRow("Sill height", placement.sill, (value) => update({ hostPlacement: { offset: placement.offset, sill: value } }), {
+          min: 0,
+          step: 0.05
+        })
+      );
+    }
+    rows.push(note);
+    return section("Host", rows);
+  };
+
+  const openingsSection = (wall: WallData): HTMLElement => {
+    const openings = [...options.doorStore.getAll(), ...options.windowStore.getAll()].filter((opening) => opening.hostId === wall.id);
+    const items = openings.map((opening) => {
+      const along = opening.hostPlacement ? `, ${opening.hostPlacement.offset.toFixed(2)} m along` : "";
+      const button = el("button", {
+        className: "room-contents__item",
+        text: `${opening.type === "door" ? "Door" : "Window"} — ${opening.id}${along}`,
+        attrs: { type: "button" }
+      });
+      button.addEventListener("click", () => options.selectionStore.select(opening.id));
+      return button;
+    });
+    return section("Openings", [
+      readOnlyRow("In this wall", openings.length === 0 ? "None" : String(openings.length)),
+      el("div", { className: "room-contents" }, items)
+    ]);
+  };
+
+  const connectionsSection = (element: ElementData): HTMLElement => {
+    const note = el("p", { className: "relation-note", attrs: { role: "status" } });
+    const rows = element.connections.map((connection) => {
+      const disconnect = el("button", {
+        className: "toolbar-button connection-row__action",
+        text: "Disconnect",
+        attrs: { type: "button", "aria-label": `Disconnect ${element.id} ${connection.endpoint} from ${connection.objectId}` }
+      });
+      disconnect.addEventListener("click", () =>
+        feedback(
+          options.commandExecutor.execute({
+            type: "element.disconnect",
+            from: { id: element.id, endpoint: connection.endpoint },
+            to: { id: connection.objectId, endpoint: connection.objectEndpoint }
+          }),
+          note
+        )
+      );
+      return el("div", { className: "connection-row" }, [
+        el("span", { className: "connection-row__label", text: `${connection.endpoint} ↔ ${connection.objectId} ${connection.objectEndpoint}` }),
+        disconnect
+      ]);
+    });
+
+    const candidates = options.elementStore.getAll().filter((other) => other.id !== element.id && kindsConnect(element.kind, other.kind));
+    const connectRows: HTMLElement[] = [];
+    if (candidates.length > 0) {
+      const target = el(
+        "select",
+        { className: "property-row__input property-row__select", attrs: { "aria-label": "Connect to" } },
+        candidates.map((candidate) => el("option", { text: `${candidate.label} — ${candidate.id}`, attrs: { value: candidate.id } }))
+      );
+      const connect = el("button", { className: "toolbar-button", text: "Connect", attrs: { type: "button" } });
+      connect.addEventListener("click", () =>
+        feedback(options.commandExecutor.execute({ type: "element.connect", from: { id: element.id }, to: { id: target.value } }), note)
+      );
+      connectRows.push(
+        el("div", { className: "property-row" }, [el("span", { className: "property-row__label", text: "Connect to" }), target]),
+        el("div", { className: "relation-actions" }, [connect])
+      );
+    }
+    return section("Connections", [...(rows.length > 0 ? rows : [readOnlyRow("Connected", "None")]), ...connectRows, note]);
+  };
+
+  const alignSection = (id: string, isOpening: boolean): HTMLElement => {
+    const note = el("p", { className: "relation-note", attrs: { role: "status" } });
+    const others = allObjects().filter((object) => object.id !== id);
+    const target = el(
+      "select",
+      { className: "property-row__input property-row__select", attrs: { "aria-label": "Align with" } },
+      others.map((object) => el("option", { text: describeListed(object), attrs: { value: object.id } }))
+    );
+    const actions: [string, Record<string, unknown>][] = [
+      ["Align X", { type: "object.align", axis: "x" }],
+      ["Align Z", { type: "object.align", axis: "z" }],
+      ["Align centers", { type: "object.align", axis: "both" }],
+      ["Snap to endpoint", { type: "object.snap", mode: "endpoint" }],
+      ...(isOpening ? [["Snap to wall", { type: "object.snap", mode: "wall" }] as [string, Record<string, unknown>]] : [])
+    ];
+    const buttons = actions.map(([label, command]) => {
+      const button = el("button", { className: "toolbar-button", text: label, attrs: { type: "button" } });
+      button.addEventListener("click", () => feedback(options.commandExecutor.execute({ ...command, id, targetId: target.value }), note));
+      button.disabled = others.length === 0;
+      return button;
+    });
+    return section("Align & snap", [
+      el("div", { className: "property-row" }, [el("span", { className: "property-row__label", text: "Align with" }), target]),
+      el("div", { className: "relation-actions" }, buttons),
+      note
+    ]);
+  };
+
+  const relationshipPanels = (selectedId: string | null): HTMLElement[] => {
+    if (!selectedId) {
+      return [];
+    }
+    const resolved = resolveConstructionObject(selectedId, {
+      wallStore: options.wallStore,
+      pillarStore: options.pillarStore,
+      beamStore: options.beamStore,
+      slabStore: options.slabStore,
+      doorStore: options.doorStore,
+      windowStore: options.windowStore,
+      elementStore: options.elementStore
+    });
+    if (!resolved) {
+      return [];
+    }
+    const panels: HTMLElement[] = [];
+    const wall = options.wallStore.get(selectedId);
+    const door = options.doorStore.get(selectedId);
+    const windowData = options.windowStore.get(selectedId);
+    const element = options.elementStore.get(selectedId);
+    if (wall) {
+      panels.push(openingsSection(wall));
+    }
+    if (door) {
+      panels.push(hostSection(door, "door"));
+    }
+    if (windowData) {
+      panels.push(hostSection(windowData, "window"));
+    }
+    if (element && isConnectable(element.kind)) {
+      panels.push(connectionsSection(element));
+    }
+    panels.push(alignSection(selectedId, !!door || !!windowData));
+    return panels;
+  };
+
   const render = (): void => {
-    properties.replaceChildren(...panelsFor(options.selectionStore.get()));
+    const selectedId = options.selectionStore.get();
+    properties.replaceChildren(...panelsFor(selectedId), ...relationshipPanels(selectedId));
   };
 
   options.wallStore.subscribe(render);

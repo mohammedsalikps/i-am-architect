@@ -79,8 +79,17 @@ export function validateDoor(door: DoorData): DoorValidationResult {
   }
 
   // Absent is treated as null, so a door built before hosting existed still validates.
-  if (door.hostId !== undefined && door.hostId !== null && !isNonEmptyString(door.hostId)) {
+  const hostId = door.hostId ?? null;
+  const hostPlacement = door.hostPlacement ?? null;
+  if (hostId !== null && !isNonEmptyString(hostId)) {
     errors.push({ field: "hostId", message: "hostId must be a wall id, or null." });
+  } else if (hostId === null && hostPlacement !== null) {
+    errors.push({ field: "hostPlacement", message: "A free-standing door has no placement in a wall." });
+  } else if (
+    hostId !== null &&
+    (hostPlacement === null || !Number.isFinite(hostPlacement.offset) || !Number.isFinite(hostPlacement.sill))
+  ) {
+    errors.push({ field: "hostPlacement", message: "A door in a wall needs a finite offset and sill in it." });
   }
 
   return { valid: errors.length === 0, errors };

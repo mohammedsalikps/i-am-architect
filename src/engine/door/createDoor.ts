@@ -1,4 +1,5 @@
 import type { Vector3Data } from "../objects/types";
+import type { HostPlacement } from "../openings/hostOpening";
 import type { DoorData } from "./types";
 
 export interface CreateDoorOptions {
@@ -11,6 +12,12 @@ export interface CreateDoorOptions {
   color?: string;
   /** The wall hosting this door, if any - see engine/openings/hostOpening.ts. */
   hostId?: string | null;
+  /** Where the door sits in its wall. CommandExecutor computes it; pass it only with a hostId. */
+  hostPlacement?: HostPlacement | null;
+  /** door.add only: along the host wall from its center, in meters. Omitted: the first free spot from the center. */
+  offset?: number;
+  /** door.add only: above the host wall's base, in meters. Omitted: 0. */
+  sill?: number;
 }
 
 const DEFAULTS = {
@@ -40,10 +47,15 @@ export function reserveDoorIds(ids: Iterable<string>): void {
  * (y = height / 2) unless a full position is supplied. Options stay
  * flat (width/height/thickness) for a simple call site - only the
  * stored DoorData nests them under `dimensions`.
+ *
+ * A hosted door's position is derived from its wall - CommandExecutor
+ * does that (door.add with a hostId), since it's the one that can see
+ * the wall. This factory only copies what it's given.
  */
 export function createDoorData(options: CreateDoorOptions = {}): DoorData {
   const height = options.height ?? DEFAULTS.height;
   const position: Vector3Data = { x: 0, y: height / 2, z: 0, ...options.position };
+  const hostId = options.hostId ?? null;
 
   const door: DoorData = {
     id: `door-${nextId++}`,
@@ -58,7 +70,8 @@ export function createDoorData(options: CreateDoorOptions = {}): DoorData {
     material: options.material ?? DEFAULTS.material,
     color: options.color ?? DEFAULTS.color,
     assemblyId: null,
-    hostId: options.hostId ?? null
+    hostId,
+    hostPlacement: hostId === null ? null : options.hostPlacement ?? null
   };
 
   return door;
@@ -71,7 +84,7 @@ const DUPLICATE_OFFSET = 0.75;
  * Creates an independent copy of a door: same dimensions, material,
  * color and rotation, a fresh unique id (via createDoorData's own
  * counter), and a small position offset so the two don't overlap. The
- * offset takes it off its wall's face, so the copy isn't hosted.
+ * offset takes it out of its wall, so the copy is free-standing.
  */
 export function duplicateDoorData(door: DoorData): DoorData {
   return createDoorData({

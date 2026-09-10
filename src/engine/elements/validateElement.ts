@@ -122,5 +122,54 @@ export function validateElement(element: ElementData): ElementValidationResult {
     }
   }
 
+  validateConnections(element, definition?.connectsWith.length ? definition.label : null, errors);
+
   return { valid: errors.length === 0, errors };
+}
+
+const ENDPOINT_NAMES: readonly string[] = ["start", "end"];
+
+/**
+ * The per-element rules for `connections` (the cross-element ones - the
+ * other element exists, is compatible, lists the connection back, and its
+ * endpoint coincides - are in connections/connections.ts): a list; only a
+ * connectable kind has any; every entry names this element's endpoint,
+ * another element, and that element's endpoint; no entry is repeated, and
+ * one endpoint joins a given element only once.
+ */
+function validateConnections(element: ElementData, connectableLabel: string | null, errors: ElementValidationError[]): void {
+  if (!Array.isArray(element.connections)) {
+    errors.push({ field: "connections", message: "Connections must be a list." });
+    return;
+  }
+  if (connectableLabel === null && element.connections.length > 0) {
+    errors.push({ field: "connections", message: "This kind of element has no endpoints to connect." });
+    return;
+  }
+  const seen = new Set<string>();
+  element.connections.forEach((connection, index) => {
+    const field = `connections[${index}]`;
+    if (!isPlainObject(connection)) {
+      errors.push({ field, message: "A connection must be an object." });
+      return;
+    }
+    if (!ENDPOINT_NAMES.includes(connection.endpoint) || !ENDPOINT_NAMES.includes(connection.objectEndpoint)) {
+      errors.push({ field, message: 'A connection joins endpoints named "start" or "end".' });
+      return;
+    }
+    if (!isNonEmptyString(connection.objectId)) {
+      errors.push({ field, message: "A connection must name the element it joins." });
+      return;
+    }
+    if (connection.objectId === element.id) {
+      errors.push({ field, message: "An element can't connect to itself." });
+      return;
+    }
+    const key = `${connection.endpoint}>${connection.objectId}`;
+    if (seen.has(key)) {
+      errors.push({ field, message: `The ${connection.endpoint} is already connected to ${connection.objectId}.` });
+      return;
+    }
+    seen.add(key);
+  });
 }

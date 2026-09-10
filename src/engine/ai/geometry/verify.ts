@@ -509,7 +509,8 @@ function run(): void {
   // --- L. Empty project ---
 
   check("L. an empty project gives an empty analysis", () => {
-    assertSameJson(analyze([]), { objects: [], relationships: [], invalidObjects: [] }, "empty analysis");
+    // hosts and connections arrived with wall hosting and endpoint connections.
+    assertSameJson(analyze([]), { objects: [], relationships: [], invalidObjects: [], hosts: [], connections: [] }, "empty analysis");
   });
 
   // --- M. Snapshot immutability ---

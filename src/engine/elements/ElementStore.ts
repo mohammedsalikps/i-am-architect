@@ -25,7 +25,9 @@ function notFound(id: ElementId): ElementValidationResult {
  * - an element's kind never changes after it is created
  * - when the kind's vertical dimension changes without an explicit
  *   position, the base stays where it was (objects/grounding.ts) - a
- *   light keeps hanging from the ceiling, a flooring stays on its slab
+ *   light keeps hanging from the ceiling, a flooring stays on its slab.
+ *   A linear element (pipe, conduit, cable) keeps its axis instead, so
+ *   its connected joints stay put.
  */
 export class ElementStore {
   private readonly registry = new ObjectRegistry<ElementData>();
@@ -59,7 +61,9 @@ export class ElementStore {
 
     let effectiveChanges: ElementChanges = changes;
     const definition = getElementKind(existing.kind);
-    if (definition && changes.position === undefined) {
+    // A linear element (pipe, conduit, cable) is routed by its axis: a new
+    // diameter keeps the axis - and every joint on it - where it is.
+    if (definition && !definition.linear && changes.position === undefined) {
       const verticalKey = definition.axes.y;
       const next = changes.dimensions?.[verticalKey];
       const current = existing.dimensions[verticalKey];

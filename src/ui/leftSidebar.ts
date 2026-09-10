@@ -19,6 +19,8 @@ interface HierarchyObject {
   id: string;
   kind?: string;
   label?: string;
+  hostId?: string | null;
+  connections?: readonly unknown[];
 }
 
 interface ObjectSource {
@@ -42,7 +44,19 @@ function elementOrder(object: HierarchyObject): number {
 }
 
 function originalSource(label: string, store: ObjectSource["store"]): ObjectSource {
-  return { store, labelOf: () => label, orderOf: (object) => idNumber(object.id) };
+  return {
+    store,
+    // A door or window in a wall says which: "Door in wall-3".
+    labelOf: (object) => (typeof object.hostId === "string" ? `${label} in ${object.hostId}` : label),
+    orderOf: (object) => idNumber(object.id)
+  };
+}
+
+/** An element's name, with how many endpoint connections it has, if any. */
+function elementLabel(object: HierarchyObject): string {
+  const name = object.label ?? object.kind ?? "Element";
+  const count = object.connections?.length ?? 0;
+  return count === 0 ? name : `${name} (${count} connection${count === 1 ? "" : "s"})`;
 }
 
 /**
@@ -145,7 +159,7 @@ export function createLeftSidebar(
     originalSource("Slab", slabStore),
     originalSource("Door", doorStore),
     originalSource("Window", windowStore),
-    { store: elementStore, labelOf: (object) => object.label ?? object.kind ?? "Element", orderOf: elementOrder }
+    { store: elementStore, labelOf: elementLabel, orderOf: elementOrder }
   ];
 
   const { strip, panel } = createTabStrip(

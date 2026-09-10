@@ -21,6 +21,24 @@ export function buildSelectionOutline(mesh: THREE.Mesh): THREE.LineSegments {
   return outline;
 }
 
+/** A hidden-by-default outline of a whole box - for a mesh whose own edges would show internal seams (a wall with openings). */
+export function buildBoxOutline(width: number, height: number, depth: number): THREE.LineSegments {
+  const box = new THREE.BoxGeometry(width, height, depth);
+  const outline = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: OUTLINE_COLOR }));
+  box.dispose();
+  outline.scale.setScalar(OUTLINE_SCALE);
+  outline.visible = false;
+  return outline;
+}
+
+/** Re-sizes a box outline. */
+export function refreshBoxOutline(outline: THREE.LineSegments, width: number, height: number, depth: number): void {
+  const box = new THREE.BoxGeometry(width, height, depth);
+  outline.geometry.dispose();
+  outline.geometry = new THREE.EdgesGeometry(box);
+  box.dispose();
+}
+
 /** Re-derives the outline geometry after the parent mesh's geometry has been rebuilt. */
 export function refreshSelectionOutline(outline: THREE.LineSegments, mesh: THREE.Mesh): void {
   outline.geometry.dispose();

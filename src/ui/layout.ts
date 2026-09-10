@@ -22,6 +22,7 @@ import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
+import type { SnapSettings } from "../engine/snapping/SnapSettings";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
@@ -54,7 +55,24 @@ export type AppShellOptions = {
   selectionStore: SelectionStore;
   history: HistoryManager;
   commandExecutor: CommandExecutor;
+  /** Whether drags snap - shown and toggled by the viewport's Snap button. */
+  snapSettings: SnapSettings;
 };
+
+/** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
+function createSnapToggle(snapSettings: SnapSettings): HTMLElement {
+  const button = el("button", {
+    className: "view-controls__button snap-toggle",
+    attrs: { type: "button", title: "Snap to endpoints, corners, walls, and the 0.1 m grid while dragging" }
+  });
+  button.addEventListener("click", () => snapSettings.toggle());
+  snapSettings.subscribe((enabled) => {
+    button.textContent = enabled ? "Snap: On" : "Snap: Off";
+    button.setAttribute("aria-pressed", String(enabled));
+    button.classList.toggle("snap-toggle--on", enabled);
+  });
+  return el("div", { className: "view-controls" }, [button]);
+}
 
 export type AppShell = {
   /** Root element to mount into #app. */
@@ -136,7 +154,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // purely a viewport concern, so they're now an overlay on the
   // viewport itself instead of competing for header space.
   const viewControls = createViewControls(options.onViewChange);
-  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls]);
+  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings)]);
   const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay]);
 
   const body = el("div", { className: "app-body" }, [leftSidebar, viewportArea, rightSidebar]);

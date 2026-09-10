@@ -188,6 +188,66 @@ function toUpdateCommand(
   }
 }
 
+// --- Relationships: an opening in an existing wall, connected endpoints ---
+
+const OBJECT_ID = String.raw`([a-z][a-z0-9]*(?:-[a-z0-9]+)*-\d+)`;
+/** "Add a door to wall-1", "Put a window in wall-3" - a new door or window in an existing wall. */
+const HOSTED_OPENING = new RegExp(
+  String.raw`^(?:add|create|put|place|insert)\s+(?:a|an|one)\s+(door|window)\s+(?:to|in|on|into)\s+(?:the\s+)?${OBJECT_ID}\.?$`,
+  "i"
+);
+/** "Connect water-pipe-1 to water-pipe-2", "Connect cable-1 end to cable-2 start" */
+const CONNECT = new RegExp(
+  String.raw`^(?:connect|join|link)\s+${OBJECT_ID}(?:'s)?(?:\s+(start|end))?\s+(?:to|with|onto)\s+${OBJECT_ID}(?:'s)?(?:\s+(start|end))?\.?$`,
+  "i"
+);
+
+/**
+ * A clause asking for a relationship between existing objects, as a
+ * command - or why it can't be one. Ids must be in the context: an
+ * unknown id never becomes a new object. Returns null for any other
+ * clause.
+ */
+function toRelationshipCommand(
+  clause: string,
+  objects: readonly AIContextObject[],
+  availableObjectTypes: readonly ObjectType[]
+): Command | string | null {
+  const hosted = HOSTED_OPENING.exec(clause);
+  if (hosted) {
+    const type = hosted[1].toLowerCase() as "door" | "window";
+    const wallId = hosted[2].toLowerCase();
+    const wall = objects.find((object) => object.id === wallId);
+    if (!wall) {
+      return `No existing object with id "${wallId}" - no ${type} was added.`;
+    }
+    if (wall.type !== "wall") {
+      return `${wallId} is a ${wall.type}, not a wall - no ${type} was added.`;
+    }
+    if (!availableObjectTypes.includes(type)) {
+      return `A ${type} isn't available in this context.`;
+    }
+    return type === "door" ? { type: "door.add", door: { hostId: wallId } } : { type: "window.add", window: { hostId: wallId } };
+  }
+
+  const connect = CONNECT.exec(clause);
+  if (connect) {
+    const fromId = connect[1].toLowerCase();
+    const toId = connect[3].toLowerCase();
+    for (const id of [fromId, toId]) {
+      if (!objects.some((object) => object.id === id)) {
+        return `No existing object with id "${id}" - nothing was connected.`;
+      }
+    }
+    if (!availableObjectTypes.includes("element")) {
+      return "Elements aren't available in this context - nothing was connected.";
+    }
+    const end = (value: string | undefined) => (value ? { endpoint: value.toLowerCase() as "start" | "end" } : {});
+    return { type: "element.connect", from: { id: fromId, ...end(connect[2]) }, to: { id: toId, ...end(connect[4]) } };
+  }
+  return null;
+}
+
 // --- A whole house (see housePlan.ts) ---
 
 const BUILD_VERB = /\b(?:build|create|design|make|construct|generate|draw)\b/i;
@@ -304,6 +364,12 @@ function planHouse(request: AIProviderRequest): AIProviderResponse {
  * treated as an add: an unknown id, or a dimension the object doesn't
  * have, produces no command and a note instead.
  *
+ * **Relationships.** "Add a door to wall-1" (or a window; "to", "in",
+ * "on", "into") puts a new opening into that existing wall -
+ * `door.add { hostId }`. "Connect water-pipe-1 to water-pipe-2" (with an
+ * optional "start"/"end" after either id) is an `element.connect`. Both
+ * ids must be in the context; otherwise there's a note and no command.
+ *
  * **Notes from the context.** When the instruction names an existing
  * object by id, the notes list each such object with its type. When it
  * names two or more, the notes also carry each named pair's relationship
@@ -336,6 +402,16 @@ export class MockAIProvider implements AIProvider {
           editProblems.push(result);
         } else {
           commands.push(result);
+        }
+        continue;
+      }
+
+      const relationship = toRelationshipCommand(clause, request.projectContext.objects, request.availableObjectTypes);
+      if (relationship) {
+        if (typeof relationship === "string") {
+          editProblems.push(relationship);
+        } else {
+          commands.push(relationship);
         }
         continue;
       }

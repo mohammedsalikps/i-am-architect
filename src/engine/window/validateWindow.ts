@@ -79,8 +79,17 @@ export function validateWindow(windowData: WindowData): WindowValidationResult {
   }
 
   // Absent is treated as null, so a window built before hosting existed still validates.
-  if (windowData.hostId !== undefined && windowData.hostId !== null && !isNonEmptyString(windowData.hostId)) {
+  const hostId = windowData.hostId ?? null;
+  const hostPlacement = windowData.hostPlacement ?? null;
+  if (hostId !== null && !isNonEmptyString(hostId)) {
     errors.push({ field: "hostId", message: "hostId must be a wall id, or null." });
+  } else if (hostId === null && hostPlacement !== null) {
+    errors.push({ field: "hostPlacement", message: "A free-standing window has no placement in a wall." });
+  } else if (
+    hostId !== null &&
+    (hostPlacement === null || !Number.isFinite(hostPlacement.offset) || !Number.isFinite(hostPlacement.sill))
+  ) {
+    errors.push({ field: "hostPlacement", message: "A window in a wall needs a finite offset and sill in it." });
   }
 
   return { valid: errors.length === 0, errors };

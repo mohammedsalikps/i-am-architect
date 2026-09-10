@@ -550,6 +550,50 @@ button {
   text-decoration: underline;
 }
 
+/* ---------- Relationships (Properties panel) ---------- */
+
+.connection-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+
+.connection-row__action {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.relation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.relation-actions .toolbar-button {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.relation-note {
+  margin: 4px 0 0;
+  min-height: 0;
+  font-size: 11px;
+  color: #ff8a80;
+}
+
+.relation-note:empty {
+  display: none;
+}
+
+/* The viewport's Snap toggle. */
+.snap-toggle--on {
+  color: var(--color-accent);
+}
+
 /* ---------- View controls (viewport overlay) ---------- */
 
 .view-controls {

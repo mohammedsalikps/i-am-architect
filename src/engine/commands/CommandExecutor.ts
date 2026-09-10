@@ -18,6 +18,45 @@ import { createElementData, duplicateElementData } from "../elements/createEleme
 import { ElementStore } from "../elements/ElementStore.ts";
 import { getElementKind } from "../elements/catalog.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
+import { validateWall } from "../wall/validateWall.ts";
+import { validateElement } from "../elements/validateElement.ts";
+import { keepBaseY } from "../objects/grounding.ts";
+import {
+  WINDOW_SILL_HEIGHT,
+  clampPlacement,
+  findFreeOffset,
+  hostedTransform,
+  hostingProblems,
+  placementFromWorld,
+  placementNear
+} from "../openings/hostOpening.ts";
+import {
+  CONNECTION_TOLERANCE,
+  ENDPOINTS,
+  endpointsOf,
+  horizontalDistance,
+  isConnectable,
+  jointMembers,
+  kindsConnect,
+  moveEndpoint,
+  networkOf
+} from "../connections/connections.ts";
+import { keyPointsOf } from "../snapping/snapping.ts";
+import type { HostPlacement, HostedOpening, OpeningSize } from "../openings/hostOpening";
+import type { SnapObject, SnapPoint } from "../snapping/snapping";
+import type { WallData } from "../wall/types";
+import type { DoorData } from "../door/types";
+import type { WindowData } from "../window/types";
+import type { CreateDoorOptions } from "../door/createDoor";
+import type { ElementData, Endpoint } from "../elements/types";
+import type { ElementChanges } from "../elements/ElementStore";
+import type {
+  ConnectElementsCommand,
+  DisconnectElementsCommand,
+  AlignObjectsCommand,
+  SnapObjectCommand,
+  HistoryGroupsLike
+} from "./types";
 import type {
   Command,
   CommandResult,
@@ -37,12 +76,8 @@ import type {
   UpdateSlabCommand,
   DeleteSlabCommand,
   DuplicateSlabCommand,
-  AddDoorCommand,
-  UpdateDoorCommand,
   DeleteDoorCommand,
   DuplicateDoorCommand,
-  AddWindowCommand,
-  UpdateWindowCommand,
   DeleteWindowCommand,
   DuplicateWindowCommand,
   AddElementCommand,
@@ -94,6 +129,10 @@ const KNOWN_COMMAND_TYPES = [
   "element.update",
   "element.delete",
   "element.duplicate",
+  "element.connect",
+  "element.disconnect",
+  "object.align",
+  "object.snap",
   "assembly.create",
   "assembly.update",
   "assembly.delete",
@@ -112,6 +151,58 @@ function isCommand(value: unknown): value is Command {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function round(value: number): number {
+  const rounded = Math.round(value * 1e9) / 1e9;
+  return rounded === 0 ? 0 : rounded;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** Whether two rotations around Y are the same direction. */
+function sameAngle(a: number, b: number): boolean {
+  const turn = 2 * Math.PI;
+  const difference = (((a - b) % turn) + turn) % turn;
+  return difference < 1e-6 || turn - difference < 1e-6;
+}
+
+function samePoint(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): boolean {
+  return Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) < 1e-9 && Math.abs(a.z - b.z) < 1e-9;
+}
+
+/** The wall WallStore.update() would store for `changes` - its grounding rule included - without storing it. */
+function previewWall(existing: WallData, changes: Partial<Omit<WallData, "id" | "type">>): WallData {
+  let effective = changes;
+  const height = changes.dimensions?.height;
+  if (height !== undefined && height !== existing.dimensions.height && changes.position === undefined) {
+    effective = { ...changes, position: { ...existing.position, y: keepBaseY(existing.position.y, existing.dimensions.height, height) } };
+  }
+  return { ...existing, ...effective };
+}
+
+/** The element ElementStore.update() would store for `changes`, without storing it. */
+function previewElement(existing: ElementData, changes: ElementChanges): ElementData {
+  let effective = changes;
+  const definition = getElementKind(existing.kind);
+  if (definition && !definition.linear && changes.position === undefined) {
+    const key = definition.axes.y;
+    const next = changes.dimensions?.[key];
+    const current = existing.dimensions[key];
+    if (next !== undefined && next !== current) {
+      effective = { ...changes, position: { ...existing.position, y: keepBaseY(existing.position.y, current, next) } };
+    }
+  }
+  return { ...existing, ...effective };
+}
+
+type OpeningType = "door" | "window";
+type OpeningRecord = DoorData | WindowData;
+
+function fail(message: string, objectId?: string, errors?: { field: string; message: string }[]): CommandResult {
+  return { success: false, ...(objectId !== undefined ? { objectId } : {}), ...(errors ? { errors } : {}), message };
 }
 
 /**
@@ -165,6 +256,7 @@ export class CommandExecutor {
   private readonly elementStore: ElementStore;
   private readonly elementHistory: ElementHistoryLike;
   private readonly assemblyStore: AssemblyStore;
+  private readonly historyGroups: HistoryGroupsLike | undefined;
 
   constructor(
     wallStore: WallStore,
@@ -205,8 +297,15 @@ export class CommandExecutor {
       add: (element) => elementStore.add(element),
       update: (id, changes) => elementStore.update(id, changes),
       remove: (id) => elementStore.remove(id)
-    }
+    },
+    /**
+     * The shared HistoryManager (see ProjectContext), so a change spanning
+     * several objects is one undo step. Optional: without it each object's
+     * change is still recorded, just as separate entries.
+     */
+    historyGroups?: HistoryGroupsLike
   ) {
+    this.historyGroups = historyGroups;
     this.wallStore = wallStore;
     this.wallHistory = wallHistory;
     this.assemblyStore = assemblyStore;
@@ -264,17 +363,17 @@ export class CommandExecutor {
       case "slab.duplicate":
         return this.executeDuplicateSlab(input);
       case "door.add":
-        return this.executeAddDoor(input);
+        return this.executeAddOpening("door", input.door);
       case "door.update":
-        return this.executeUpdateDoor(input);
+        return this.executeUpdateOpening("door", input.id, input.changes);
       case "door.delete":
         return this.executeDeleteDoor(input);
       case "door.duplicate":
         return this.executeDuplicateDoor(input);
       case "window.add":
-        return this.executeAddWindow(input);
+        return this.executeAddOpening("window", input.window);
       case "window.update":
-        return this.executeUpdateWindow(input);
+        return this.executeUpdateOpening("window", input.id, input.changes);
       case "window.delete":
         return this.executeDeleteWindow(input);
       case "window.duplicate":
@@ -287,6 +386,14 @@ export class CommandExecutor {
         return this.executeDeleteElement(input);
       case "element.duplicate":
         return this.executeDuplicateElement(input);
+      case "element.connect":
+        return this.executeConnect(input);
+      case "element.disconnect":
+        return this.executeDisconnect(input);
+      case "object.align":
+        return this.executeAlign(input);
+      case "object.snap":
+        return this.executeSnap(input);
       case "assembly.create":
         return this.executeCreateAssembly(input);
       case "assembly.update":
@@ -321,15 +428,7 @@ export class CommandExecutor {
       return { success: false, message: "update_object command is missing an objectId." };
     }
 
-    const resolved = resolveConstructionObject(objectId, {
-      wallStore: this.wallStore,
-      pillarStore: this.pillarStore,
-      beamStore: this.beamStore,
-      slabStore: this.slabStore,
-      doorStore: this.doorStore,
-      windowStore: this.windowStore,
-      elementStore: this.elementStore
-    });
+    const resolved = resolveConstructionObject(objectId, this.stores());
     const current = resolved ? this.readConstructionObject(resolved.type, objectId) : undefined;
     if (!resolved || !current) {
       return { success: false, objectId, message: `No construction object found with id "${objectId}".` };
@@ -489,6 +588,15 @@ export class CommandExecutor {
             changes.params = { ...(current.params as Record<string, unknown> | undefined), ...value };
           }
           break;
+        case "hostId":
+          if (type !== "door" && type !== "window") {
+            errors.push({ field: "changes.hostId", message: '"hostId" is only editable on doors and windows.' });
+          } else if (value !== null && (typeof value !== "string" || value.length === 0)) {
+            errors.push({ field: "changes.hostId", message: "hostId must be a wall id, or null." });
+          } else {
+            changes.hostId = value;
+          }
+          break;
         default:
           errors.push({ field: `changes.${key}`, message: `"${key}" is not an editable property.` });
       }
@@ -513,35 +621,111 @@ export class CommandExecutor {
     return { success: true, objectId: wall.id, message: "Wall added." };
   }
 
+  /**
+   * Updates a wall. The doors and windows in it follow: each keeps its
+   * placement (its offset pulled back onto a shortened wall) and its world
+   * transform is re-derived from the updated wall - all one undo step. A
+   * change that would leave an opening that no longer fits (the wall too
+   * short or too low for it, or two openings overlapping) is rejected,
+   * and nothing changes.
+   */
   private executeUpdateWall(command: UpdateWallCommand): CommandResult {
     if (!command.id) {
       return { success: false, message: "wall.update command is missing an id." };
     }
 
-    const result = this.wallHistory.update(command.id, command.changes ?? {});
-    if (!result.valid) {
-      return {
-        success: false,
-        objectId: command.id,
-        errors: result.errors,
-        message: "Could not update wall: validation failed."
-      };
+    const id = command.id;
+    const changes = command.changes ?? {};
+    const existing = this.wallStore.get(id);
+    const openings = existing ? this.openingsIn(id) : [];
+
+    if (!existing || openings.length === 0) {
+      const result = this.wallHistory.update(id, changes);
+      if (!result.valid) {
+        return fail("Could not update wall: validation failed.", id, result.errors);
+      }
+      return { success: true, objectId: id, message: "Wall updated." };
     }
-    return { success: true, objectId: command.id, message: "Wall updated." };
+
+    const preview = previewWall(existing, changes);
+    const wallCheck = validateWall(preview);
+    if (!wallCheck.valid) {
+      return fail("Could not update wall: validation failed.", id, wallCheck.errors);
+    }
+    const planned = openings.map(({ type, record }) => ({
+      type,
+      record,
+      placement: clampPlacement(preview, record.dimensions, record.hostPlacement ?? placementFromWorld(existing, record.dimensions, record.position))
+    }));
+    for (const item of planned) {
+      const others: HostedOpening[] = planned
+        .filter((other) => other !== item)
+        .map((other) => ({ id: other.record.id, size: other.record.dimensions, placement: other.placement }));
+      const problems = hostingProblems(preview, { id: item.record.id, size: item.record.dimensions }, item.placement, others);
+      if (problems.length > 0) {
+        return fail(`Can't change ${id}: ${problems[0]}`, id, problems.map((message) => ({ field: "openings", message })));
+      }
+    }
+
+    return this.atomically(() => {
+      const result = this.wallHistory.update(id, changes);
+      if (!result.valid) {
+        return fail("Could not update wall: validation failed.", id, result.errors);
+      }
+      const wall = this.wallStore.get(id) as WallData;
+      for (const item of planned) {
+        const transform = hostedTransform(wall, item.record.dimensions, item.placement);
+        const unchanged =
+          samePoint(transform.position, item.record.position) &&
+          transform.rotation === item.record.rotation &&
+          item.record.hostPlacement?.offset === item.placement.offset &&
+          item.record.hostPlacement?.sill === item.placement.sill;
+        if (unchanged) {
+          continue;
+        }
+        const moved = this.updateOpeningRecord(item.type, item.record.id, {
+          position: transform.position,
+          rotation: transform.rotation,
+          hostPlacement: item.placement
+        });
+        if (!moved.valid) {
+          return fail(`Could not move ${item.record.id} with its wall.`, item.record.id, moved.errors);
+        }
+      }
+      return { success: true, objectId: id, message: "Wall updated." };
+    });
   }
 
+  /**
+   * Deletes a wall, and the doors and windows in it: a hosted opening
+   * never outlives its wall (a door floating where a wall used to be is
+   * not a valid building). One undo step brings them all back, still
+   * hosted.
+   */
   private executeDeleteWall(command: DeleteWallCommand): CommandResult {
     if (!command.id) {
       return { success: false, message: "wall.delete command is missing an id." };
     }
 
-    const existing = this.wallStore.get(command.id);
+    const id = command.id;
+    const existing = this.wallStore.get(id);
     if (!existing) {
-      return { success: false, objectId: command.id, message: `No wall found with id "${command.id}".` };
+      return { success: false, objectId: id, message: `No wall found with id "${id}".` };
     }
 
-    this.wallHistory.remove(command.id);
-    return { success: true, objectId: command.id, message: "Wall deleted." };
+    const openings = this.openingsIn(id);
+    return this.atomically(() => {
+      for (const { type, record } of openings) {
+        this.removeOpeningRecord(type, record.id);
+      }
+      this.wallHistory.remove(id);
+      const count = openings.length;
+      return {
+        success: true,
+        objectId: id,
+        message: count === 0 ? "Wall deleted." : `Wall deleted, with the ${count} opening${count === 1 ? "" : "s"} in it.`
+      };
+    });
   }
 
   private executeDuplicateWall(command: DuplicateWallCommand): CommandResult {
@@ -767,33 +951,6 @@ export class CommandExecutor {
     return { success: true, objectId: duplicate.id, message: "Slab duplicated." };
   }
 
-  private executeAddDoor(command: AddDoorCommand): CommandResult {
-    const door = createDoorData(command.door ?? {});
-    const result = this.doorHistory.add(door);
-
-    if (!result.valid) {
-      return { success: false, errors: result.errors, message: "Could not add door: validation failed." };
-    }
-    return { success: true, objectId: door.id, message: "Door added." };
-  }
-
-  private executeUpdateDoor(command: UpdateDoorCommand): CommandResult {
-    if (!command.id) {
-      return { success: false, message: "door.update command is missing an id." };
-    }
-
-    const result = this.doorHistory.update(command.id, command.changes ?? {});
-    if (!result.valid) {
-      return {
-        success: false,
-        objectId: command.id,
-        errors: result.errors,
-        message: "Could not update door: validation failed."
-      };
-    }
-    return { success: true, objectId: command.id, message: "Door updated." };
-  }
-
   private executeDeleteDoor(command: DeleteDoorCommand): CommandResult {
     if (!command.id) {
       return { success: false, message: "door.delete command is missing an id." };
@@ -833,31 +990,224 @@ export class CommandExecutor {
     return { success: true, objectId: duplicate.id, message: "Door duplicated." };
   }
 
-  private executeAddWindow(command: AddWindowCommand): CommandResult {
-    const windowData = createWindowData(command.window ?? {});
-    const result = this.windowHistory.add(windowData);
+  // --- Doors and windows, free-standing or in a wall ---
 
-    if (!result.valid) {
-      return { success: false, errors: result.errors, message: "Could not add window: validation failed." };
-    }
-    return { success: true, objectId: windowData.id, message: "Window added." };
+  private getOpening(type: OpeningType, id: string): OpeningRecord | undefined {
+    return type === "door" ? this.doorStore.get(id) : this.windowStore.get(id);
   }
 
-  private executeUpdateWindow(command: UpdateWindowCommand): CommandResult {
-    if (!command.id) {
-      return { success: false, message: "window.update command is missing an id." };
+  private addOpeningRecord(type: OpeningType, record: OpeningRecord): { valid: boolean; errors: { field: string; message: string }[] } {
+    return type === "door" ? this.doorHistory.add(record as DoorData) : this.windowHistory.add(record as WindowData);
+  }
+
+  private updateOpeningRecord(
+    type: OpeningType,
+    id: string,
+    changes: Record<string, unknown>
+  ): { valid: boolean; errors: { field: string; message: string }[] } {
+    return type === "door"
+      ? this.doorHistory.update(id, changes as Partial<Omit<DoorData, "id" | "type">>)
+      : this.windowHistory.update(id, changes as Partial<Omit<WindowData, "id" | "type">>);
+  }
+
+  private removeOpeningRecord(type: OpeningType, id: string): void {
+    if (type === "door") {
+      this.doorHistory.remove(id);
+    } else {
+      this.windowHistory.remove(id);
+    }
+  }
+
+  /** Every door and window in wall `wallId`. */
+  private openingsIn(wallId: string): { type: OpeningType; record: OpeningRecord }[] {
+    return [
+      ...this.doorStore.getAll().filter((door) => door.hostId === wallId).map((record) => ({ type: "door" as const, record })),
+      ...this.windowStore.getAll().filter((windowData) => windowData.hostId === wallId).map((record) => ({ type: "window" as const, record }))
+    ];
+  }
+
+  /** The other openings in `wall`, as the fit checks see them. */
+  private siblingsIn(wall: WallData, excludeId: string): HostedOpening[] {
+    return this.openingsIn(wall.id)
+      .filter(({ record }) => record.id !== excludeId)
+      .map(({ record }) => ({
+        id: record.id,
+        size: record.dimensions,
+        placement: record.hostPlacement ?? placementFromWorld(wall, record.dimensions, record.position)
+      }));
+  }
+
+  /** Why `id` can't host an opening. */
+  private notAWall(id: string): string {
+    const resolved = resolveConstructionObject(id, this.stores());
+    return resolved ? `"${id}" is a ${resolved.type}, not a wall` : `no wall has the id "${id}"`;
+  }
+
+  /**
+   * door.add / window.add. Without a hostId the opening is free-standing,
+   * exactly as before. With one, it goes into that wall: `offset` and
+   * `sill` place it (a position is projected onto the wall instead; with
+   * neither, the first free spot from the wall's center, at the default
+   * sill - 0 for a door, 0.9 m for a window), its position and rotation
+   * are derived from the wall, and it's rejected if it doesn't fit or
+   * would overlap another opening in the wall.
+   */
+  private executeAddOpening(type: OpeningType, raw: unknown): CommandResult {
+    const options = (isPlainObject(raw) ? raw : {}) as CreateDoorOptions;
+    const hostId = options.hostId ?? null;
+    const free = { ...options, hostId: null, hostPlacement: null };
+    const record: OpeningRecord = type === "door" ? createDoorData(free) : createWindowData(free);
+
+    if (hostId === null) {
+      const result = this.addOpeningRecord(type, record);
+      if (!result.valid) {
+        return fail(`Could not add ${type}: validation failed.`, undefined, result.errors);
+      }
+      return { success: true, objectId: record.id, message: `${capitalize(type)} added.` };
+    }
+    if (typeof hostId !== "string" || hostId.length === 0) {
+      return fail("hostId must be a wall id.");
+    }
+    const wall = this.wallStore.get(hostId);
+    if (!wall) {
+      return fail(`Can't put the ${type} in a wall: ${this.notAWall(hostId)}.`);
     }
 
-    const result = this.windowHistory.update(command.id, command.changes ?? {});
-    if (!result.valid) {
-      return {
-        success: false,
-        objectId: command.id,
-        errors: result.errors,
-        message: "Could not update window: validation failed."
-      };
+    const size = record.dimensions;
+    const others = this.siblingsIn(wall, record.id);
+    const position = isPlainObject(options.position) ? options.position : undefined;
+    const defaultSill = type === "window" ? WINDOW_SILL_HEIGHT : 0;
+    const sill =
+      typeof options.sill === "number"
+        ? options.sill
+        : typeof position?.y === "number"
+          ? placementNear(wall, size, { x: wall.position.x, y: position.y, z: wall.position.z }, defaultSill).sill
+          : defaultSill;
+    let offset: number | null;
+    if (typeof options.offset === "number") {
+      offset = options.offset;
+    } else if (position && (typeof position.x === "number" || typeof position.z === "number")) {
+      offset = placementNear(wall, size, { x: position.x ?? wall.position.x, z: position.z ?? wall.position.z }, sill).offset;
+    } else {
+      offset = findFreeOffset(wall, { id: record.id, size }, sill, others);
     }
-    return { success: true, objectId: command.id, message: "Window updated." };
+    if (offset === null) {
+      // Say why: it can't fit this wall at all, or the wall is full.
+      const fit = hostingProblems(wall, { id: record.id, size }, { offset: 0, sill: round(sill) }, []);
+      return fail(
+        fit.length > 0 ? `Can't put the ${type} in ${wall.id}: ${fit[0]}` : `There's no room left in ${wall.id} for a ${size.width} m wide ${type}.`
+      );
+    }
+
+    const placement: HostPlacement = { offset: round(offset), sill: round(sill) };
+    const problems = hostingProblems(wall, { id: record.id, size }, placement, others);
+    if (problems.length > 0) {
+      return fail(`Can't put the ${type} in ${wall.id}: ${problems[0]}`, undefined, problems.map((message) => ({ field: "hostPlacement", message })));
+    }
+    const transform = hostedTransform(wall, size, placement);
+    const hosted = { ...record, position: transform.position, rotation: transform.rotation, hostId: wall.id, hostPlacement: placement };
+    const result = this.addOpeningRecord(type, hosted);
+    if (!result.valid) {
+      return fail(`Could not add ${type}: validation failed.`, undefined, result.errors);
+    }
+    return { success: true, objectId: record.id, message: `${capitalize(type)} added to ${wall.id}.` };
+  }
+
+  /**
+   * door.update / window.update. A free-standing opening updates as
+   * before. An opening in a wall stays constrained to it: a new position
+   * is projected onto the wall (it slides along it, and its height sets
+   * the sill), a new size keeps its placement, `hostPlacement` sets offset
+   * and sill directly, and its rotation always follows the wall - asking
+   * for another is rejected. `hostId` moves it into another wall, or with
+   * null takes it out (it stays where it is).
+   */
+  private executeUpdateOpening(type: OpeningType, rawId: unknown, rawChanges: unknown): CommandResult {
+    if (typeof rawId !== "string" || rawId.length === 0) {
+      return { success: false, message: `${type}.update command is missing an id.` };
+    }
+    const id = rawId;
+    const existing = this.getOpening(type, id);
+    if (!existing) {
+      const result = this.updateOpeningRecord(type, id, {});
+      return fail(`Could not update ${type}: validation failed.`, id, result.errors);
+    }
+
+    const changes: Record<string, unknown> = isPlainObject(rawChanges) ? { ...rawChanges } : {};
+    const hostChange = Object.prototype.hasOwnProperty.call(changes, "hostId");
+    const targetHost = hostChange ? changes.hostId : existing.hostId;
+
+    if (targetHost === null || targetHost === undefined) {
+      if (existing.hostId !== null || hostChange) {
+        changes.hostId = null;
+        changes.hostPlacement = null;
+      } else if (changes.hostPlacement !== undefined && changes.hostPlacement !== null) {
+        return fail(`${id} isn't in a wall - give it a hostId first.`, id);
+      }
+      return this.finishOpeningUpdate(type, id, changes);
+    }
+    if (typeof targetHost !== "string" || targetHost.length === 0) {
+      return fail("hostId must be a wall id, or null.", id);
+    }
+    const wall = this.wallStore.get(targetHost);
+    if (!wall) {
+      return fail(`Can't put ${id} in a wall: ${this.notAWall(targetHost)}.`, id);
+    }
+    if (typeof changes.rotation === "number" && !sameAngle(changes.rotation, wall.rotation)) {
+      return fail(`${id} is in ${wall.id} and turns with it - rotate the wall instead.`, id);
+    }
+
+    const size = (isPlainObject(changes.dimensions) ? changes.dimensions : existing.dimensions) as unknown as OpeningSize;
+    const defaultSill = type === "window" ? WINDOW_SILL_HEIGHT : 0;
+    const sameWall = existing.hostId === wall.id;
+    const currentSill = existing.hostPlacement?.sill ?? defaultSill;
+    let placement: HostPlacement;
+    if (isPlainObject(changes.hostPlacement)) {
+      const base = sameWall && existing.hostPlacement ? existing.hostPlacement : { offset: 0, sill: defaultSill };
+      const wanted = changes.hostPlacement;
+      placement = {
+        offset: typeof wanted.offset === "number" ? wanted.offset : base.offset,
+        sill: typeof wanted.sill === "number" ? wanted.sill : base.sill
+      };
+    } else if (isPlainObject(changes.position)) {
+      const point = changes.position;
+      placement = placementNear(
+        wall,
+        size,
+        {
+          x: typeof point.x === "number" ? point.x : existing.position.x,
+          ...(typeof point.y === "number" ? { y: point.y } : {}),
+          z: typeof point.z === "number" ? point.z : existing.position.z
+        },
+        currentSill
+      );
+    } else if (!sameWall) {
+      placement = placementNear(wall, size, { x: existing.position.x, z: existing.position.z }, currentSill);
+    } else {
+      placement = clampPlacement(wall, size, existing.hostPlacement ?? placementFromWorld(wall, size, existing.position));
+    }
+    placement = { offset: round(placement.offset), sill: round(placement.sill) };
+
+    const problems = hostingProblems(wall, { id, size }, placement, this.siblingsIn(wall, id));
+    if (problems.length > 0) {
+      return fail(`Can't place ${id}: ${problems[0]}`, id, problems.map((message) => ({ field: "hostPlacement", message })));
+    }
+    const transform = hostedTransform(wall, size, placement);
+    return this.finishOpeningUpdate(type, id, {
+      ...changes,
+      hostId: wall.id,
+      hostPlacement: placement,
+      position: transform.position,
+      rotation: transform.rotation
+    });
+  }
+
+  private finishOpeningUpdate(type: OpeningType, id: string, changes: Record<string, unknown>): CommandResult {
+    const result = this.updateOpeningRecord(type, id, changes);
+    if (!result.valid) {
+      return fail(`Could not update ${type}: validation failed.`, id, result.errors);
+    }
+    return { success: true, objectId: id, message: `${capitalize(type)} updated.` };
   }
 
   private executeDeleteWindow(command: DeleteWindowCommand): CommandResult {
@@ -927,35 +1277,427 @@ export class CommandExecutor {
     return { success: true, objectId: element.id, message: `${definition.label} added.` };
   }
 
+  /**
+   * Updates an element. For a connected one, the joints follow: moving an
+   * endpoint (a move, turn, or new length) moves every endpoint joined to
+   * it, and a new height moves its whole connected network to that height
+   * - all checked before anything changes, and one undo step.
+   */
   private executeUpdateElement(command: UpdateElementCommand): CommandResult {
     if (!command.id) {
       return { success: false, message: "element.update command is missing an id." };
     }
+    const changes = (isPlainObject(command.changes) ? command.changes : {}) as ElementChanges;
+    if (Object.prototype.hasOwnProperty.call(changes, "connections")) {
+      return fail('Connections change only through "element.connect" and "element.disconnect".', command.id);
+    }
 
-    const result = this.elementHistory.update(command.id, command.changes ?? {});
+    const existing = this.elementStore.get(command.id);
+    if (existing && existing.connections.length > 0) {
+      return this.updateJoinedElement(existing, changes);
+    }
+
+    const result = this.elementHistory.update(command.id, changes);
     if (!result.valid) {
-      return {
-        success: false,
-        objectId: command.id,
-        errors: result.errors,
-        message: "Could not update element: validation failed."
-      };
+      return fail("Could not update element: validation failed.", command.id, result.errors);
     }
     return { success: true, objectId: command.id, message: "Element updated." };
   }
 
+  private updateJoinedElement(existing: ElementData, changes: ElementChanges): CommandResult {
+    const preview = previewElement(existing, changes);
+    const check = validateElement(preview);
+    if (!check.valid) {
+      return fail("Could not update element: validation failed.", existing.id, check.errors);
+    }
+
+    const all = new Map(this.elementStore.getAll().map((element) => [element.id, element]));
+    const planned = new Map<string, ElementData>();
+    const dy = preview.position.y - existing.position.y;
+    if (Math.abs(dy) > 1e-9) {
+      for (const id of networkOf(all, existing.id)) {
+        const record = all.get(id);
+        if (id !== existing.id && record) {
+          planned.set(id, { ...record, position: { ...record.position, y: round(record.position.y + dy) } });
+        }
+      }
+    }
+    const before = endpointsOf(existing);
+    const after = endpointsOf(preview);
+    for (const endpoint of ENDPOINTS) {
+      if (horizontalDistance(before[endpoint], after[endpoint]) <= 1e-9) {
+        continue;
+      }
+      for (const member of jointMembers(all, { id: existing.id, endpoint })) {
+        const record = member.id === existing.id ? undefined : planned.get(member.id) ?? all.get(member.id);
+        if (record) {
+          planned.set(member.id, { ...record, ...moveEndpoint(record, member.endpoint, after[endpoint]) });
+        }
+      }
+    }
+    for (const [id, record] of planned) {
+      const neighborCheck = validateElement(record);
+      if (!neighborCheck.valid) {
+        const reason = neighborCheck.errors[0]?.message ?? "would be invalid.";
+        return fail(`Can't change ${existing.id}: ${id} is joined to it, and then - ${reason}`, existing.id, neighborCheck.errors);
+      }
+    }
+
+    return this.atomically(() => {
+      const result = this.elementHistory.update(existing.id, changes);
+      if (!result.valid) {
+        return fail("Could not update element: validation failed.", existing.id, result.errors);
+      }
+      for (const [id, record] of planned) {
+        const moved = this.elementHistory.update(id, { position: record.position, rotation: record.rotation, dimensions: record.dimensions });
+        if (!moved.valid) {
+          return fail(`Could not move ${id} with ${existing.id}.`, id, moved.errors);
+        }
+      }
+      return { success: true, objectId: existing.id, message: "Element updated." };
+    });
+  }
+
+  /** Deletes an element - and its connections, from the elements it was joined to. One undo step restores both. */
   private executeDeleteElement(command: DeleteElementCommand): CommandResult {
     if (!command.id) {
       return { success: false, message: "element.delete command is missing an id." };
     }
 
-    const existing = this.elementStore.get(command.id);
+    const id = command.id;
+    const existing = this.elementStore.get(id);
     if (!existing) {
-      return { success: false, objectId: command.id, message: `No element found with id "${command.id}".` };
+      return { success: false, objectId: id, message: `No element found with id "${id}".` };
     }
 
-    this.elementHistory.remove(command.id);
-    return { success: true, objectId: command.id, message: "Element deleted." };
+    const neighbors = [...new Set(existing.connections.map((connection) => connection.objectId))];
+    return this.atomically(() => {
+      for (const neighborId of neighbors) {
+        const neighbor = this.elementStore.get(neighborId);
+        if (neighbor) {
+          this.elementHistory.update(neighborId, { connections: neighbor.connections.filter((connection) => connection.objectId !== id) });
+        }
+      }
+      this.elementHistory.remove(id);
+      return { success: true, objectId: id, message: "Element deleted." };
+    });
+  }
+
+  // --- Connections ---
+
+  /** An untrusted endpoint reference, checked. */
+  private readEndpointReference(raw: unknown, name: string): { id: string; endpoint?: Endpoint } | string {
+    if (!isPlainObject(raw) || typeof raw.id !== "string" || raw.id.length === 0) {
+      return `"${name}" must name an element: { "id": ..., "endpoint": "start" | "end" }.`;
+    }
+    if (raw.endpoint !== undefined && raw.endpoint !== "start" && raw.endpoint !== "end") {
+      return `"${String(raw.endpoint)}" is not an endpoint - use "start" or "end".`;
+    }
+    return { id: raw.id, ...(raw.endpoint !== undefined ? { endpoint: raw.endpoint as Endpoint } : {}) };
+  }
+
+  /** Both elements of a connect/disconnect, checked: they exist, differ, and are connectable kinds. */
+  private readConnectionPair(
+    command: { from?: unknown; to?: unknown }
+  ): { from: { id: string; endpoint?: Endpoint }; to: { id: string; endpoint?: Endpoint }; a: ElementData; b: ElementData } | CommandResult {
+    const from = this.readEndpointReference(command.from, "from");
+    if (typeof from === "string") {
+      return fail(from);
+    }
+    const to = this.readEndpointReference(command.to, "to");
+    if (typeof to === "string") {
+      return fail(to);
+    }
+    if (from.id === to.id) {
+      return fail(`${from.id} can't connect to itself.`, from.id);
+    }
+    const a = this.elementStore.get(from.id);
+    const b = this.elementStore.get(to.id);
+    for (const [ref, element] of [[from, a], [to, b]] as const) {
+      if (!element) {
+        return fail(`No element found with id "${ref.id}".`, ref.id);
+      }
+      if (!isConnectable(element.kind)) {
+        return fail(`${element.id} (${element.label}) has no endpoints to connect.`, element.id);
+      }
+    }
+    return { from, to, a: a as ElementData, b: b as ElementData };
+  }
+
+  /**
+   * element.connect: joins two compatible endpoints within
+   * CONNECTION_TOLERANCE. `from`'s endpoint is snapped onto `to`'s (height
+   * included - its connected network moves with it), then the connection
+   * is recorded on both elements. One undo step.
+   */
+  private executeConnect(command: ConnectElementsCommand): CommandResult {
+    const pair = this.readConnectionPair(command as unknown as { from?: unknown; to?: unknown });
+    if ("success" in pair) {
+      return pair;
+    }
+    const { from, to, a, b } = pair;
+    if (!kindsConnect(a.kind, b.kind)) {
+      const nameOf = (element: ElementData) => getElementKind(element.kind)?.label.toLowerCase() ?? element.kind;
+      return fail(`A ${nameOf(a)} can't connect to a ${nameOf(b)}.`, a.id);
+    }
+
+    const aEnds = endpointsOf(a);
+    const bEnds = endpointsOf(b);
+    let best: { aEnd: Endpoint; bEnd: Endpoint; gap: number; rise: number } | null = null;
+    for (const aEnd of from.endpoint ? [from.endpoint] : ENDPOINTS) {
+      for (const bEnd of to.endpoint ? [to.endpoint] : ENDPOINTS) {
+        const gap = horizontalDistance(aEnds[aEnd], bEnds[bEnd]);
+        const rise = Math.abs(aEnds[aEnd].y - bEnds[bEnd].y);
+        if (!best || Math.hypot(gap, rise) < Math.hypot(best.gap, best.rise) - 1e-12) {
+          best = { aEnd, bEnd, gap, rise };
+        }
+      }
+    }
+    const { aEnd, bEnd, gap, rise } = best as { aEnd: Endpoint; bEnd: Endpoint; gap: number; rise: number };
+    if (a.connections.some((connection) => connection.endpoint === aEnd && connection.objectId === b.id)) {
+      return fail(`${a.id} ${aEnd} is already connected to ${b.id}.`, a.id);
+    }
+    if (gap > CONNECTION_TOLERANCE + 1e-9 || rise > CONNECTION_TOLERANCE + 1e-9) {
+      const apart = Math.hypot(gap, rise).toFixed(2);
+      return fail(
+        `${a.id} ${aEnd} and ${b.id} ${bEnd} are ${apart} m apart - bring them within ${CONNECTION_TOLERANCE} m to connect them.`,
+        a.id
+      );
+    }
+
+    return this.atomically(() => {
+      if (gap > 1e-9 || rise > 1e-9) {
+        const snap = moveEndpoint(a, aEnd, bEnds[bEnd]);
+        const snapped = this.executeUpdateElement({
+          type: "element.update",
+          id: a.id,
+          changes: { ...snap, position: { ...snap.position, y: b.position.y } }
+        });
+        if (!snapped.success) {
+          return snapped;
+        }
+      }
+      const aNow = this.elementStore.get(a.id) as ElementData;
+      const bNow = this.elementStore.get(b.id) as ElementData;
+      const first = this.elementHistory.update(a.id, {
+        connections: [...aNow.connections, { endpoint: aEnd, objectId: b.id, objectEndpoint: bEnd }]
+      });
+      if (!first.valid) {
+        return fail(`Could not connect ${a.id}.`, a.id, first.errors);
+      }
+      const second = this.elementHistory.update(b.id, {
+        connections: [...bNow.connections, { endpoint: bEnd, objectId: a.id, objectEndpoint: aEnd }]
+      });
+      if (!second.valid) {
+        return fail(`Could not connect ${b.id}.`, b.id, second.errors);
+      }
+      return { success: true, objectId: a.id, message: `Connected ${a.id} ${aEnd} to ${b.id} ${bEnd}.` };
+    });
+  }
+
+  /** element.disconnect: removes the connection(s) between two elements - only at the given endpoints, when given. Nothing moves. */
+  private executeDisconnect(command: DisconnectElementsCommand): CommandResult {
+    const pair = this.readConnectionPair(command as unknown as { from?: unknown; to?: unknown });
+    if ("success" in pair) {
+      return pair;
+    }
+    const { from, to, a, b } = pair;
+    const matches = (endpoint: Endpoint, objectId: string, objectEndpoint: Endpoint, mine?: Endpoint, theirs?: Endpoint) =>
+      objectId !== undefined && (mine === undefined || endpoint === mine) && (theirs === undefined || objectEndpoint === theirs);
+    const removed = a.connections.filter(
+      (connection) => connection.objectId === b.id && matches(connection.endpoint, connection.objectId, connection.objectEndpoint, from.endpoint, to.endpoint)
+    );
+    if (removed.length === 0) {
+      return fail(`${a.id} isn't connected to ${b.id}${from.endpoint ? ` at its ${from.endpoint}` : ""}.`, a.id);
+    }
+    return this.atomically(() => {
+      const keepA = a.connections.filter((connection) => !removed.includes(connection));
+      const keepB = b.connections.filter(
+        (connection) =>
+          !(connection.objectId === a.id && removed.some((gone) => gone.endpoint === connection.objectEndpoint && gone.objectEndpoint === connection.endpoint))
+      );
+      const first = this.elementHistory.update(a.id, { connections: keepA });
+      const second = this.elementHistory.update(b.id, { connections: keepB });
+      if (!first.valid || !second.valid) {
+        return fail(`Could not disconnect ${a.id} from ${b.id}.`, a.id, [...first.errors, ...second.errors]);
+      }
+      return { success: true, objectId: a.id, message: `Disconnected ${a.id} from ${b.id}.` };
+    });
+  }
+
+  // --- Alignment and snapping helpers ---
+
+  /** An object as the snapping helpers see it, or undefined when `id` is nothing. */
+  private snapObjectOf(id: string): (SnapObject & { hostId?: string | null }) | undefined {
+    const resolved = resolveConstructionObject(id, this.stores());
+    if (!resolved) {
+      return undefined;
+    }
+    const record = this.readConstructionObject(resolved.type, id) as
+      | ({ position: { x: number; y: number; z: number }; rotation: number; dimensions: object; kind?: string; hostId?: string | null } & object)
+      | undefined;
+    if (!record) {
+      return undefined;
+    }
+    return {
+      id,
+      type: resolved.type,
+      ...(typeof record.kind === "string" ? { kind: record.kind } : {}),
+      position: { ...record.position },
+      rotation: record.rotation,
+      dimensions: { ...(record.dimensions as Record<string, number>) },
+      ...(record.hostId !== undefined ? { hostId: record.hostId } : {})
+    };
+  }
+
+  /** object.align: lines `id`'s center up with `targetId`'s on X, Z, or both - through update_object, so a hosted opening slides along its wall. */
+  private executeAlign(command: AlignObjectsCommand): CommandResult {
+    const raw = command as unknown as Record<string, unknown>;
+    if (typeof raw.id !== "string" || typeof raw.targetId !== "string") {
+      return fail('object.align needs an "id" and a "targetId".');
+    }
+    if (raw.axis !== "x" && raw.axis !== "z" && raw.axis !== "both") {
+      return fail('object.align "axis" must be "x", "z", or "both".');
+    }
+    if (raw.id === raw.targetId) {
+      return fail("An object can't be aligned with itself.", raw.id);
+    }
+    const target = this.snapObjectOf(raw.targetId);
+    if (!target) {
+      return fail(`No construction object found with id "${raw.targetId}".`, raw.id);
+    }
+    const position: { x?: number; z?: number } = {};
+    if (raw.axis !== "z") {
+      position.x = target.position.x;
+    }
+    if (raw.axis !== "x") {
+      position.z = target.position.z;
+    }
+    return this.execute({ type: "update_object", objectId: raw.id, changes: { position } });
+  }
+
+  /**
+   * object.snap. "wall" puts a door or window into the target wall.
+   * "endpoint" moves the object so its nearest key point lands on the
+   * target's nearest one; for two compatible connectable elements those
+   * are endpoints, and they're connected too. One undo step.
+   */
+  private executeSnap(command: SnapObjectCommand): CommandResult {
+    const raw = command as unknown as Record<string, unknown>;
+    if (typeof raw.id !== "string" || typeof raw.targetId !== "string") {
+      return fail('object.snap needs an "id" and a "targetId".');
+    }
+    if (raw.id === raw.targetId) {
+      return fail("An object can't snap to itself.", raw.id);
+    }
+    const moving = this.snapObjectOf(raw.id);
+    const target = this.snapObjectOf(raw.targetId);
+    if (!moving || !target) {
+      return fail(`No construction object found with id "${!moving ? raw.id : raw.targetId}".`, raw.id);
+    }
+
+    if (raw.mode === "wall") {
+      if (moving.type !== "door" && moving.type !== "window") {
+        return fail("Only doors and windows go into a wall.", raw.id);
+      }
+      if (target.type !== "wall") {
+        return fail(`${raw.targetId} is a ${target.type}, not a wall.`, raw.id);
+      }
+      return this.executeUpdateOpening(moving.type, raw.id, { hostId: raw.targetId });
+    }
+    if (raw.mode !== "endpoint") {
+      return fail('object.snap "mode" must be "endpoint" or "wall".', raw.id);
+    }
+
+    const connect =
+      moving.type === "element" &&
+      target.type === "element" &&
+      !!moving.kind &&
+      !!target.kind &&
+      isConnectable(moving.kind) &&
+      kindsConnect(moving.kind, target.kind);
+    const pick = (points: SnapPoint[]) => (connect ? points.filter((point) => point.kind === "endpoint") : points);
+    let best: { own: SnapPoint; other: SnapPoint; distance: number } | null = null;
+    for (const own of pick(keyPointsOf(moving))) {
+      for (const other of pick(keyPointsOf(target))) {
+        const distance = Math.hypot(other.x - own.x, other.z - own.z);
+        if (!best || distance < best.distance - 1e-12) {
+          best = { own, other, distance };
+        }
+      }
+    }
+    if (!best) {
+      return fail(`${raw.id} has nothing to snap to on ${raw.targetId}.`, raw.id);
+    }
+    const found = best;
+
+    return this.atomically(() => {
+      const position = {
+        x: round(moving.position.x + found.other.x - found.own.x),
+        y: connect ? target.position.y : moving.position.y,
+        z: round(moving.position.z + found.other.z - found.own.z)
+      };
+      if (!samePoint(position, moving.position)) {
+        const moved = this.execute({ type: "update_object", objectId: raw.id, changes: { position } });
+        if (!moved.success) {
+          return moved;
+        }
+      }
+      if (connect && found.own.endpoint && found.other.endpoint) {
+        const joined = this.elementStore
+          .get(raw.id as string)
+          ?.connections.some((connection) => connection.endpoint === found.own.endpoint && connection.objectId === raw.targetId);
+        if (!joined) {
+          return this.execute({
+            type: "element.connect",
+            from: { id: raw.id, endpoint: found.own.endpoint },
+            to: { id: raw.targetId, endpoint: found.other.endpoint }
+          });
+        }
+      }
+      return { success: true, objectId: raw.id as string, message: `Snapped ${raw.id} to ${raw.targetId}.` };
+    });
+  }
+
+  // --- Shared helpers ---
+
+  private stores() {
+    return {
+      wallStore: this.wallStore,
+      pillarStore: this.pillarStore,
+      beamStore: this.beamStore,
+      slabStore: this.slabStore,
+      doorStore: this.doorStore,
+      windowStore: this.windowStore,
+      elementStore: this.elementStore
+    };
+  }
+
+  /**
+   * Runs `work` as ONE undo step: inside the history group already open (a
+   * drag, an AI batch) when there is one, otherwise in a group of its own
+   * that's kept only if the work succeeds - a failure part-way leaves the
+   * model exactly as it was. Without a history, the work just runs.
+   */
+  private atomically(work: () => CommandResult): CommandResult {
+    const history = this.historyGroups;
+    if (!history || history.isGrouping()) {
+      return work();
+    }
+    history.beginGroup();
+    let result: CommandResult;
+    try {
+      result = work();
+    } catch (error) {
+      history.cancelGroup();
+      throw error;
+    }
+    if (result.success) {
+      history.endGroup();
+    } else {
+      history.cancelGroup();
+    }
+    return result;
   }
 
   private executeDuplicateElement(command: DuplicateElementCommand): CommandResult {

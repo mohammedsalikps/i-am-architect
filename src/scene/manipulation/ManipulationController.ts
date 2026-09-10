@@ -30,11 +30,20 @@ function cursorFor(gesture: ManipulationGesture, dragging: boolean): string {
       return gesture.axis === "y" ? "ns-resize" : "ew-resize";
     case "rotate":
       return dragging ? "grabbing" : "grab";
+    case "endpoint":
+      return "crosshair";
   }
 }
 
 function gestureFor(target: HandleTarget): ManipulationGesture {
-  return target.kind === "rotate" ? { kind: "rotate" } : { kind: "resize", axis: target.axis, side: target.side };
+  switch (target.kind) {
+    case "rotate":
+      return { kind: "rotate" };
+    case "endpoint":
+      return { kind: "endpoint", endpoint: target.endpoint };
+    case "resize":
+      return { kind: "resize", axis: target.axis, side: target.side };
+  }
 }
 
 /**

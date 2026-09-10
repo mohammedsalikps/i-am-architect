@@ -65,7 +65,7 @@ export function serializeProject(project: PersistableProject): ProjectDocument {
   const wallIds = new Set(canonical.filter((object) => object.type === "wall").map((object) => object.id));
   const objects = canonical.map((object) =>
     (object.type === "door" || object.type === "window") && object.hostId !== null && !wallIds.has(object.hostId)
-      ? { ...object, hostId: null }
+      ? { ...object, hostId: null, hostPlacement: null }
       : object
   );
 

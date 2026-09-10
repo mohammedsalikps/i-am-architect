@@ -1,4 +1,5 @@
 import type { Vector3Data } from "../objects/types";
+import type { HostPlacement } from "../openings/hostOpening";
 import type { WindowData } from "./types";
 
 export interface CreateWindowOptions {
@@ -11,6 +12,12 @@ export interface CreateWindowOptions {
   color?: string;
   /** The wall hosting this window, if any - see engine/openings/hostOpening.ts. */
   hostId?: string | null;
+  /** Where the window sits in its wall. CommandExecutor computes it; pass it only with a hostId. */
+  hostPlacement?: HostPlacement | null;
+  /** window.add only: along the host wall from its center, in meters. Omitted: the first free spot from the center. */
+  offset?: number;
+  /** window.add only: above the host wall's base, in meters. Omitted: 0.9. */
+  sill?: number;
 }
 
 const DEFAULTS = {
@@ -40,10 +47,14 @@ export function reserveWindowIds(ids: Iterable<string>): void {
  * (y = height / 2) unless a full position is supplied. Options stay
  * flat (width/height/thickness) for a simple call site - only the
  * stored WindowData nests them under `dimensions`.
+ *
+ * A hosted window's position is derived from its wall - CommandExecutor
+ * does that (window.add with a hostId).
  */
 export function createWindowData(options: CreateWindowOptions = {}): WindowData {
   const height = options.height ?? DEFAULTS.height;
   const position: Vector3Data = { x: 0, y: height / 2, z: 0, ...options.position };
+  const hostId = options.hostId ?? null;
 
   const windowData: WindowData = {
     id: `window-${nextId++}`,
@@ -58,7 +69,8 @@ export function createWindowData(options: CreateWindowOptions = {}): WindowData 
     material: options.material ?? DEFAULTS.material,
     color: options.color ?? DEFAULTS.color,
     assemblyId: null,
-    hostId: options.hostId ?? null
+    hostId,
+    hostPlacement: hostId === null ? null : options.hostPlacement ?? null
   };
 
   return windowData;
@@ -71,7 +83,7 @@ const DUPLICATE_OFFSET = 0.75;
  * Creates an independent copy of a window: same dimensions, material,
  * color and rotation, a fresh unique id (via createWindowData's own
  * counter), and a small position offset so the two don't overlap. The
- * offset takes it off its wall's face, so the copy isn't hosted.
+ * offset takes it out of its wall, so the copy is free-standing.
  */
 export function duplicateWindowData(windowData: WindowData): WindowData {
   return createWindowData({

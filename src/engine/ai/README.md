@@ -512,12 +512,18 @@ as positive proof no extra (or real) request happened.**
   ribbon button wired up to `AICommandPipeline` yet. This module is
   usable today only from code (e.g. a future UI, or the `verify.ts`
   files) - see the parent task's constraints.
-- **No snapping, wall-hosting, or opening behavior from AI.** Commands
-  produced here create/update construction objects exactly as
-  `CommandExecutor` already allows - independent objects with no spatial
-  relationship inference. The AI schema doesn't offer `hostId`, so doors
-  and windows the AI creates are free-standing; hosting them on a wall is
-  a manual tool (see `elements/README.md`).
+- **Relationships through structured commands.** A provider can put a
+  door or window into an existing wall (`door.add`/`window.add` with
+  `hostId`, and optionally `offset`/`sill`) and connect two compatible
+  pipe/conduit/cable endpoints (`element.connect`). The snapshot carries
+  each hosted opening's `hostId` and each connected element's
+  `connections`, and the geometry section reports `hosts` and
+  `connections` with their validity (see `relationships/README.md`).
+  `MockAIProvider` understands "Add a door to wall-3" and "Connect
+  water-pipe-1 to water-pipe-2". The AI still doesn't snap, route, or
+  resolve clashes, and the reference house plan's door and windows are
+  free-standing (the plan can't reference wall ids created in the same
+  response).
 - **Elements.** `AI_SUPPORTED_OBJECT_TYPES` includes `element`: the
   snapshot lists every element with its `kind` and `label`, the backend
   sanitizer accepts only catalog kinds, and the structured-output schema

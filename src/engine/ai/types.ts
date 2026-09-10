@@ -74,6 +74,10 @@ export interface AIContextObject {
   kind?: string;
   /** Elements only: the name people see (a room's name). */
   label?: string;
+  /** Doors and windows in a wall only: that wall's id. Absent for a free-standing one. */
+  hostId?: string;
+  /** Linear elements only, when connected: each endpoint connection. Absent when there are none. */
+  connections?: AIContextConnection[];
   /** Center of the object's bounding volume, in meters. */
   position: { x: number; y: number; z: number };
   /** Rotation around the vertical (Y) axis, in radians. */
@@ -84,6 +88,13 @@ export interface AIContextObject {
   color: string;
   /** Ids of every assembly that lists this object, sorted. Empty when ungrouped. */
   assemblyIds: string[];
+}
+
+/** One endpoint connection, as a provider sees it: this object's `endpoint` is joined to `objectId`'s `objectEndpoint`. */
+export interface AIContextConnection {
+  endpoint: "start" | "end";
+  objectId: string;
+  objectEndpoint: "start" | "end";
 }
 
 /**
@@ -118,12 +129,15 @@ export interface AIObjectSourceRecord {
   dimensions: object;
   material: string;
   color: string;
+  /** Doors and windows: the host wall, or null. */
+  hostId?: string | null;
 }
 
-/** An element store record - an AIObjectSourceRecord with its kind and label. */
+/** An element store record - an AIObjectSourceRecord with its kind, label, and connections. */
 export interface AIElementSourceRecord extends AIObjectSourceRecord {
   kind: string;
   label: string;
+  connections?: readonly AIContextConnection[];
 }
 
 /** The fields buildAIProjectSnapshot() reads from each assembly record. */
@@ -242,6 +256,8 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
   const originals: AIContextObject[] = [...walls, ...pillars, ...beams, ...slabs, ...doors, ...windows].map((record) => ({
     id: record.id,
     type: record.type,
+    // Only a hosted door or window carries hostId - every other snapshot is exactly what it was before hosting.
+    ...(typeof record.hostId === "string" ? { hostId: record.hostId } : {}),
     position: { x: record.position.x, y: record.position.y, z: record.position.z },
     rotation: record.rotation,
     dimensions: copyDimensions(record.dimensions),
@@ -255,6 +271,15 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
     type: record.type,
     kind: record.kind,
     label: record.label,
+    ...(record.connections && record.connections.length > 0
+      ? {
+          connections: record.connections.map((connection) => ({
+            endpoint: connection.endpoint,
+            objectId: connection.objectId,
+            objectEndpoint: connection.objectEndpoint
+          }))
+        }
+      : {}),
     position: { x: record.position.x, y: record.position.y, z: record.position.z },
     rotation: record.rotation,
     dimensions: copyDimensions(record.dimensions),

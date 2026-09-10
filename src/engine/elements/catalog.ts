@@ -103,6 +103,12 @@ export interface ElementKindDefinition {
   params: readonly ParamSpec[];
   /** Linear elements (pipes, conduits, cables) run along local X: the panel also shows their start and end. */
   linear: boolean;
+  /**
+   * Linear kinds whose endpoints this kind's endpoints can be connected to
+   * (see connections/connections.ts) - a water pipe to a water pipe, a
+   * cable to a cable. Empty: no connections.
+   */
+  connectsWith: readonly string[];
   /** Words an instruction may use for this kind - the mock AI's vocabulary. */
   keywords: readonly string[];
 }
@@ -117,9 +123,10 @@ const PLATE_LTW = { x: "length", y: "thickness", z: "width" } as const;
 const ROUND_DH = { x: "diameter", y: "height", z: "diameter" } as const;
 const LINEAR = { x: "length", y: "diameter", z: "diameter" } as const;
 
-type KindInput = Omit<ElementKindDefinition, "params" | "linear" | "keywords"> & {
+type KindInput = Omit<ElementKindDefinition, "params" | "linear" | "connectsWith" | "keywords"> & {
   params?: readonly ParamSpec[];
   linear?: boolean;
+  connectsWith?: readonly string[];
   keywords?: readonly string[];
 };
 
@@ -128,6 +135,7 @@ function kind(input: KindInput): ElementKindDefinition {
     ...input,
     params: input.params ?? [],
     linear: input.linear ?? false,
+    connectsWith: input.connectsWith ?? [],
     keywords: input.keywords ?? [input.label.toLowerCase()]
   };
 }
@@ -241,6 +249,7 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     materialCategories: ["plumbing", "metal"],
     params: [{ key: "system", label: "System", kind: "choice", default: "cold", options: ["cold", "hot"] }],
     linear: true,
+    connectsWith: ["water-pipe"],
     keywords: ["water pipe", "supply pipe", "water line"]
   }),
   kind({
@@ -256,6 +265,7 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     defaultColor: "#7c7c7c",
     materialCategories: ["plumbing"],
     linear: true,
+    connectsWith: ["drain-pipe"],
     keywords: ["drain pipe", "drain", "waste pipe", "sewer pipe"]
   }),
   kind({
@@ -357,6 +367,7 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     defaultColor: "#d9d9d9",
     materialCategories: ["electrical", "metal"],
     linear: true,
+    connectsWith: ["conduit"],
     keywords: ["conduit"]
   }),
   kind({
@@ -372,6 +383,7 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     defaultColor: "#c96f35",
     materialCategories: ["electrical"],
     linear: true,
+    connectsWith: ["cable"],
     keywords: ["cable", "wire", "wiring"]
   }),
   kind({
@@ -711,6 +723,14 @@ export function catalogProblems(): string[] {
     }
     if (!(ELEMENT_SHAPES as readonly string[]).includes(definition.shape)) {
       problems.push(`${definition.kind}: unknown shape "${definition.shape}"`);
+    }
+    for (const other of definition.connectsWith) {
+      const target = ELEMENT_KINDS.find((candidate) => candidate.kind === other);
+      if (!definition.linear || !target || !target.linear) {
+        problems.push(`${definition.kind}: only linear kinds connect, and "${other}" must be one`);
+      } else if (!target.connectsWith.includes(definition.kind)) {
+        problems.push(`${definition.kind}: connects with "${other}", which doesn't connect back`);
+      }
     }
   }
   return problems;

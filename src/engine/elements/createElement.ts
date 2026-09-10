@@ -100,7 +100,10 @@ export function createElementData(options: CreateElementOptions): ElementData {
     params,
     material: options.material ?? definition.defaultMaterial,
     color: options.color ?? definition.defaultColor,
-    assemblyId: null
+    assemblyId: null,
+    // A new element - a duplicate included - starts unconnected: only
+    // element.connect joins endpoints (see connections/connections.ts).
+    connections: []
   };
 }
 

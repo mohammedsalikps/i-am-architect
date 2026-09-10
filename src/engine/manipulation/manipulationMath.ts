@@ -1,6 +1,7 @@
 // Explicit .ts extension on this value import lets Node run this module
 // directly - see manipulation/verify.ts. Harmless for Vite.
 import { localAxesFor } from "../ai/geometry/analyzeConstructionGeometry.ts";
+import { getElementKind } from "../elements/catalog.ts";
 
 /**
  * Pure math for mouse manipulation: turns where the pointer grabbed and
@@ -176,10 +177,18 @@ export interface ResizeHandleLayout extends ResizeTarget {
   position: Point3;
 }
 
+export interface EndpointHandleLayout {
+  endpoint: "start" | "end";
+  /** Where the handle sits, relative to the object's center, in its rotated local frame. */
+  position: Point3;
+}
+
 export interface HandleLayout {
   resize: ResizeHandleLayout[];
-  /** A ring in the object's base plane, around its center. */
-  rotate: { radius: number; y: number };
+  /** A ring in the object's base plane, around its center - null for a door or window in a wall, which turns with the wall. */
+  rotate: { radius: number; y: number } | null;
+  /** A linear element's two endpoint handles (they replace its lengthwise resize handles); empty for everything else. */
+  endpoints: EndpointHandleLayout[];
 }
 
 /**
@@ -191,8 +200,18 @@ export interface HandleLayout {
  * handle is tied to a dimension the object really has (see
  * dimensionForAxis) - returns null for a type or shape it can't place
  * handles on. An element passes its `kind`.
+ *
+ * A linear element (pipe, conduit, cable) gets a handle ON each endpoint
+ * instead of its two lengthwise handles: dragging one moves that end and
+ * keeps the other. A door or window in a wall (`hostId`) gets no rotation
+ * ring - it turns with its wall.
  */
-export function layoutHandles(object: { type: string; kind?: string; dimensions: Record<string, number> }): HandleLayout | null {
+export function layoutHandles(object: {
+  type: string;
+  kind?: string;
+  hostId?: string | null;
+  dimensions: Record<string, number>;
+}): HandleLayout | null {
   const x = dimensionForAxis(object.type, "x", object.kind);
   const y = dimensionForAxis(object.type, "y", object.kind);
   const z = dimensionForAxis(object.type, "z", object.kind);
@@ -207,14 +226,25 @@ export function layoutHandles(object: { type: string; kind?: string; dimensions:
   }
 
   const base = roundValue(-halfY + HANDLE_LIFT);
+  const linear = object.type === "element" && !!object.kind && !!getElementKind(object.kind)?.linear;
+  const hosted = (object.type === "door" || object.type === "window") && typeof object.hostId === "string";
+  const lengthwise: ResizeHandleLayout[] = [
+    { axis: "x", side: 1, dimension: x, position: { x: halfX + HANDLE_OFFSET, y: base, z: 0 } },
+    { axis: "x", side: -1, dimension: x, position: { x: -(halfX + HANDLE_OFFSET), y: base, z: 0 } }
+  ];
   return {
     resize: [
-      { axis: "x", side: 1, dimension: x, position: { x: halfX + HANDLE_OFFSET, y: base, z: 0 } },
-      { axis: "x", side: -1, dimension: x, position: { x: -(halfX + HANDLE_OFFSET), y: base, z: 0 } },
+      ...(linear ? [] : lengthwise),
       { axis: "z", side: 1, dimension: z, position: { x: 0, y: base, z: halfZ + HANDLE_OFFSET } },
       { axis: "z", side: -1, dimension: z, position: { x: 0, y: base, z: -(halfZ + HANDLE_OFFSET) } },
       { axis: "y", side: 1, dimension: y, position: { x: 0, y: halfY + HANDLE_OFFSET, z: 0 } }
     ],
-    rotate: { radius: roundValue(Math.hypot(halfX, halfZ) + ROTATE_RING_MARGIN), y: -halfY }
+    rotate: hosted ? null : { radius: roundValue(Math.hypot(halfX, halfZ) + ROTATE_RING_MARGIN), y: -halfY },
+    endpoints: linear
+      ? [
+          { endpoint: "start", position: { x: -halfX, y: 0, z: 0 } },
+          { endpoint: "end", position: { x: halfX, y: 0, z: 0 } }
+        ]
+      : []
   };
 }

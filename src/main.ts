@@ -14,8 +14,8 @@ import { getElementKind } from "./engine/elements/catalog";
 import type { ElementCategory } from "./engine/elements/catalog";
 import { roomPresetOptions } from "./engine/elements/roomPresets";
 import type { CreateElementOptions } from "./engine/elements/createElement";
-import { placeOpeningOnWall, WINDOW_SILL_HEIGHT } from "./engine/openings/hostOpening";
 import { resolveConstructionObject } from "./engine/objects/resolveConstructionObject";
+import { SnapSettings } from "./engine/snapping/SnapSettings";
 import type { WallData } from "./engine/wall/types";
 import type {
   AddWallCommand,
@@ -189,49 +189,15 @@ function selectedWall(): WallData | undefined {
   return selectedId ? wallStore.get(selectedId) : undefined;
 }
 
-/** Where successive openings go along one wall, from its center, so they don't stack (clamped to the wall's length). */
-const HOSTED_OFFSETS = [0, 1.5, -1.5, 3, -3];
-
 /**
- * Adds a door or window hosted on `wall`: its hostId names the wall, and
- * it sits flush against the wall's face, turned with it (a window at sill
- * height) - see engine/openings/hostOpening.ts. Two commands, add then
- * place, in one history group: one undo removes the opening, and if the
- * placement were rejected nothing is left behind.
+ * Adds a door or window INTO `wall` - one command: the executor finds the
+ * first free spot from the wall's center (a window at sill height), derives
+ * its position from the wall, and the wall is redrawn with a hole for it.
+ * From then on it moves and turns with the wall. See
+ * engine/openings/hostOpening.ts.
  */
 function addHostedOpening(type: "door" | "window", wall: WallData): void {
-  const hostedCount = [...doorStore.getAll(), ...windowStore.getAll()].filter((opening) => opening.hostId === wall.id).length;
-  const offset = HOSTED_OFFSETS[hostedCount % HOSTED_OFFSETS.length];
-  const sill = type === "window" ? WINDOW_SILL_HEIGHT : 0;
-
-  history.beginGroup();
-  if (type === "door") {
-    const added = commandExecutor.execute({ type: "door.add", door: { hostId: wall.id } });
-    const door = added.success && added.objectId ? doorStore.get(added.objectId) : undefined;
-    const placed = door
-      ? commandExecutor.execute({ type: "door.update", id: door.id, changes: placeOpeningOnWall(wall, door.dimensions, { offset, sill }) })
-      : undefined;
-    if (placed?.success) {
-      history.endGroup();
-    } else {
-      history.cancelGroup();
-    }
-    return;
-  }
-  const added = commandExecutor.execute({ type: "window.add", window: { hostId: wall.id } });
-  const windowData = added.success && added.objectId ? windowStore.get(added.objectId) : undefined;
-  const placed = windowData
-    ? commandExecutor.execute({
-        type: "window.update",
-        id: windowData.id,
-        changes: placeOpeningOnWall(wall, windowData.dimensions, { offset, sill })
-      })
-    : undefined;
-  if (placed?.success) {
-    history.endGroup();
-  } else {
-    history.cancelGroup();
-  }
+  commandExecutor.execute(type === "door" ? { type: "door.add", door: { hostId: wall.id } } : { type: "window.add", window: { hostId: wall.id } });
 }
 
 // Successive free-standing doors are spaced along Z on the negative side,
@@ -474,6 +440,9 @@ function duplicateSelected(): void {
 // shell creates), so the callback reads this ref instead of a value.
 const sceneManager = { current: null as SceneManager | null };
 
+// Whether drags snap - a UI preference (the viewport's Snap toggle), not part of the model.
+const snapSettings = new SnapSettings();
+
 const shell = createAppShell({
   projectMeta,
   persistence,
@@ -497,7 +466,8 @@ const shell = createAppShell({
   assemblyStore,
   selectionStore,
   history,
-  commandExecutor
+  commandExecutor,
+  snapSettings
 });
 
 appRoot.append(shell.root);
@@ -515,6 +485,7 @@ sceneManager.current = new SceneManager(
   elementStore,
   selectionStore,
   commandExecutor,
-  history
+  history,
+  snapSettings
 );
 sceneManager.current.start();

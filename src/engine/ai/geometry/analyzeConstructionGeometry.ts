@@ -7,9 +7,11 @@ import { getElementKind } from "../../elements/catalog.ts";
 import type { AIContextObject, AIProjectSnapshot } from "../types";
 import type {
   AxisAlignedBox,
+  ConnectionRelationship,
   ConstructionGeometryAnalysis,
   GeometryError,
   GeometryVector,
+  HostRelationship,
   InvalidObjectGeometry,
   LocalAxisDimensions,
   ObjectGeometry,
@@ -235,5 +237,163 @@ export function analyzeConstructionGeometry(snapshot: AIProjectSnapshot): Constr
     }
   }
 
-  return { objects, relationships, invalidObjects };
+  return { objects, relationships, invalidObjects, hosts: analyzeHosts(sorted), connections: analyzeConnections(sorted) };
+}
+
+/** Slack for float noise in the relationship checks, in meters. */
+const FIT_TOLERANCE = 1e-6;
+/** How far apart two connected endpoints may be, in meters (the engine's JOINT_TOLERANCE). */
+const JOINT_TOLERANCE = 1e-3;
+
+function sameDirection(a: number, b: number): boolean {
+  const turn = 2 * Math.PI;
+  const difference = (((a - b) % turn) + turn) % turn;
+  return difference < 1e-6 || turn - difference < 1e-6;
+}
+
+/**
+ * Each hosted door and window, checked against its wall from positions
+ * alone: it must sit centered in the wall's thickness, turned with it,
+ * within its length and height, and must not overlap another opening in
+ * the same wall. Linear in the number of openings (plus each wall's own
+ * openings pairwise - a handful).
+ */
+function analyzeHosts(objects: readonly AIContextObject[]): HostRelationship[] {
+  const byId = new Map(objects.map((object) => [object.id, object]));
+  const placed: { opening: AIContextObject; wall: AIContextObject; offset: number; sill: number; entry: HostRelationship }[] = [];
+  const hosts: HostRelationship[] = [];
+
+  for (const opening of objects) {
+    if ((opening.type !== "door" && opening.type !== "window") || typeof opening.hostId !== "string") {
+      continue;
+    }
+    const wall = byId.get(opening.hostId);
+    if (!wall || wall.type !== "wall") {
+      hosts.push({
+        opening: opening.id,
+        wall: opening.hostId,
+        offset: null,
+        sill: null,
+        valid: false,
+        problems: [wall ? `${opening.hostId} is a ${wall.type}, not a wall.` : `${opening.hostId} isn't in the model.`]
+      });
+      continue;
+    }
+    const cos = Math.cos(wall.rotation);
+    const sin = Math.sin(wall.rotation);
+    const dx = opening.position.x - wall.position.x;
+    const dz = opening.position.z - wall.position.z;
+    const offset = quantize(dx * cos - dz * sin);
+    const plane = quantize(dx * sin + dz * cos);
+    const width = opening.dimensions.width ?? 0;
+    const height = opening.dimensions.height ?? 0;
+    const length = wall.dimensions.length ?? 0;
+    const wallHeight = wall.dimensions.height ?? 0;
+    const sill = quantize(opening.position.y - height / 2 - (wall.position.y - wallHeight / 2));
+    const problems: string[] = [];
+    if (Math.abs(plane) > FIT_TOLERANCE) {
+      problems.push(`${opening.id} isn't centered in ${wall.id}'s thickness.`);
+    }
+    if (!sameDirection(opening.rotation, wall.rotation)) {
+      problems.push(`${opening.id} isn't turned with ${wall.id}.`);
+    }
+    if (width > length + FIT_TOLERANCE || Math.abs(offset) > Math.max(0, (length - width) / 2) + FIT_TOLERANCE) {
+      problems.push(`${opening.id} runs past the end of ${wall.id}.`);
+    }
+    if (sill < -FIT_TOLERANCE || sill + height > wallHeight + FIT_TOLERANCE) {
+      problems.push(`${opening.id} doesn't fit ${wall.id}'s height.`);
+    }
+    const entry: HostRelationship = { opening: opening.id, wall: wall.id, offset, sill, valid: false, problems };
+    placed.push({ opening, wall, offset, sill, entry });
+    hosts.push(entry);
+  }
+
+  for (const item of placed) {
+    for (const other of placed) {
+      if (other === item || other.wall.id !== item.wall.id) {
+        continue;
+      }
+      const alongOverlap =
+        Math.abs(item.offset - other.offset) < ((item.opening.dimensions.width ?? 0) + (other.opening.dimensions.width ?? 0)) / 2 - FIT_TOLERANCE;
+      const heightOverlap =
+        item.sill < other.sill + (other.opening.dimensions.height ?? 0) - FIT_TOLERANCE &&
+        other.sill < item.sill + (item.opening.dimensions.height ?? 0) - FIT_TOLERANCE;
+      if (alongOverlap && heightOverlap) {
+        item.entry.problems.push(`${item.opening.id} overlaps ${other.opening.id} in ${item.wall.id}.`);
+      }
+    }
+  }
+  for (const entry of hosts) {
+    entry.valid = entry.problems.length === 0;
+  }
+  return hosts;
+}
+
+function endpointOf(object: AIContextObject, endpoint: "start" | "end"): GeometryVector {
+  const half = (object.dimensions.length ?? 0) / 2;
+  const sign = endpoint === "start" ? -1 : 1;
+  return {
+    x: object.position.x + sign * Math.cos(object.rotation) * half,
+    y: object.position.y,
+    z: object.position.z - sign * Math.sin(object.rotation) * half
+  };
+}
+
+/**
+ * Every endpoint connection, reported once per pair (from the side whose
+ * id and endpoint sort first, or from the only side that records it):
+ * the other element must exist, be of a kind this one connects with, list
+ * the connection back, and have its endpoint where this one's is.
+ */
+function analyzeConnections(objects: readonly AIContextObject[]): ConnectionRelationship[] {
+  const byId = new Map(objects.map((object) => [object.id, object]));
+  const found: ConnectionRelationship[] = [];
+  for (const object of objects) {
+    for (const connection of object.connections ?? []) {
+      const other = byId.get(connection.objectId);
+      const mirrored = !!other?.connections?.some(
+        (back) => back.objectId === object.id && back.endpoint === connection.objectEndpoint && back.objectEndpoint === connection.endpoint
+      );
+      const thisSideFirst =
+        compareIds(object.id, connection.objectId) < 0 ||
+        (object.id === connection.objectId && connection.endpoint <= connection.objectEndpoint);
+      if (mirrored && !thisSideFirst) {
+        continue;
+      }
+      const problems: string[] = [];
+      let gap: number | null = null;
+      if (!other) {
+        problems.push(`${connection.objectId} isn't in the model.`);
+      } else {
+        const kindConnects =
+          object.type === "element" && other.type === "element" && !!object.kind && !!other.kind &&
+          (getElementKind(object.kind)?.connectsWith.includes(other.kind) ?? false);
+        if (!kindConnects) {
+          problems.push(`A ${object.kind ?? object.type} can't connect to a ${other.kind ?? other.type}.`);
+        }
+        if (!mirrored) {
+          problems.push(`${other.id} doesn't record the connection back.`);
+        }
+        const a = endpointOf(object, connection.endpoint);
+        const b = endpointOf(other, connection.objectEndpoint);
+        gap = quantize(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z));
+        if (gap > JOINT_TOLERANCE) {
+          problems.push(`The endpoints are ${gap} m apart.`);
+        }
+      }
+      found.push({
+        a: object.id,
+        aEndpoint: connection.endpoint,
+        b: connection.objectId,
+        bEndpoint: connection.objectEndpoint,
+        gap,
+        valid: problems.length === 0,
+        problems
+      });
+    }
+  }
+  return found.sort(
+    (x, y) =>
+      compareIds(x.a, y.a) || x.aEndpoint.localeCompare(y.aEndpoint) || compareIds(x.b, y.b) || x.bEndpoint.localeCompare(y.bEndpoint)
+  );
 }

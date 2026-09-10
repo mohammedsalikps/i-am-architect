@@ -32,7 +32,7 @@ export interface CommandExecutorLike {
  */
 export const MAX_COMMANDS_PER_RESPONSE = 200;
 
-const SUPPORTED_ACTIONS: readonly string[] = ["add", "update", "delete", "duplicate"];
+const SUPPORTED_ACTIONS: readonly string[] = ["add", "update", "delete", "duplicate", "connect"];
 
 const UPDATE_OBJECT = "update_object";
 
