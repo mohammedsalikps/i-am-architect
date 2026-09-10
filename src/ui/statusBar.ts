@@ -2,9 +2,10 @@ import { el } from "./dom";
 import { GROUND_SIZE, GRID_DIVISIONS } from "../scene/ground";
 import { MOVE_STEP } from "../engine/manipulation/manipulationMath";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 
 export type StatusBarOptions = {
-  projectName: string;
+  projectMeta: ProjectMetaStore;
   selectionStore: SelectionStore;
 };
 
@@ -23,6 +24,7 @@ function statusItem(label: string, value: string): HTMLElement {
  * fact about the current engine/scene (units/snap/grid), never a
  * fabricated one:
  *   - state: reflects selectionStore, so it's real.
+ *   - project: reflects projectMeta, so it follows renames and opens.
  *   - grid: derived from ground.ts's actual GridHelper spacing, not a
  *     guessed number.
  *   - snap: the increment mouse moves and resizes change by - see
@@ -37,10 +39,11 @@ export function createStatusBar(options: StatusBarOptions): HTMLElement {
   ]);
 
   const gridSize = GROUND_SIZE / GRID_DIVISIONS;
+  const projectItem = statusItem("Project", options.projectMeta.get().name);
 
   const bar = el("footer", { className: "status-bar" }, [
     state,
-    statusItem("Project", options.projectName),
+    projectItem,
     statusItem("Units", "Meters"),
     statusItem("Snap", `${MOVE_STEP} m`),
     statusItem("Grid", `${gridSize.toFixed(1)} m`),
@@ -50,6 +53,11 @@ export function createStatusBar(options: StatusBarOptions): HTMLElement {
   const stateText = state.querySelector(".status-bar__state-text") as HTMLElement;
   options.selectionStore.subscribe((selectedId) => {
     stateText.textContent = selectedId ? "1 object selected" : "Ready";
+  });
+
+  const projectName = projectItem.querySelector(".status-bar__item-value") as HTMLElement;
+  options.projectMeta.subscribe((meta) => {
+    projectName.textContent = meta.name;
   });
 
   return bar;

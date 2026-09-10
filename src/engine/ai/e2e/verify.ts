@@ -35,7 +35,8 @@
 // of an @types/node dependency.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { clearProject, createProjectContext } from "../../project/ProjectContext.ts";
+import { clearProject, createProjectContext, loadProject, serializeProject } from "../../project/ProjectContext.ts";
+import { InMemoryProjectRepository } from "../../project/InMemoryProjectRepository.ts";
 import { firstFreeSlot } from "../../project/placement.ts";
 import { resolveConstructionObject } from "../../objects/resolveConstructionObject.ts";
 import { parseAIProjectSnapshot } from "../parseProjectSnapshot.ts";
@@ -1776,6 +1777,53 @@ async function run(): Promise<void> {
       assertTrue(context.commandExecutor.execute({ type: `${type}.update`, id: raised, changes: edit }).success, `${raised}: ${other} edited`);
       assertEqual(read(type, raised).position.y, current.position.y, `${raised}: a ${other}-only edit leaves y alone`);
     }
+  });
+
+  // --- AI after a project is opened ---
+  // A saved project opened into the fully wired app must look to AI
+  // exactly like a model built in the session - no persistence-specific
+  // AI path exists or is needed.
+
+  await check("AI after a load: the backend receives the restored snapshot and geometry, and update_object edits a restored wall as one undo step", async () => {
+    const source = createProjectContext();
+    const wallId = addThroughExecutor(source, { type: "wall.add", wall: { length: 5, position: { x: 0, z: 0 } } });
+    addThroughExecutor(source, { type: "pillar.add", pillar: { position: { x: 4, z: 0 } } });
+    const repository = new InMemoryProjectRepository();
+    const record = await repository.create({ name: "Restored", document: serializeProject(source) });
+
+    const app = wireApp(mockProviderBackend);
+    const stored = await repository.get(record.id);
+    assertTrue(stored, "the project was stored");
+    assertTrue(loadProject(app.context, stored.document).ok, "the project loads into the app");
+    assertEqual(app.context.history.canUndo(), false, "nothing to undo after the load");
+
+    await app.controller.submit(`Make ${wallId} 8 meters long`);
+
+    const sent = app.backend.requests[0].projectContext;
+    assertSameJson(sent.objects, buildAIProjectSnapshot(source).objects, "the backend saw the restored objects exactly as the original model's");
+    assertTrue(sent.geometry.objects.some((object) => object.id === wallId), "with geometry derived for them");
+    assertEqual(app.controller.getState().status, "success", "the AI edit ran");
+    assertEqual(app.context.wallStore.get(wallId)?.dimensions.length, 8, "the restored wall was resized");
+
+    app.context.history.undo();
+    assertEqual(app.context.wallStore.get(wallId)?.dimensions.length, 5, "one undo reverts the AI edit");
+    assertEqual(app.context.history.canUndo(), false, "and the load itself left nothing to undo");
+  });
+
+  await check("AI after a load: an AI house joins the loaded project as one grouped undo step", async () => {
+    const source = createProjectContext();
+    addThroughExecutor(source, { type: "wall.add", wall: { length: 6, position: { x: 0, z: 0 } } });
+
+    const app = wireApp(mockProviderBackend);
+    assertTrue(loadProject(app.context, serializeProject(source)).ok, "the project loads into the app");
+    const restored = objectsJson(app.context);
+
+    await app.controller.submit(HOUSE_PROMPT);
+
+    assertEqual(app.controller.getState().status, "success", "the house was built");
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 13, "the restored wall plus the 12-object house");
+    app.context.history.undo();
+    assertEqual(objectsJson(app.context), restored, "one undo leaves exactly the loaded project");
   });
 
   // --- Secrets and harness discipline ---

@@ -21,6 +21,16 @@ const DEFAULTS = {
 
 let nextId = 1;
 
+/** Makes new slab ids come after `ids` - the same rule as createWall.ts's reserveWallIds(). */
+export function reserveSlabIds(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const match = /^slab-(\d+)$/.exec(id);
+    if (match) {
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+  }
+}
+
 /**
  * Creates a new slab with sensible defaults - mirrors
  * wall/createWall.ts's createWallData() and pillar/createPillar.ts's/

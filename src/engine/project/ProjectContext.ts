@@ -20,6 +20,12 @@ import { SlabHistoryController } from "../history/slabHistory.ts";
 import { DoorHistoryController } from "../history/doorHistory.ts";
 import { WindowHistoryController } from "../history/windowHistory.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
+import { ProjectMetaStore } from "./ProjectMetaStore.ts";
+
+// The project-level save/load operations, next to clearProject() below -
+// see projectPersistence.ts.
+export { loadProject, serializeProject } from "./projectPersistence.ts";
+export type { LoadProjectResult, PersistableProject } from "./projectPersistence.ts";
 
 /**
  * The application's shared composition-root state: one instance each
@@ -42,6 +48,12 @@ import { CommandExecutor } from "../commands/CommandExecutor.ts";
  * across every object type (it was already generic, not wall-specific),
  * which is what gives "one selected construction object at a time"
  * across all of them with no extra code.
+ *
+ * projectMeta is the project's identity - which saved project, if any,
+ * the model belongs to, and its name. It is not part of the construction
+ * model and not undoable. The project-level operations are
+ * clearProject() (New Project), serializeProject() and loadProject()
+ * (see projectPersistence.ts and project/README.md).
  *
  * Deliberately excludes app-bootstrapping decisions (e.g. "create a
  * default wall on startup") - this module only wires infrastructure
@@ -71,6 +83,7 @@ export interface ProjectContext {
   doorHistory: DoorHistoryController;
   windowHistory: WindowHistoryController;
   commandExecutor: CommandExecutor;
+  projectMeta: ProjectMetaStore;
 }
 
 /**
@@ -78,7 +91,8 @@ export interface ProjectContext {
  * every assembly is removed through the same commands the UI uses (so
  * each store's own rules apply), then the selection and the undo history
  * are cleared - a new project starts with nothing to undo, exactly like a
- * fresh page load. Ids keep counting up, so nothing ever reuses an id.
+ * fresh page load - and the project becomes a new, unsaved "Untitled
+ * Project". Ids keep counting up, so nothing ever reuses an id.
  */
 export function clearProject(context: ProjectContext): void {
   const deletions = [
@@ -95,6 +109,7 @@ export function clearProject(context: ProjectContext): void {
   }
   context.selectionStore.clear();
   context.history.clearHistory();
+  context.projectMeta.reset();
 }
 
 /** Builds one fresh, fully-wired ProjectContext. Each call produces independent instances - nothing here is a module-level singleton. */
@@ -129,6 +144,7 @@ export function createProjectContext(): ProjectContext {
     windowStore,
     windowHistory
   );
+  const projectMeta = new ProjectMetaStore();
 
   return {
     wallStore,
@@ -146,6 +162,7 @@ export function createProjectContext(): ProjectContext {
     slabHistory,
     doorHistory,
     windowHistory,
-    commandExecutor
+    commandExecutor,
+    projectMeta
   };
 }

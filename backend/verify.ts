@@ -42,6 +42,10 @@ import type { OpenAIFetch, OpenAIHttpResponse } from "../src/engine/ai/providers
 import { BackendAIProvider } from "../src/engine/ai/providers/BackendAIProvider.ts";
 import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
 import { buildSimpleHousePlan } from "../src/engine/ai/housePlan.ts";
+import { InMemoryProjectRepository } from "../src/engine/project/InMemoryProjectRepository.ts";
+import { HttpProjectRepository } from "../src/engine/project/HttpProjectRepository.ts";
+import { ProjectNotFoundError, ProjectValidationError } from "../src/engine/project/ProjectRepository.ts";
+import type { ProjectDocument } from "../src/engine/project/projectDocument.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../src/engine/ai/types.ts";
 import { buildAIProjectContext } from "../src/engine/ai/aiProjectContext.ts";
 import { analyzeConstructionGeometry } from "../src/engine/ai/geometry/analyzeConstructionGeometry.ts";
@@ -745,6 +749,115 @@ async function run(): Promise<void> {
       );
       assertEqual(response.commands.length, 12, "12 commands");
       assertTrue(response.notes?.includes("clear of the existing objects"), "the provider's notes are relayed too");
+    });
+  });
+
+  // --- Projects: /api/projects ---
+
+  const emptyDocument: ProjectDocument = { version: 1, objects: [], assemblies: [] };
+  const oneWallDocument: ProjectDocument = {
+    version: 1,
+    objects: [
+      {
+        id: "wall-3",
+        type: "wall",
+        position: { x: 0, y: 1.35, z: 0 },
+        rotation: 0,
+        dimensions: { length: 4, height: 2.7, thickness: 0.2 },
+        material: "generic",
+        color: "#c9c9c9",
+        assemblyId: null
+      }
+    ],
+    assemblies: [{ id: "assembly-1", name: "Ground Floor", objectIds: ["wall-3"], createdAt: 1, updatedAt: 2 }]
+  };
+  const noProvider = () => makeFakeProvider(() => ({ commands: [] }));
+
+  await check("the real HttpProjectRepository creates, reads, lists and saves projects through this real server", async () => {
+    const projectRepository = new InMemoryProjectRepository();
+    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository }, async (baseUrl) => {
+      const client = new HttpProjectRepository({ baseUrl, fetch: (url, init) => fetch(url, init) });
+
+      const created = await client.create({ name: "My 2 Bedroom House", document: oneWallDocument });
+      assertEqual(created.name, "My 2 Bedroom House", "name");
+      assertDeepEqual(created.document, oneWallDocument, "the document round-tripped unchanged");
+      assertDeepEqual(await client.get(created.id), created, "read back");
+
+      const saved = await client.save(created.id, { name: "Renamed", document: emptyDocument });
+      assertEqual(saved.id, created.id, "the same project");
+      assertEqual(saved.name, "Renamed", "renamed");
+      assertDeepEqual((await projectRepository.get(created.id))?.document, emptyDocument, "the server's repository holds the saved document");
+
+      const list = await client.list();
+      assertDeepEqual(
+        list.map((summary) => [summary.id, summary.name, summary.objectCount, summary.assemblyCount]),
+        [[created.id, "Renamed", 0, 0]],
+        "the list"
+      );
+      assertEqual(await client.get("does-not-exist"), null, "an unknown id reads as null");
+
+      let notFound = false;
+      try {
+        await client.save("does-not-exist", { name: "X", document: emptyDocument });
+      } catch (error) {
+        notFound = error instanceof ProjectNotFoundError;
+      }
+      assertTrue(notFound, "saving an unknown project is ProjectNotFoundError");
+    });
+  });
+
+  await check("POST and PUT /api/projects reject an invalid name or document with a clear 400 and store nothing", async () => {
+    const projectRepository = new InMemoryProjectRepository();
+    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository }, async (baseUrl) => {
+      const send = (method: string, path: string, body: string) =>
+        fetch(`${baseUrl}${path}`, { method, headers: { "Content-Type": "application/json" }, body });
+      const wall = oneWallDocument.objects[0];
+      const cases: [unknown, string][] = [
+        [{ name: "", document: emptyDocument }, "non-empty"],
+        [{ name: "X" }, "Invalid project document"],
+        [{ name: "X", document: { ...oneWallDocument, objects: [{ ...wall, id: "roof-1", type: "roof" }] } }, "not a supported object type"],
+        [{ name: "X", document: { ...oneWallDocument, objects: [wall, wall] } }, "duplicate object id"],
+        [{ name: "X", document: { ...oneWallDocument, objects: [{ ...wall, dimensions: { length: 0, height: 2.7, thickness: 0.2 } }] } }, "greater than 0"],
+        [{ name: "X", document: { ...oneWallDocument, assemblies: [{ ...oneWallDocument.assemblies[0], objectIds: ["wall-99"] }] } }, "is not an object in this project"]
+      ];
+      for (const [body, fragment] of cases) {
+        const res = await send("POST", "/api/projects", JSON.stringify(body));
+        assertEqual(res.status, 400, `status for ${JSON.stringify(body).slice(0, 60)}`);
+        const json = (await res.json()) as { error: string };
+        assertTrue(json.error.includes(fragment), `expected an error mentioning "${fragment}", got "${json.error}"`);
+      }
+      assertEqual((await send("POST", "/api/projects", "not json")).status, 400, "a non-JSON body");
+      assertEqual((await projectRepository.list()).length, 0, "nothing was stored");
+
+      const created = await projectRepository.create({ name: "Keep", document: oneWallDocument });
+      const put = await send("PUT", `/api/projects/${created.id}`, JSON.stringify({ name: "Keep", document: { version: 2 } }));
+      assertEqual(put.status, 400, "an invalid save is rejected");
+      assertDeepEqual((await projectRepository.get(created.id))?.document, oneWallDocument, "and the stored project is untouched");
+
+      let rejected = false;
+      try {
+        await new HttpProjectRepository({ baseUrl, fetch: (url, init) => fetch(url, init) }).create({
+          name: "X",
+          document: { version: 2 } as unknown as ProjectDocument
+        });
+      } catch (error) {
+        rejected = error instanceof ProjectValidationError;
+      }
+      assertTrue(rejected, "the client surfaces a 400 as ProjectValidationError");
+    });
+  });
+
+  await check("project routes: 404 for an unknown or malformed id, 405 for other methods, CORS allows GET and PUT, 501 without a repository", async () => {
+    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN, projectRepository: new InMemoryProjectRepository() }, async (baseUrl) => {
+      assertEqual((await fetch(`${baseUrl}/api/projects/nope`)).status, 404, "unknown id");
+      assertEqual((await fetch(`${baseUrl}/api/projects/${encodeURIComponent("../etc/passwd")}`)).status, 404, "malformed id");
+      assertEqual((await fetch(`${baseUrl}/api/projects`, { method: "DELETE" })).status, 405, "DELETE isn't offered");
+      const preflight = await fetch(`${baseUrl}/api/projects`, { method: "OPTIONS" });
+      const methods = preflight.headers.get("access-control-allow-methods") ?? "";
+      assertTrue(methods.includes("GET") && methods.includes("PUT"), `CORS allows GET and PUT, got "${methods}"`);
+    });
+    await withServer({ provider: noProvider(), frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      assertEqual((await fetch(`${baseUrl}/api/projects`)).status, 501, "no repository configured");
     });
   });
 

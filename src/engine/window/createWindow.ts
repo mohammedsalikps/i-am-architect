@@ -21,6 +21,16 @@ const DEFAULTS = {
 
 let nextId = 1;
 
+/** Makes new window ids come after `ids` - the same rule as createWall.ts's reserveWallIds(). */
+export function reserveWindowIds(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const match = /^window-(\d+)$/.exec(id);
+    if (match) {
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+  }
+}
+
 /**
  * Creates a new window with sensible defaults - mirrors
  * door/createDoor.ts's createDoorData() and the other sibling object

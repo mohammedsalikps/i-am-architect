@@ -1,24 +1,32 @@
 import { el } from "./dom";
+import { MAX_PROJECT_NAME_LENGTH } from "../engine/project/projectDocument";
 import type { HistoryManager } from "../engine/history/HistoryManager";
+import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
+import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 
 export type TopBarOptions = {
-  projectName: string;
+  projectMeta: ProjectMetaStore;
+  persistence: ProjectPersistenceController;
   onNewProject: () => void;
+  onOpenProject: () => void;
+  onSaveProject: () => void;
   onUndo: () => void;
   onRedo: () => void;
   history: HistoryManager;
 };
 
 /**
- * Title bar: branding, a quick-access cluster (New Project/Save/Undo/
- * Redo - the same document-level actions the old header exposed,
- * relocated here), the project name, a search field, and a
+ * Title bar: branding, a quick-access cluster (New Project/Open/Save/
+ * Undo/Redo), the project's name and save status, a search field, and a
  * notifications/settings/profile icon cluster.
  *
- * "New Project" empties the in-memory model (see main.ts's newProject).
- * "Save" is disabled - there is no persistence yet - as are search and
- * the icon cluster (styled-but-inert, the same pattern already used for
- * the AI command input) rather than clickable no-ops.
+ * "New Project" empties the model (see main.ts's newProject), "Open…"
+ * shows the project chooser (ui/projectChooser.ts), and "Save" saves the
+ * model through ProjectPersistenceController. The name is an ordinary
+ * text field: it renames the project on Enter or blur, and a blank name
+ * is reverted. Neither renaming nor saving is an undo step. Search and
+ * the icon cluster stay disabled (styled-but-inert, the same pattern used
+ * elsewhere) rather than clickable no-ops.
  */
 export function createTopBar(options: TopBarOptions): HTMLElement {
   const branding = el("div", { className: "app-header__brand" }, [
@@ -48,20 +56,71 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
   const newProjectButton = el("button", { className: "toolbar-button", text: "New Project", attrs: { type: "button" } });
   newProjectButton.addEventListener("click", options.onNewProject);
 
+  const openButton = el("button", {
+    className: "toolbar-button",
+    text: "Open…",
+    attrs: { type: "button", title: "Open a saved project" }
+  });
+  openButton.addEventListener("click", options.onOpenProject);
+
+  const saveButton = el("button", {
+    className: "toolbar-button",
+    text: "Save",
+    attrs: { type: "button", title: "Save this project" }
+  });
+  saveButton.addEventListener("click", options.onSaveProject);
+
   const quickAccess = el("div", { className: "app-header__actions" }, [
     newProjectButton,
-    el("button", {
-      className: "toolbar-button",
-      text: "Save",
-      attrs: { type: "button", disabled: "true", title: "Coming soon" }
-    }),
+    openButton,
+    saveButton,
     undoButton,
     redoButton
   ]);
 
+  const nameInput = el("input", {
+    className: "app-header__project-name",
+    attrs: { type: "text", "aria-label": "Project name", maxlength: String(MAX_PROJECT_NAME_LENGTH), spellcheck: "false" }
+  });
+  options.projectMeta.subscribe((meta) => {
+    // Never overwrite what the user is in the middle of typing.
+    if (document.activeElement !== nameInput) {
+      nameInput.value = meta.name;
+    }
+    nameInput.title = meta.id === null ? "Not saved yet" : `Saved project - last saved ${new Date(meta.updatedAt ?? "").toLocaleString()}`;
+  });
+  nameInput.addEventListener("change", () => {
+    options.projectMeta.rename(nameInput.value); // refuses a blank name
+    nameInput.value = options.projectMeta.get().name;
+  });
+  nameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      nameInput.blur(); // commits through "change"
+    } else if (event.key === "Escape") {
+      nameInput.value = options.projectMeta.get().name;
+      nameInput.blur();
+    }
+  });
+
+  const saveStatus = el("span", {
+    className: "app-header__save-status",
+    attrs: { role: "status", "aria-live": "polite" }
+  });
+  options.persistence.subscribe((state) => {
+    const busy = state.status === "saving" || state.status === "opening";
+    saveButton.disabled = busy;
+    openButton.disabled = busy;
+    newProjectButton.disabled = busy;
+    saveButton.textContent = state.status === "saving" ? "Saving…" : "Save";
+    saveStatus.textContent = state.message ?? "";
+    saveStatus.title = state.message ?? "";
+    saveStatus.className = `app-header__save-status app-header__save-status--${state.status}`;
+  });
+
   const projectArea = el("div", { className: "app-header__project" }, [
     el("span", { className: "app-header__project-label", text: "Project" }),
-    el("span", { className: "app-header__project-name", text: options.projectName })
+    nameInput,
+    saveStatus
   ]);
 
   const search = el("input", {

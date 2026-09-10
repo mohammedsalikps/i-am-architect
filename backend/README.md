@@ -195,6 +195,29 @@ Responses:
 | `502` | The provider call failed (bad key, OpenAI error, malformed OpenAI response, etc.) | `{ "error": "..." }` - the same clear, key-free messages `OpenAIProvider` already produces |
 | `500` | An unexpected bug in this server | `{ "error": "Internal server error." }` |
 
+### Projects: `/api/projects`
+
+Project storage for the frontend's Save and Open… (see
+`src/engine/project/README.md`). Projects are kept in an
+`InMemoryProjectRepository` - by both `npm start` and `npm run mock` -
+so they last as long as the server process. `createServer()` takes the
+repository as its `projectRepository` option; without one, these routes
+answer `501`.
+
+| Method and path | Body | Success |
+|---|---|---|
+| `GET /api/projects` | - | `200 { "projects": [{ id, name, createdAt, updatedAt, objectCount, assemblyCount }] }`, most recently updated first |
+| `POST /api/projects` | `{ "name": "...", "document": ProjectDocument }` | `201 { "project": { id, name, createdAt, updatedAt, document } }` |
+| `GET /api/projects/:id` | - | `200 { "project": ... }`, or `404` |
+| `PUT /api/projects/:id` | `{ "name": "...", "document": ProjectDocument }` | `200 { "project": ... }`, or `404` |
+
+Every body is validated with the shared `parseProjectInput()` before it
+is stored: the name must be non-empty (at most 120 characters), and the
+document must pass `parseProjectDocument()`. A rejected body gets `400 {
+"error": "..." }` naming the problem. A storage failure gets `500 {
+"error": "Project storage failed." }` with no internal details. There
+is no authentication yet - see "Security posture".
+
 ### `GET /health`
 
 Returns `200 { "status": "ok" }` - a liveness check, no provider call.

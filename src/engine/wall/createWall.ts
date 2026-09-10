@@ -22,6 +22,21 @@ const DEFAULTS = {
 let nextId = 1;
 
 /**
+ * Makes every id createWallData() hands out from now on come after
+ * `ids` - called when a saved project is loaded, since its walls keep
+ * their ids (see project/projectPersistence.ts). Never moves the counter
+ * backwards, so no id is ever reused within a session.
+ */
+export function reserveWallIds(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const match = /^wall-(\d+)$/.exec(id);
+    if (match) {
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+  }
+}
+
+/**
  * Creates a new wall with sensible defaults. The base always rests on
  * the ground (y = height / 2) unless a full position is supplied.
  * Options stay flat (length/height/thickness) for a simple call site -

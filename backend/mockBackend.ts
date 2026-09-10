@@ -1,5 +1,6 @@
 import { createServer } from "./src/createServer.ts";
 import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
+import { InMemoryProjectRepository } from "../src/engine/project/InMemoryProjectRepository.ts";
 
 /**
  * A keyless stand-in for the real AI proxy backend, for frontend
@@ -10,7 +11,8 @@ import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
  * the same routing, CORS, request validation, and status codes. The only
  * difference is which AIProvider sits behind it - the deterministic,
  * keyword-matching MockAIProvider instead of OpenAIProvider - so no
- * OPENAI_API_KEY is needed and no OpenAI request is ever made.
+ * OPENAI_API_KEY is needed and no OpenAI request is ever made. Projects
+ * are stored in memory, exactly as the real server stores them today.
  *
  * Run it with:
  *   npm run mock
@@ -29,10 +31,15 @@ import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
 const port = Number(process.env.PORT ?? 8787);
 const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 
-const server = createServer({ provider: new MockAIProvider(), frontendOrigin });
+const server = createServer({
+  provider: new MockAIProvider(),
+  frontendOrigin,
+  projectRepository: new InMemoryProjectRepository()
+});
 
 server.listen(port, () => {
   console.log(`MOCK AI proxy backend listening on http://localhost:${port}`);
   console.log(`Accepting requests from origin: ${frontendOrigin}`);
   console.log("No OpenAI key is used and no OpenAI request is made - responses are deterministic keyword matches.");
+  console.log("Projects are stored in memory - they last until this server stops.");
 });

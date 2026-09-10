@@ -21,6 +21,16 @@ const DEFAULTS = {
 
 let nextId = 1;
 
+/** Makes new pillar ids come after `ids` - the same rule as createWall.ts's reserveWallIds(). */
+export function reservePillarIds(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const match = /^pillar-(\d+)$/.exec(id);
+    if (match) {
+      nextId = Math.max(nextId, Number(match[1]) + 1);
+    }
+  }
+}
+
 /**
  * Creates a new pillar with sensible defaults - mirrors
  * wall/createWall.ts's createWallData() exactly. The base always rests

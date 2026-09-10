@@ -1,8 +1,12 @@
 import "./ui/styles.css";
 import { SceneManager } from "./scene/SceneManager";
 import { createAppShell } from "./ui/layout";
+import { createProjectChooser } from "./ui/projectChooser";
+import type { ProjectOpenResult } from "./ui/projectChooser";
 import { clearProject, createProjectContext } from "./engine/project/ProjectContext";
 import { firstFreeSlot } from "./engine/project/placement";
+import { HttpProjectRepository } from "./engine/project/HttpProjectRepository";
+import { ProjectPersistenceController } from "./engine/project/ProjectPersistenceController";
 import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
 import type {
@@ -37,20 +41,21 @@ const {
   assemblyStore,
   selectionStore,
   history,
-  commandExecutor
+  commandExecutor,
+  projectMeta
 } = project;
 
-// The AI proxy backend's base URL (see backend/README.md) - a
-// non-secret value (just where to send requests, never a credential),
-// read via Vite's client-side env mechanism (only VITE_-prefixed vars
-// are ever inlined into the browser bundle - see .env.example and
-// src/engine/ai/README.md "Security boundary" for why OPENAI_API_KEY
-// itself never appears here or anywhere else client-side). Defaults to
-// the backend's own documented local-dev port when unset - not a
-// same-origin fallback (this app's Vite dev server has no proxy
-// configured for a different-origin backend), just an explicit,
-// documented absolute default.
-const AI_BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:8787";
+// The backend's base URL (see backend/README.md) - a non-secret value
+// (just where to send requests, never a credential), read via Vite's
+// client-side env mechanism (only VITE_-prefixed vars are ever inlined
+// into the browser bundle - see .env.example and src/engine/ai/README.md
+// "Security boundary" for why OPENAI_API_KEY itself never appears here
+// or anywhere else client-side). The same backend serves AI requests and
+// project storage. Defaults to the backend's own documented local-dev
+// port when unset - not a same-origin fallback (this app's Vite dev
+// server has no proxy configured for a different-origin backend), just
+// an explicit, documented absolute default.
+const BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:8787";
 
 // BackendAIProvider never reads an environment variable or global
 // fetch itself (see its own docs) - both are supplied explicitly here,
@@ -59,7 +64,7 @@ const AI_BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:
 // always invoked with the correct `this` - some environments throw on
 // a detached `fetch` reference.
 const aiProvider = new BackendAIProvider({
-  baseUrl: AI_BACKEND_URL,
+  baseUrl: BACKEND_URL,
   fetch: (url, init) => fetch(url, init)
 });
 
@@ -81,6 +86,16 @@ const aiService = new AIService({
 function submitAiInstruction(instruction: string): Promise<AIPipelineResult> {
   return aiService.submit(instruction);
 }
+
+// Project storage goes through the backend's /api/projects routes - the
+// browser holds no storage credential of any kind (see
+// src/engine/project/README.md). Same injected-transport rule as
+// BackendAIProvider above.
+const projectRepository = new HttpProjectRepository({
+  baseUrl: BACKEND_URL,
+  fetch: (url, init) => fetch(url, init)
+});
+const persistence = new ProjectPersistenceController({ repository: projectRepository, project });
 
 // Each type has a row of default slots; a new object takes the first slot
 // no existing object of that type sits on (see engine/project/placement.ts),
@@ -180,21 +195,53 @@ function addWindow(): void {
 addWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
+/** True when discarding the model would lose something: any object or assembly. */
+function modelHasContent(): boolean {
+  return (
+    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore].some((store) => store.getAll().length > 0) ||
+    assemblyStore.getAll().length > 0
+  );
+}
+
 /**
- * "New Project": empties the in-memory model - objects, assemblies,
- * selection, and undo history - through clearProject() (see
- * ProjectContext.ts). Nothing is saved anywhere, so when there is
- * anything to lose the user confirms first.
+ * "New Project": empties the model - objects, assemblies, selection, and
+ * undo history - and starts a new, unsaved "Untitled Project", through
+ * clearProject() (see ProjectContext.ts). When there is anything to lose
+ * the user confirms first.
  */
 function newProject(): void {
-  const hasContent =
-    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore].some((store) => store.getAll().length > 0) ||
-    assemblyStore.getAll().length > 0;
-  if (hasContent && !window.confirm("Start a new project? The current model, its assemblies, and its undo history will be discarded.")) {
+  if (persistence.isBusy()) {
+    return;
+  }
+  if (modelHasContent() && !window.confirm("Start a new project? The current model, its assemblies, and its undo history will be discarded.")) {
     return;
   }
   clearProject(project);
+  persistence.reset();
 }
+
+/** "Save": stores the model under the project's name - see ProjectPersistenceController.save(). Never an undo step. */
+function saveProject(): void {
+  void persistence.save();
+}
+
+/**
+ * Opens a saved project from the chooser, replacing the current model
+ * (see loadProject()). When the current model has content, the user
+ * confirms first - opening doesn't save it.
+ */
+async function openSavedProject(id: string, name: string): Promise<ProjectOpenResult> {
+  if (modelHasContent() && !window.confirm(`Open "${name}"? The current model and its undo history will be replaced - save first to keep them.`)) {
+    return { opened: false };
+  }
+  const opened = await persistence.open(id);
+  return opened ? { opened: true } : { opened: false, error: persistence.getState().message ?? "The project could not be opened." };
+}
+
+const projectChooser = createProjectChooser({
+  listProjects: () => persistence.listProjects(),
+  onOpen: openSavedProject
+});
 
 /**
  * Duplicate/Delete now act on "whichever construction object is
@@ -272,7 +319,8 @@ function duplicateSelected(): void {
 const sceneManager = { current: null as SceneManager | null };
 
 const shell = createAppShell({
-  projectName: "Untitled Project",
+  projectMeta,
+  persistence,
   onViewChange: (preset) => sceneManager.current?.setView(preset),
   onAddWall: addWall,
   onAddPillar: addPillar,
@@ -283,6 +331,8 @@ const shell = createAppShell({
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
   onNewProject: newProject,
+  onOpenProject: () => projectChooser.open(),
+  onSaveProject: saveProject,
   onUndo: () => history.undo(),
   onRedo: () => history.redo(),
   onSubmitAiInstruction: submitAiInstruction,
@@ -299,6 +349,8 @@ const shell = createAppShell({
 });
 
 appRoot.append(shell.root);
+// Outside the shell's six-row grid - it's a fixed overlay.
+document.body.append(projectChooser.element);
 
 sceneManager.current = new SceneManager(
   shell.viewportContainer,

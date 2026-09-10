@@ -16,6 +16,16 @@ export interface CreateAssemblyOptions {
 
 let nextAssemblyId = 1;
 
+/** Makes new assembly ids come after `ids` - the same rule as createWall.ts's reserveWallIds(), for loaded projects. */
+export function reserveAssemblyIds(ids: Iterable<string>): void {
+  for (const id of ids) {
+    const match = /^assembly-(\d+)$/.exec(id);
+    if (match) {
+      nextAssemblyId = Math.max(nextAssemblyId, Number(match[1]) + 1);
+    }
+  }
+}
+
 /** Creates a new assembly with a fresh id and createdAt === updatedAt (both Date.now()). */
 export function createAssemblyData(options: CreateAssemblyOptions): AssemblyData {
   const now = Date.now();

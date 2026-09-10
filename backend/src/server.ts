@@ -1,6 +1,7 @@
 import { createServer } from "./createServer.ts";
 import { OpenAIProvider } from "../../src/engine/ai/providers/OpenAIProvider.ts";
 import type { OpenAIFetch } from "../../src/engine/ai/providers/OpenAIProvider.ts";
+import { InMemoryProjectRepository } from "../../src/engine/project/InMemoryProjectRepository.ts";
 
 /**
  * Entry point for the AI proxy backend. THIS IS THE ONLY FILE IN THE
@@ -36,9 +37,17 @@ const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
 const nodeFetch: OpenAIFetch = (url, init) => fetch(url, init);
 
 const provider = new OpenAIProvider({ apiKey, fetch: nodeFetch });
-const server = createServer({ provider, frontendOrigin });
+
+// Projects live in memory until a database is configured - they last as
+// long as this process. A database-backed ProjectRepository (and its
+// credentials) would be constructed here instead. See
+// src/engine/project/README.md.
+const projectRepository = new InMemoryProjectRepository();
+
+const server = createServer({ provider, frontendOrigin, projectRepository });
 
 server.listen(port, () => {
   console.log(`AI proxy backend listening on http://localhost:${port}`);
   console.log(`Accepting requests from origin: ${frontendOrigin}`);
+  console.log("Projects are stored in memory - they last until this server stops.");
 });

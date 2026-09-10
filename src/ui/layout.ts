@@ -18,9 +18,14 @@ import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
+import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
+import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 
 export type AppShellOptions = {
-  projectName: string;
+  /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
+  projectMeta: ProjectMetaStore;
+  /** Save/Open state, rendered by the top bar - see ProjectPersistenceController. */
+  persistence: ProjectPersistenceController;
   onViewChange: (preset: ViewPreset) => void;
   onAddWall: () => void;
   onAddPillar: () => void;
@@ -30,8 +35,12 @@ export type AppShellOptions = {
   onAddWindow: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
-  /** Empties the in-memory project - see main.ts's newProject. */
+  /** Empties the project - see main.ts's newProject. */
   onNewProject: () => void;
+  /** Shows the project chooser - see ui/projectChooser.ts. */
+  onOpenProject: () => void;
+  /** Saves the project - see main.ts's saveProject. */
+  onSaveProject: () => void;
   onUndo: () => void;
   onRedo: () => void;
   /** Sends one command-bar AI instruction through AICommandPipeline - see main.ts (constructed from AIService.submit) and commandBar.ts's "AI Prompt" tab. */
@@ -71,8 +80,11 @@ export type AppShell = {
  */
 export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
-    projectName: options.projectName,
+    projectMeta: options.projectMeta,
+    persistence: options.persistence,
     onNewProject: options.onNewProject,
+    onOpenProject: options.onOpenProject,
+    onSaveProject: options.onSaveProject,
     onUndo: options.onUndo,
     onRedo: options.onRedo,
     history: options.history
@@ -125,7 +137,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const commandBar = createCommandBar(options.onAddWall, options.onSubmitAiInstruction);
 
-  const statusBar = createStatusBar({ projectName: options.projectName, selectionStore: options.selectionStore });
+  const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore });
 
   const root = el("div", { className: "app-shell" }, [
     topBar,

@@ -5,23 +5,29 @@ import { AI_SUPPORTED_OBJECT_TYPES } from "../../src/engine/ai/types.ts";
 import type { AIProjectContext } from "../../src/engine/ai/types.ts";
 import { parseAIProjectContext } from "../../src/engine/ai/aiProjectContext.ts";
 import type { ObjectType } from "../../src/engine/objects/types.ts";
+import { ProjectNotFoundError, ProjectValidationError, parseProjectInput } from "../../src/engine/project/ProjectRepository.ts";
+import type { ProjectRepository } from "../../src/engine/project/ProjectRepository.ts";
 
 /**
- * The AI proxy backend's HTTP layer. This is the ONLY new "mutation
- * path" this milestone introduces, and it doesn't mutate anything at
- * all: it accepts `{ instruction, projectContext, availableObjectTypes
- * }`, calls `options.provider.interpret(...)` (a real `OpenAIProvider`
- * in production - see server.ts - or a test double here), and relays
- * back exactly what the provider returned (`{ commands, notes }`),
- * unvalidated and unexecuted.
+ * The backend's HTTP layer. It has two jobs, and executes construction
+ * commands for neither:
+ *
+ * - `POST /api/ai/interpret` accepts `{ instruction, projectContext,
+ *   availableObjectTypes }`, calls `options.provider.interpret(...)` (a
+ *   real `OpenAIProvider` in production - see server.ts - or a test
+ *   double here), and relays back exactly what the provider returned
+ *   (`{ commands, notes }`), unvalidated and unexecuted.
+ * - `/api/projects` stores and returns project documents through the
+ *   injected `ProjectRepository` (see src/engine/project/). Every
+ *   document is validated with the shared parseProjectDocument() before
+ *   it is stored; the browser validates it again before loading it.
  *
  * `CommandExecutor` is never imported here, and nothing under
  * `src/engine/commands/` is either - this server never turns a command
  * into a real mutation. That still happens exactly where it always has:
  * client-side, inside `AICommandPipeline.run()`, which structurally
  * validates every command and only then calls `CommandExecutor.execute()`.
- * A future client-side `AIProvider` that calls this endpoint (not built
- * in this milestone - see backend/README.md) would hand this response
+ * The frontend's `BackendAIProvider` hands this endpoint's response
  * straight to the existing `AICommandPipeline`, completely unchanged -
  * "CommandExecutor is the only mutation path" stays true with this
  * server in the loop for exactly the same reason it stayed true when
@@ -47,6 +53,13 @@ export interface CreateServerOptions {
    * to add.
    */
   frontendOrigin: string;
+  /**
+   * Where `/api/projects` stores projects - server.ts and mockBackend.ts
+   * pass an `InMemoryProjectRepository`; a database-backed repository
+   * (Supabase, holding its credentials here on the server) would be
+   * passed the same way. Without one, the project routes answer 501.
+   */
+  projectRepository?: ProjectRepository;
 }
 
 // Generous for this endpoint's small JSON payloads, small enough to
@@ -55,9 +68,13 @@ export interface CreateServerOptions {
 // (in this milestone) has no other abuse protection.
 const MAX_BODY_BYTES = 1_000_000;
 
+const PROJECTS_PATH = "/api/projects";
+/** Project ids are UUIDs (or test ids) - letters, digits, dashes and underscores. */
+const PROJECT_ID = /^[A-Za-z0-9_-]{1,100}$/;
+
 function setCommonHeaders(res: ServerResponse, frontendOrigin: string): void {
   res.setHeader("Access-Control-Allow-Origin", frontendOrigin);
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   // Tells caches/CDNs the response varies by Origin - correct hygiene
   // whenever Access-Control-Allow-Origin reflects a specific origin.
@@ -163,9 +180,107 @@ function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
   };
 }
 
+/** The id in "/api/projects/<id>", or null if it isn't a well-formed project id. */
+function projectIdFrom(path: string): string | null {
+  let id: string;
+  try {
+    id = decodeURIComponent(path.slice(PROJECTS_PATH.length + 1));
+  } catch {
+    return null;
+  }
+  return PROJECT_ID.test(id) ? id : null;
+}
+
+/**
+ * `/api/projects` - list, create, read, and save projects. Every body is
+ * checked with the shared parseProjectInput() (a name, and a document
+ * that passes parseProjectDocument()) before the repository sees it.
+ */
+async function handleProjectRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  method: string,
+  path: string,
+  repository: ProjectRepository | undefined
+): Promise<void> {
+  if (!repository) {
+    sendJson(res, 501, { error: "Project storage is not configured on this server." });
+    return;
+  }
+
+  try {
+    if (path === PROJECTS_PATH) {
+      if (method === "GET") {
+        sendJson(res, 200, { projects: await repository.list() });
+        return;
+      }
+      if (method === "POST") {
+        const body = await readJsonBody(req);
+        if (!body.ok) {
+          sendJson(res, body.status, { error: body.error });
+          return;
+        }
+        const parsed = parseProjectInput(body.value);
+        if (!parsed.ok) {
+          sendJson(res, 400, { error: parsed.error });
+          return;
+        }
+        sendJson(res, 201, { project: await repository.create(parsed.input) });
+        return;
+      }
+      sendJson(res, 405, { error: `${method} is not allowed on ${PROJECTS_PATH}.` });
+      return;
+    }
+
+    const id = projectIdFrom(path);
+    if (id === null) {
+      sendJson(res, 404, { error: "No such project." });
+      return;
+    }
+
+    if (method === "GET") {
+      const record = await repository.get(id);
+      if (!record) {
+        sendJson(res, 404, { error: `No saved project with id "${id}".` });
+        return;
+      }
+      sendJson(res, 200, { project: record });
+      return;
+    }
+    if (method === "PUT") {
+      const body = await readJsonBody(req);
+      if (!body.ok) {
+        sendJson(res, body.status, { error: body.error });
+        return;
+      }
+      const parsed = parseProjectInput(body.value);
+      if (!parsed.ok) {
+        sendJson(res, 400, { error: parsed.error });
+        return;
+      }
+      sendJson(res, 200, { project: await repository.save(id, parsed.input) });
+      return;
+    }
+    sendJson(res, 405, { error: `${method} is not allowed on a project.` });
+  } catch (error) {
+    if (error instanceof ProjectNotFoundError) {
+      sendJson(res, 404, { error: error.message });
+      return;
+    }
+    if (error instanceof ProjectValidationError) {
+      sendJson(res, 400, { error: error.message });
+      return;
+    }
+    // A storage failure - never leak its details to the client.
+    console.error("Project storage failed:", error);
+    sendJson(res, 500, { error: "Project storage failed." });
+  }
+}
+
 async function handleRequest(req: IncomingMessage, res: ServerResponse, options: CreateServerOptions): Promise<void> {
   const method = req.method ?? "GET";
   const url = req.url ?? "/";
+  const path = url.split("?")[0];
 
   setCommonHeaders(res, options.frontendOrigin);
 
@@ -178,6 +293,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, options:
 
   if (method === "GET" && url === "/health") {
     sendJson(res, 200, { status: "ok" });
+    return;
+  }
+
+  if (path === PROJECTS_PATH || path.startsWith(`${PROJECTS_PATH}/`)) {
+    await handleProjectRequest(req, res, method, path, options.projectRepository);
     return;
   }
 
@@ -221,7 +341,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, options:
   sendJson(res, 404, { error: `Not found: ${method} ${url}` });
 }
 
-/** Builds (but does not start) the AI proxy backend's HTTP server. Call `.listen(port)` on the result. */
+/** Builds (but does not start) the backend's HTTP server. Call `.listen(port)` on the result. */
 export function createServer(options: CreateServerOptions): Server {
   return createHttpServer((req, res) => {
     handleRequest(req, res, options).catch((error: unknown) => {

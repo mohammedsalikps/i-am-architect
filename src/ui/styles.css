@@ -149,9 +149,128 @@ button {
   color: var(--color-text-muted);
 }
 
+/* The project name is an editable field that reads as a title until focused. */
 .app-header__project-name {
+  width: 200px;
+  font: inherit;
   font-weight: 500;
+  color: var(--color-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.app-header__project-name:hover {
+  border-color: var(--color-border);
+}
+
+.app-header__project-name:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+  background: var(--color-bg);
+}
+
+.app-header__save-status {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.app-header__save-status--saved,
+.app-header__save-status--opened {
+  color: var(--color-success);
+}
+
+.app-header__save-status--error {
+  color: #e5746b;
+}
+
+/* ---------- Project chooser ("Open…") ---------- */
+
+.project-chooser {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.project-chooser[hidden] {
+  display: none;
+}
+
+.project-chooser__panel {
+  width: min(520px, calc(100vw - 32px));
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.project-chooser__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.project-chooser__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.project-chooser__message {
+  margin: 0;
+  padding: 12px 16px;
+  color: var(--color-text-muted);
+}
+
+.project-chooser__list {
+  overflow-y: auto;
+}
+
+.project-chooser__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.project-chooser__item:last-child {
+  border-bottom: none;
+}
+
+.project-chooser__item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.project-chooser__item-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-chooser__item-meta {
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 
 .app-header__search {
