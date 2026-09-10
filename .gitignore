@@ -7,7 +7,14 @@ dist/
 # the Claude Code browser preview) - not part of the application.
 .claude/
 
-# Environment/secret files, in case any are added later.
+# Environment/secret files - never committed. Only the value-free
+# templates (.env.example, .env.<name>.example) are.
 .env
 .env.*
 !.env.example
+!.env.*.example
+
+# Local deployment CLI state (project links, not credentials, but per-person).
+.vercel/
+.fly/
+.railway/

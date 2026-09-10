@@ -79,8 +79,19 @@ ones; the tests wire test doubles, so no test can reach a real service.
 - **Client-supplied geometry is never trusted.** The provider only sees
   geometry this server derived itself from the snapshot it has just
   validated and sanitized (`parseAIProjectContext()`).
-- CORS is restricted to one configurable origin (`FRONTEND_ORIGIN`). That
-  is not authentication; the token check is.
+- **CORS allows exact origins only.** `FRONTEND_ORIGIN` lists them
+  (comma-separated - the deployed frontend, plus `http://localhost:5173`
+  in development). A request carrying any other `Origin` gets `403` before
+  routing, authentication or storage. Wildcards and paths are refused, and
+  non-local origins must be `https://`. CORS is not authentication; the
+  token check is.
+- **Minimal, safe request logs.** With `requestLog` set (server.ts sets
+  it), each request produces one JSON line: time, method, route (project ids
+  replaced by `:id`), operation, status, duration, `auth` (`user`, `none`,
+  `invalid`, `unverified`) and a short failure reason - never a token,
+  password, email address, or document. `auth.verify.ts` checks this.
+- **Production guard.** With `NODE_ENV=production` (the Dockerfile sets it),
+  `LOCAL_AUTH=memory` is refused.
 - Request bodies are capped at 1 MB (16 KB for auth routes) - `413`
   beyond that.
 
@@ -111,10 +122,11 @@ dependency needed.
    **Email** enabled. With **Confirm email** on, a new account must click
    the emailed link before signing in (the app says so); with it off, sign
    up signs straight in.
-2. Create the `projects` table, its policies and trigger: run
-   `supabase/migrations/20260910000000_create_projects.sql` in the SQL
-   editor (or `supabase db push` from this directory with the Supabase
-   CLI). It is safe to run again.
+2. Create the `projects` table, its policies and trigger: run the files in
+   `supabase/migrations/` in filename order in the SQL editor
+   (`20260910000000_create_projects.sql`, then
+   `20260911000000_projects_document_check.sql`), or `supabase db push`
+   from this directory with the Supabase CLI. Both are safe to run again.
 3. From **Project Settings → API**, copy the project URL and the **anon /
    publishable** key into `.env` as `SUPABASE_URL` and
    `SUPABASE_ANON_KEY`. Do **not** use the service-role / secret key.
@@ -234,9 +246,26 @@ loopback:
   the real server, compared, then edited by hand and by AI with undo and
   redo, and saved again (runs with `--experimental-transform-types`).
 
-No test talks to a real Supabase project. A credentialed integration test
-against a real (non-production) project would be a separate, opt-in suite -
-see "Not included yet".
+No test in `npm run verify` talks to a real Supabase project.
+
+### Real infrastructure tests (opt-in)
+
+Separate from `npm run verify`, and only with credentials in the
+gitignored `backend/.env.integration` (template:
+`.env.integration.example`):
+
+- `npm run test:integration` - the real backend code, run locally, against
+  a real **staging** Supabase project: auth, RLS and grants, the complete
+  house round trip, two-user isolation through the backend and directly
+  through PostgREST, and the database's own rules
+  (`integration/supabase.integration.ts`).
+- `npm run test:deployed` - the deployed backend and frontend over HTTPS:
+  health, CORS, signed-out refusals, the frontend's CSP and a secret scan
+  of what it serves, a project round trip, two-user isolation, optionally
+  one real AI request, and sign-out (`integration/deployed.smoke.ts`).
+
+Both refuse to run unless `INTEGRATION_CONFIRM_NON_PRODUCTION=yes` and the
+project ref matches `SUPABASE_URL`. See `../DEPLOYMENT.md`.
 
 These suites are **not** part of the root project's `npm run verify` -
 they need this directory's own `npm install`.
@@ -250,7 +279,6 @@ they need this directory's own `npm install`.
 - **Local JWT verification.** Each request's token is checked with
   Supabase Auth (`/auth/v1/user`) - one extra round trip; verifying JWTs
   locally against the project's signing keys would remove it.
-- **A credentialed integration suite** against a real, non-production
-  Supabase project.
-- **Deployment configuration.** Hosting this process (process manager,
-  HTTPS termination, secrets storage) is a separate concern.
+- **Deployment** is described in `../DEPLOYMENT.md`: the root `Dockerfile`
+  and `fly.toml` run this backend on Fly.io (or any Docker host with
+  HTTPS), with secrets in the host's secret store.

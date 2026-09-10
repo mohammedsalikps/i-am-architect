@@ -8,7 +8,12 @@
     "start": "node --env-file=.env src/server.ts",
     "dev": "node --env-file=.env --watch src/server.ts",
     "mock": "node mockBackend.ts",
-    "verify": "node verify.ts && node auth.verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types persistence.verify.ts"
+    "verify": "node verify.ts && node auth.verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types persistence.verify.ts",
+    "test:integration": "node --env-file=.env.integration --disable-warning=ExperimentalWarning --experimental-transform-types integration/supabase.integration.ts",
+    "test:deployed": "node --env-file=.env.integration --disable-warning=ExperimentalWarning --experimental-transform-types integration/deployed.smoke.ts"
+  },
+  "engines": {
+    "node": ">=22.18"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

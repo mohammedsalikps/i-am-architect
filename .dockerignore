@@ -1,0 +1,11 @@
+# The backend image needs only these (see Dockerfile). Everything else -
+# including every .env file, node_modules, dist and .git - stays out.
+**
+!package.json
+!backend/package.json
+!backend/src
+!src/engine
+**/verify.ts
+src/engine/testing
+**/.env
+**/.env.*

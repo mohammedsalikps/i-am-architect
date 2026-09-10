@@ -25,13 +25,15 @@ import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
 import { SupabaseAuthService } from "./src/auth/SupabaseAuthService.ts";
 import { AuthError } from "./src/auth/AuthService.ts";
 import { SupabaseProjectRepository, SupabaseProjectStore } from "./src/projects/SupabaseProjectRepository.ts";
+import { ProjectStorageUnavailableError } from "./src/projects/ProjectStore.ts";
 import type { ProjectStore } from "./src/projects/ProjectStore.ts";
 import type { SupabaseFetch, SupabaseHttpResponse } from "./src/supabase/supabaseHttp.ts";
-import { isPrivilegedSupabaseKey, readServerConfig } from "./src/config.ts";
+import { isPrivilegedSupabaseKey, parseFrontendOrigins, readServerConfig } from "./src/config.ts";
 import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepository.ts";
 import { HttpProjectRepository } from "../src/engine/project/HttpProjectRepository.ts";
 import type { ProjectFetch } from "../src/engine/project/HttpProjectRepository.ts";
 import { ProjectAuthError, ProjectNotFoundError, ProjectValidationError } from "../src/engine/project/ProjectRepository.ts";
+import { parseProjectDocument } from "../src/engine/project/projectDocument.ts";
 import type { ProjectDocument } from "../src/engine/project/projectDocument.ts";
 import { HttpAuthClient } from "../src/engine/auth/HttpAuthClient.ts";
 import type { AuthFetch } from "../src/engine/auth/HttpAuthClient.ts";
@@ -107,6 +109,32 @@ const ONE_WALL: ProjectDocument = {
   ],
   assemblies: [{ id: "assembly-1", name: "Ground Floor", objectIds: ["wall-3"], createdAt: 1, updatedAt: 2 }]
 };
+
+/**
+ * How PostgreSQL's jsonb hands a stored object back: keys reordered,
+ * shorter keys first, then bytewise - so {"version","objects","assemblies"}
+ * returns as {"objects","version","assemblies"}. The fake Supabase below
+ * stores documents this way, as the real one does.
+ */
+function jsonbOrder<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map(jsonbOrder) as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value).sort((a, b) => a.length - b.length || (a < b ? -1 : a > b ? 1 : 0));
+    return Object.fromEntries(keys.map((key) => [key, jsonbOrder((value as Record<string, unknown>)[key])])) as T;
+  }
+  return value;
+}
+
+/** ONE_WALL as the shared validator writes it - the canonical bytes every repository must hand back. */
+const CANONICAL_ONE_WALL: ProjectDocument = (() => {
+  const parsed = parseProjectDocument(ONE_WALL);
+  if (!parsed.ok) {
+    throw new Error(parsed.error);
+  }
+  return parsed.document;
+})();
 
 const SNAPSHOT: AIProjectSnapshot = {
   wallCount: 0,
@@ -336,14 +364,14 @@ function createFakeSupabase() {
             return respond(403, { code: "42501", message: 'new row violates row-level security policy for table "projects"' });
           }
           const stamp = timestamp();
-          const row: FakeRow = { id: randomUUID(), user_id: uid, name: body.name, document: body.document, created_at: stamp, updated_at: stamp };
+          const row: FakeRow = { id: randomUUID(), user_id: uid, name: body.name, document: jsonbOrder(body.document), created_at: stamp, updated_at: stamp };
           rows.push(row);
           return respond(201, [columns(row, select)]);
         }
         case "PATCH":
           for (const row of visible) {
             row.name = body?.name;
-            row.document = body?.document;
+            row.document = jsonbOrder(body?.document);
             row.updated_at = timestamp();
           }
           return respond(200, visible.map((row) => columns(row, select)));
@@ -811,19 +839,25 @@ async function run(): Promise<void> {
       name: "Shed",
       created_at: "2026-09-10T12:00:00.123456+00:00",
       updated_at: "2026-09-10T12:00:05+00:00",
-      document: ONE_WALL
+      // As PostgreSQL returns it: jsonb has reordered every key.
+      document: jsonbOrder(ONE_WALL)
     };
+    assertTrue(JSON.stringify(row.document) !== JSON.stringify(CANONICAL_ONE_WALL), "precondition: the stored key order differs from the canonical one");
     const record = {
       id: PROJECT_ID,
       ownerId: USER_ID,
       name: "Shed",
       createdAt: "2026-09-10T12:00:00.123Z",
       updatedAt: "2026-09-10T12:00:05.000Z",
-      document: ONE_WALL
+      document: CANONICAL_ONE_WALL
     };
 
     reply = () => respond(201, [row]);
-    assertDeepEqual(await repository.create({ name: "Shed", document: ONE_WALL }), record, "create returns the row as a ProjectRecord, with ISO timestamps");
+    assertDeepEqual(
+      await repository.create({ name: "Shed", document: ONE_WALL }),
+      record,
+      "create returns the row as a ProjectRecord - ISO timestamps, and the document back in canonical key order"
+    );
     reply = () => respond(200, [row]);
     assertDeepEqual(await repository.get(PROJECT_ID), record, "get");
     assertDeepEqual(await repository.save(PROJECT_ID, { name: "Shed", document: ONE_WALL }), record, "save");
@@ -904,6 +938,8 @@ async function run(): Promise<void> {
       (error) => error instanceof Error && !(error instanceof ProjectAuthError) && error.message.includes("403"),
       "403 (misconfigured grants) -> a storage failure, not a sign-in problem"
     );
+    reply = () => respond(503, { message: "upstream connect error" });
+    await assertRejects(() => repository.list(), (error) => error instanceof ProjectStorageUnavailableError, "a gateway error -> storage unavailable (503)");
     reply = () => respond(200, { not: "a list" });
     await assertRejects(() => repository.list(), (error) => error instanceof Error && error.message.includes("malformed"), "a malformed response");
     const unreachable = new SupabaseProjectRepository({
@@ -915,7 +951,7 @@ async function run(): Promise<void> {
       userId: USER_ID,
       accessToken: "jwt-alice"
     });
-    await assertRejects(() => unreachable.list(), (error) => error instanceof Error && error.message.includes("Could not reach Supabase"), "no connection");
+    await assertRejects(() => unreachable.list(), (error) => error instanceof ProjectStorageUnavailableError, "no connection -> storage unavailable (503)");
   });
 
   await check("the real server on the Supabase adapters: Row Level Security keeps each user's projects to themselves, with no service-role key anywhere", async () => {
@@ -937,6 +973,11 @@ async function run(): Promise<void> {
 
       const created = await alice.projects.create({ name: "Alice's House", document: ONE_WALL });
       assertEqual(created.ownerId, alice.auth.getState().user?.id, "owned by Alice");
+      assertEqual(
+        JSON.stringify((await alice.projects.get(created.id))?.document),
+        JSON.stringify(CANONICAL_ONE_WALL),
+        "the document comes back byte-for-byte canonical - {version, objects, assemblies} - although the database reorders jsonb keys"
+      );
       assertTrue(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(created.createdAt), `ISO timestamps, got ${created.createdAt}`);
       const saved = await alice.projects.save(created.id, { name: "Alice's House v2", document: EMPTY });
       assertEqual(saved.createdAt, created.createdAt, "created_at is kept");
@@ -970,6 +1011,112 @@ async function run(): Promise<void> {
     }
   });
 
+  // --- Production behaviour: CORS, request logs, storage outages ---
+
+  await check("CORS: only the configured origins may call the server - any other origin is refused before routing, authentication or storage", async () => {
+    let reached = 0;
+    const inner = new InMemoryProjectStore();
+    const projectStore: ProjectStore = {
+      forUser: (user) => {
+        reached += 1;
+        return inner.forUser(user);
+      }
+    };
+    const allowed = ["https://app.example.com", "http://localhost:5173"];
+    await withServer({ ...memoryOptions(), frontendOrigin: allowed, projectStore }, async (baseUrl) => {
+      for (const origin of allowed) {
+        const preflight = await fetch(`${baseUrl}/api/projects`, { method: "OPTIONS", headers: { Origin: origin, "Access-Control-Request-Method": "GET" } });
+        assertEqual(preflight.status, 204, `${origin}: preflight`);
+        assertEqual(preflight.headers.get("access-control-allow-origin"), origin, `${origin}: allowed by name - never a wildcard`);
+      }
+      for (const origin of ["https://evil.example", "https://app.example.com.evil.example", "http://app.example.com", "null"]) {
+        const preflight = await fetch(`${baseUrl}/api/projects`, { method: "OPTIONS", headers: { Origin: origin } });
+        assertEqual(preflight.status, 403, `${origin}: preflight refused`);
+        assertEqual(preflight.headers.get("access-control-allow-origin"), null, `${origin}: no CORS grant`);
+        const direct = await fetch(`${baseUrl}/api/projects`, { headers: { Origin: origin, Authorization: "Bearer some-token" } });
+        assertEqual(direct.status, 403, `${origin}: a direct request is refused too`);
+      }
+      const health = await fetch(`${baseUrl}/health`);
+      assertEqual(health.status, 200, "a request with no Origin (a health check, curl) is not a browser request and goes through");
+      assertEqual(health.headers.get("x-content-type-options"), "nosniff", "nosniff");
+      assertDeepEqual(await health.json(), { status: "ok" }, "the health answer carries no configuration or dependency detail");
+      const proxied = await fetch(`${baseUrl}/health`, { headers: { "X-Forwarded-Proto": "https" } });
+      assertTrue(proxied.headers.get("strict-transport-security")?.includes("max-age="), "HSTS behind an HTTPS proxy");
+    });
+    assertEqual(reached, 0, "no refused request reached storage");
+  });
+
+  await check("request logs: one JSON line per request - route, operation, status, signed-in or not - and never a token, password, email or document", async () => {
+    const lines: string[] = [];
+    const secrets: string[] = [PASSWORD, "wrong password!", "logged@example.com", "Secret Villa", "wall-3", "forged-token"];
+    await withServer({ ...memoryOptions(), requestLog: (line) => lines.push(line) }, async (baseUrl) => {
+      const { auth, storage, projects } = browserStack(baseUrl);
+      assertTrue(await auth.signUp("logged@example.com", PASSWORD), "signed up");
+      const session = storedSession(storage);
+      assertTrue(session, "a session");
+      secrets.push(session.accessToken, session.refreshToken);
+      const created = await projects.create({ name: "Secret Villa", document: ONE_WALL });
+      secrets.push(created.id);
+      await projects.save(created.id, { name: "Secret Villa", document: ONE_WALL });
+      await projects.get(created.id);
+      await fetch(`${baseUrl}/api/projects`);
+      await fetch(`${baseUrl}/api/projects`, { headers: { Authorization: "Bearer forged-token" } });
+      assertEqual(await auth.signIn("logged@example.com", "wrong password!"), false, "a refused sign-in");
+    });
+
+    const entries = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    assertDeepEqual(
+      entries.map((entry) => `${entry.method} ${entry.route} ${entry.operation} ${entry.status} ${entry.auth}`),
+      [
+        "POST /api/auth/signup auth.signup 201 user",
+        "POST /api/projects projects.create 201 user",
+        "PUT /api/projects/:id projects.save 200 user",
+        "GET /api/projects/:id projects.get 200 user",
+        "GET /api/projects projects.list 401 none",
+        "GET /api/projects projects.list 401 invalid",
+        "POST /api/auth/signin auth.signin 401 none"
+      ],
+      "one line per request, ids replaced by :id"
+    );
+    assertDeepEqual(
+      entries.map((entry) => entry.failure ?? null),
+      [null, null, null, null, "not signed in", "invalid or expired session", "credentials or session refused"],
+      "a short failure reason where there was one"
+    );
+    assertTrue(entries.every((entry) => typeof entry.time === "string" && typeof entry.ms === "number"), "a time and a duration on every line");
+    const text = lines.join("\n");
+    for (const secret of secrets) {
+      assertTrue(!text.includes(secret), `the log never contains "${secret.slice(0, 12)}…"`);
+    }
+  });
+
+  await check("storage outage: an unreachable database answers 503 with a try-again message, and the client reports it rather than crashing", async () => {
+    const down = async (): Promise<never> => {
+      throw new ProjectStorageUnavailableError();
+    };
+    const projectStore: ProjectStore = { forUser: () => ({ create: down, save: down, get: down, list: down, delete: down }) };
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      await withServer({ ...memoryOptions(), projectStore }, async (baseUrl) => {
+        const { auth, projects } = browserStack(baseUrl);
+        await auth.signUp("outage@example.com", PASSWORD);
+        await assertRejects(
+          () => projects.list(),
+          (error) =>
+            error instanceof Error && !(error instanceof ProjectAuthError) && error.message.includes("503") && error.message.includes("temporarily unavailable"),
+          "the client reports the 503 and its reason"
+        );
+      });
+    } finally {
+      console.error = originalError;
+    }
+    assertTrue(logged.some((line) => line.includes("ProjectStorageUnavailableError")), "the outage is logged by name");
+  });
+
   // --- Configuration ---
 
   await check("config: an OpenAI key and ONE account storage are required; a service-role key is refused; no secret is echoed back", () => {
@@ -985,7 +1132,11 @@ async function run(): Promise<void> {
       ["a service-role JWT", { ...base, SUPABASE_URL, SUPABASE_ANON_KEY: SERVICE_ROLE_KEY }, "service-role"],
       ["a secret key", { ...base, SUPABASE_URL, SUPABASE_ANON_KEY: "sb_secret_notarealkey" }, "service-role"],
       ["a bad port", { ...base, LOCAL_AUTH: "memory", PORT: "eighty" }, "PORT"],
-      ["port zero", { ...base, LOCAL_AUTH: "memory", PORT: "0" }, "PORT"]
+      ["port zero", { ...base, LOCAL_AUTH: "memory", PORT: "0" }, "PORT"],
+      ["a wildcard origin", { ...base, LOCAL_AUTH: "memory", FRONTEND_ORIGIN: "*" }, "wildcards are refused"],
+      ["an origin with a path", { ...base, LOCAL_AUTH: "memory", FRONTEND_ORIGIN: "https://app.example.com/editor" }, "no path"],
+      ["a plain-http public origin", { ...base, LOCAL_AUTH: "memory", FRONTEND_ORIGIN: "http://app.example.com" }, "https://"],
+      ["in-memory accounts in production", { ...base, LOCAL_AUTH: "memory", NODE_ENV: "production" }, "refused when NODE_ENV=production"]
     ];
     for (const [name, env, fragment] of failures) {
       const result = readServerConfig(env);
@@ -998,12 +1149,26 @@ async function run(): Promise<void> {
 
     const memory = readServerConfig({ ...base, LOCAL_AUTH: "memory" });
     assertTrue(memory.ok, "LOCAL_AUTH=memory");
-    assertDeepEqual(memory.config, { openAIApiKey: openAI, port: 8787, frontendOrigin: FRONTEND_ORIGIN, storage: { mode: "memory" } }, "in-memory, with the defaults");
+    assertDeepEqual(
+      memory.config,
+      { openAIApiKey: openAI, port: 8787, frontendOrigins: [FRONTEND_ORIGIN], production: false, storage: { mode: "memory" } },
+      "in-memory, with the defaults"
+    );
 
     const hosted = readServerConfig({ ...base, SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, PORT: "9000", FRONTEND_ORIGIN: "https://app.example.com" });
     assertTrue(hosted.ok, "Supabase");
     assertDeepEqual(hosted.config.storage, { mode: "supabase", url: SUPABASE_URL, anonKey: ANON_KEY }, "Supabase, with the anon key");
     assertEqual(hosted.config.port, 9000, "port");
+    assertDeepEqual(hosted.config.frontendOrigins, ["https://app.example.com"], "the deployed frontend's origin");
+    assertDeepEqual(
+      parseFrontendOrigins(" https://app.example.com , http://localhost:5173/ ,https://app.example.com"),
+      { ok: true, origins: ["https://app.example.com", "http://localhost:5173"] },
+      "a list: trimmed, trailing slash dropped, duplicates removed"
+    );
+    assertTrue(
+      readServerConfig({ ...base, SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, NODE_ENV: "production", FRONTEND_ORIGIN: "https://app.example.com" }).ok,
+      "Supabase in production is fine"
+    );
     assertTrue(readServerConfig({ ...base, SUPABASE_URL: "http://localhost:54321", SUPABASE_ANON_KEY: ANON_KEY }).ok, "plain http is fine for a local Supabase");
     assertTrue(readServerConfig({ ...base, SUPABASE_URL, SUPABASE_ANON_KEY: "sb_publishable_notarealkey" }).ok, "a publishable key is fine");
     assertTrue(readServerConfig({ ...base, SUPABASE_URL: "", SUPABASE_ANON_KEY: "", LOCAL_AUTH: "memory" }).ok, "blank Supabase values count as unset");

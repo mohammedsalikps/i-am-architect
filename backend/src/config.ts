@@ -1,7 +1,7 @@
 /**
  * Reads the server's configuration from an environment - process.env in
  * server.ts, a plain object in the tests. Nothing here is ever sent to a
- * browser, and no value from it is ever echoed back in an error message.
+ * browser, and no secret from it is ever echoed back in an error message.
  *
  * Accounts and projects are kept in ONE of two places:
  *
@@ -9,11 +9,17 @@
  *   publishable key). A service-role or secret key is refused outright -
  *   this server relies on Row Level Security, and never needs a key that
  *   bypasses it.
- * - Memory: LOCAL_AUTH=memory, for local development. Accounts and
- *   projects last until the server stops.
+ * - Memory: LOCAL_AUTH=memory, for local development only. Accounts and
+ *   projects last until the server stops, so it is refused when
+ *   NODE_ENV=production.
  *
  * Neither is assumed: with no choice made, the server refuses to start and
  * says how to choose.
+ *
+ * FRONTEND_ORIGIN lists the browser origins allowed to call the server -
+ * comma-separated, exact origins (the deployed frontend, and
+ * http://localhost:5173 for development). Wildcards are refused, and a
+ * non-local origin must use https.
  */
 
 export type StorageConfig = { mode: "supabase"; url: string; anonKey: string } | { mode: "memory" };
@@ -21,14 +27,18 @@ export type StorageConfig = { mode: "supabase"; url: string; anonKey: string } |
 export interface ServerConfig {
   openAIApiKey: string;
   port: number;
-  frontendOrigin: string;
+  /** The exact browser origins allowed to call this server (CORS). */
+  frontendOrigins: string[];
   storage: StorageConfig;
+  /** NODE_ENV=production. */
+  production: boolean;
 }
 
 export type ServerConfigResult = { ok: true; config: ServerConfig } | { ok: false; error: string };
 
 const DEFAULT_PORT = 8787;
-const DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173";
+export const DEFAULT_FRONTEND_ORIGIN = "http://localhost:5173";
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,6 +62,43 @@ export function isPrivilegedSupabaseKey(key: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The exact origins in a FRONTEND_ORIGIN value ("https://app.example.com,
+ * http://localhost:5173"), or why it isn't a valid list. Blank means the
+ * local Vite dev server.
+ */
+export function parseFrontendOrigins(value: string | undefined): { ok: true; origins: string[] } | { ok: false; error: string } {
+  const entries = (value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.length === 0) {
+    return { ok: true, origins: [DEFAULT_FRONTEND_ORIGIN] };
+  }
+  const origins: string[] = [];
+  for (const entry of entries) {
+    if (entry.includes("*")) {
+      return { ok: false, error: "FRONTEND_ORIGIN must list exact origins - wildcards are refused." };
+    }
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      return { ok: false, error: `FRONTEND_ORIGIN entry "${entry}" is not a valid origin - use scheme://host[:port].` };
+    }
+    if (url.origin.toLowerCase() !== entry.replace(/\/$/, "").toLowerCase()) {
+      return { ok: false, error: `FRONTEND_ORIGIN entry "${entry}" is not an origin - use scheme://host[:port], with no path.` };
+    }
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && LOCAL_HOSTNAMES.has(url.hostname))) {
+      return { ok: false, error: `FRONTEND_ORIGIN entry "${entry}" must use https:// (http:// is allowed only for localhost).` };
+    }
+    if (!origins.includes(url.origin)) {
+      origins.push(url.origin);
+    }
+  }
+  return { ok: true, origins };
 }
 
 function supabaseUrlProblem(value: string): string | null {
@@ -85,7 +132,12 @@ export function readServerConfig(env: Record<string, string | undefined>): Serve
     return { ok: false, error: "PORT must be a whole number from 1 to 65535." };
   }
 
-  const frontendOrigin = env.FRONTEND_ORIGIN?.trim() || DEFAULT_FRONTEND_ORIGIN;
+  const origins = parseFrontendOrigins(env.FRONTEND_ORIGIN);
+  if (!origins.ok) {
+    return { ok: false, error: origins.error };
+  }
+  const production = env.NODE_ENV?.trim() === "production";
+  const base = { openAIApiKey, port, frontendOrigins: origins.origins, production };
 
   const url = env.SUPABASE_URL?.trim();
   const anonKey = env.SUPABASE_ANON_KEY?.trim();
@@ -105,11 +157,19 @@ export function readServerConfig(env: Record<string, string | undefined>): Serve
           "this server relies on Row Level Security and never needs a key that bypasses it."
       };
     }
-    return { ok: true, config: { openAIApiKey, port, frontendOrigin, storage: { mode: "supabase", url, anonKey } } };
+    return { ok: true, config: { ...base, storage: { mode: "supabase", url, anonKey } } };
   }
 
   if (env.LOCAL_AUTH?.trim() === "memory") {
-    return { ok: true, config: { openAIApiKey, port, frontendOrigin, storage: { mode: "memory" } } };
+    if (production) {
+      return {
+        ok: false,
+        error:
+          "LOCAL_AUTH=memory keeps accounts and projects in memory - it is for local development and is refused when " +
+          "NODE_ENV=production. Configure SUPABASE_URL and SUPABASE_ANON_KEY instead."
+      };
+    }
+    return { ok: true, config: { ...base, storage: { mode: "memory" } } };
   }
 
   return {

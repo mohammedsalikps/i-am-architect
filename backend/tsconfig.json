@@ -20,5 +20,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "verify.ts", "auth.verify.ts", "persistence.verify.ts", "mockBackend.ts"]
+  "include": ["src", "verify.ts", "auth.verify.ts", "persistence.verify.ts", "integration", "mockBackend.ts"]
 }

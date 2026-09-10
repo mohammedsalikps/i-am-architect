@@ -5,11 +5,16 @@ import {
   parseProjectInput
 } from "../../../src/engine/project/ProjectRepository.ts";
 import type { ProjectInput, ProjectRecord, ProjectRepository, ProjectSummary } from "../../../src/engine/project/ProjectRepository.ts";
+import { parseProjectDocument } from "../../../src/engine/project/projectDocument.ts";
 import type { ProjectDocument } from "../../../src/engine/project/projectDocument.ts";
-import { supabaseMessage, supabaseRequest } from "../supabase/supabaseHttp.ts";
+import { SupabaseUnavailableError, supabaseMessage, supabaseRequest } from "../supabase/supabaseHttp.ts";
 import type { SupabaseConfig } from "../supabase/supabaseHttp.ts";
 import type { AuthUser } from "../auth/AuthService.ts";
+import { ProjectStorageUnavailableError } from "./ProjectStore.ts";
 import type { ProjectStore } from "./ProjectStore.ts";
+
+/** Gateway statuses: the database behind PostgREST is down or unreachable - not a problem with the request. */
+const UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
 const TABLE = "/rest/v1/projects";
 const RECORD_COLUMNS = "id,user_id,name,created_at,updated_at,document";
@@ -26,6 +31,22 @@ export interface SupabaseProjectRepositoryOptions extends SupabaseConfig {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * PostgreSQL's jsonb does not keep key order - it stores shorter keys
+ * first - so a saved document comes back as {"objects":…,"version":1,…},
+ * with every object's fields reordered too. Reading it through the shared
+ * validator restores the canonical project document -
+ * {"version":1,"objects":[…],"assemblies":[…]}, each object in its canonical
+ * field order - so the backend returns exactly what was saved, whatever
+ * the storage did to the key order. A document that doesn't validate is
+ * returned as stored: the browser's loadProject() reports why, and the
+ * current model is left alone.
+ */
+function canonicalDocument(stored: Record<string, unknown>): ProjectDocument {
+  const parsed = parseProjectDocument(stored);
+  return parsed.ok ? parsed.document : (stored as unknown as ProjectDocument);
 }
 
 function isoTimestamp(value: string): string {
@@ -51,8 +72,9 @@ function toRecord(row: unknown): ProjectRecord {
     name: row.name,
     createdAt: isoTimestamp(row.created_at),
     updatedAt: isoTimestamp(row.updated_at),
-    // Checked in full by loadProject() in the browser before it touches the model.
-    document: row.document as unknown as ProjectDocument
+    // Canonical key order restored (see canonicalDocument); still checked in
+    // full by loadProject() in the browser before it touches the model.
+    document: canonicalDocument(row.document)
   };
 }
 
@@ -199,12 +221,25 @@ export class SupabaseProjectRepository implements ProjectRepository {
     }
   }
 
-  private send(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown) {
-    return supabaseRequest(this.config, method, path, {
-      accessToken: this.accessToken,
-      ...(body === undefined ? {} : { body }),
-      ...(method === "GET" ? {} : { prefer: "return=representation" })
-    });
+  /** One PostgREST request. No response, or a gateway error, is ProjectStorageUnavailableError. */
+  private async send(method: "GET" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<{ status: number; payload: unknown }> {
+    let result: { status: number; payload: unknown };
+    try {
+      result = await supabaseRequest(this.config, method, path, {
+        accessToken: this.accessToken,
+        ...(body === undefined ? {} : { body }),
+        ...(method === "GET" ? {} : { prefer: "return=representation" })
+      });
+    } catch (error) {
+      if (error instanceof SupabaseUnavailableError) {
+        throw new ProjectStorageUnavailableError();
+      }
+      throw error;
+    }
+    if (UNAVAILABLE_STATUSES.has(result.status)) {
+      throw new ProjectStorageUnavailableError();
+    }
+    return result;
   }
 }
 

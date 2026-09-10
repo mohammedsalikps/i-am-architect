@@ -13,16 +13,15 @@ import type { SupabaseFetch } from "./supabase/supabaseHttp.ts";
 /**
  * Entry point for the backend. THIS IS THE ONLY FILE IN THE ENTIRE
  * REPOSITORY (frontend or backend) THAT READS `process.env` - it hands it
- * to readServerConfig() (config.ts), which picks out OPENAI_API_KEY and the
- * account-storage settings. See backend/README.md "Security posture" and
- * src/engine/ai/README.md "Security boundary". Run with:
+ * to readServerConfig() (config.ts), which picks out OPENAI_API_KEY, the
+ * account-storage settings, and the allowed frontend origins. See
+ * backend/README.md "Security posture" and DEPLOYMENT.md. Run with:
  *
- *   node --env-file=.env src/server.ts
+ *   node --env-file=.env src/server.ts          (local, from backend/)
+ *   node backend/src/server.ts                  (a host, env set by the host - see the Dockerfile)
  *
- * (from inside backend/, after `npm install` and copying .env.example
- * to .env with real values - see backend/README.md). `--env-file` is a
- * stable Node.js flag (18.20+/20.6+) - no `dotenv` dependency needed,
- * consistent with this project's existing zero-framework approach.
+ * `--env-file` is a stable Node.js flag (18.20+/20.6+) - no `dotenv`
+ * dependency needed. Node 22.18+ runs these TypeScript files directly.
  */
 
 const result = readServerConfig(process.env);
@@ -59,10 +58,22 @@ if (config.storage.mode === "supabase") {
   storageDescription = "Accounts and projects are kept in memory (LOCAL_AUTH=memory) - they last until this server stops.";
 }
 
-const server = createServer({ provider, frontendOrigin: config.frontendOrigin, authService, projectStore });
+const server = createServer({
+  provider,
+  frontendOrigin: config.frontendOrigins,
+  authService,
+  projectStore,
+  // One JSON line per request - route, status, timing, signed-in or not. Never tokens, emails or bodies.
+  requestLog: (line) => console.log(line)
+});
 
 server.listen(config.port, () => {
-  console.log(`Backend listening on http://localhost:${config.port}`);
-  console.log(`Accepting requests from origin: ${config.frontendOrigin}`);
+  console.log(`Backend listening on port ${config.port}${config.production ? " (production)" : ""}`);
+  console.log(`Accepting browser requests from: ${config.frontendOrigins.join(", ")}`);
   console.log(storageDescription);
+});
+
+// Hosts stop containers with SIGTERM: finish in-flight requests, then exit.
+process.on("SIGTERM", () => {
+  server.close(() => process.exit(0));
 });

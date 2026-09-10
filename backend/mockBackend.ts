@@ -1,4 +1,5 @@
 import { createServer } from "./src/createServer.ts";
+import { parseFrontendOrigins } from "./src/config.ts";
 import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
 import { MockAIProvider } from "../src/engine/ai/MockAIProvider.ts";
 import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepository.ts";
@@ -30,24 +31,27 @@ import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepos
  * door, or window will build real objects in the app, and an instruction
  * to build a house ("Build a simple 2-bedroom house on a 10m × 8m
  * footprint.") gets the complete house plan (see
- * src/engine/ai/housePlan.ts). Anything else comes back with the
- * provider's "could not map" notes, which is a useful way to exercise
- * the command bar's notes and error states.
+ * src/engine/ai/housePlan.ts).
  */
 
 const port = Number(process.env.PORT ?? 8787);
-const frontendOrigin = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
+const origins = parseFrontendOrigins(process.env.FRONTEND_ORIGIN);
+if (!origins.ok) {
+  console.error(origins.error);
+  process.exit(1);
+}
 
 const server = createServer({
   provider: new MockAIProvider(),
-  frontendOrigin,
+  frontendOrigin: origins.origins,
   authService: new InMemoryAuthService(),
-  projectStore: new InMemoryProjectStore()
+  projectStore: new InMemoryProjectStore(),
+  requestLog: (line) => console.log(line)
 });
 
 server.listen(port, () => {
   console.log(`MOCK backend listening on http://localhost:${port}`);
-  console.log(`Accepting requests from origin: ${frontendOrigin}`);
+  console.log(`Accepting browser requests from: ${origins.origins.join(", ")}`);
   console.log("No OpenAI key is used and no OpenAI request is made - responses are deterministic keyword matches.");
   console.log("Accounts and projects are kept in memory - they last until this server stops.");
 });
