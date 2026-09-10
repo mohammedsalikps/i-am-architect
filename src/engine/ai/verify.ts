@@ -34,7 +34,7 @@ import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "./types.ts";
 import type { AIProjectSnapshot, AIProviderResponse, AIPipelineResult } from "./types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
-import { AiPromptController } from "./AiPromptController.ts";
+import { AiPromptController, isAiPromptSubmitKey } from "./AiPromptController.ts";
 import type { AiPromptState } from "./AiPromptController.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
@@ -784,6 +784,31 @@ async function run(): Promise<void> {
       ["listeners", "state", "submitInstruction"],
       "AiPromptController's own instance properties"
     );
+  });
+
+  // --- AI Prompt submit key ---
+
+  await check("isAiPromptSubmitKey accepts Enter", () => {
+    assertEqual(isAiPromptSubmitKey({ key: "Enter" }), true, "plain Enter");
+    assertEqual(isAiPromptSubmitKey({ key: "Enter", isComposing: false }), true, "Enter outside a composition");
+  });
+
+  await check("isAiPromptSubmitKey rejects a keydown carrying no key identity", () => {
+    // What a synthetic "Return" press from some automation tools actually
+    // delivers - observed in-browser as key "", code "", keyCode 0.
+    assertEqual(isAiPromptSubmitKey({ key: "" }), false, "empty key");
+  });
+
+  await check("isAiPromptSubmitKey rejects an Enter that confirms an IME composition", () => {
+    assertEqual(isAiPromptSubmitKey({ key: "Enter", isComposing: true }), false, "composing Enter");
+  });
+
+  await check("isAiPromptSubmitKey rejects every other key", () => {
+    // A numpad Enter reports key "Enter" (only its `code` differs), so
+    // "NumpadEnter" never appears as a key value; the rule keys off `key`.
+    for (const key of ["a", "Tab", "Escape", " ", "Return", "NumpadEnter", "enter"]) {
+      assertEqual(isAiPromptSubmitKey({ key }), false, `key ${JSON.stringify(key)}`);
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

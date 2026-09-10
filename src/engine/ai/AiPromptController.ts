@@ -37,6 +37,24 @@ export type AiInstructionSubmitter = (instruction: string) => Promise<AIPipeline
 
 const IDLE_STATE: AiPromptState = { status: "idle", message: null, notes: null };
 
+/**
+ * Decides whether one keydown in the AI Prompt input should submit.
+ * DOM-free (it takes only the two fields it reads) so the rule is
+ * covered by ai/verify.ts under Node rather than left to browser-only
+ * testing.
+ *
+ * - Only `key === "Enter"` counts. That is what every physical Enter
+ *   key - main or numpad - reports. A keydown carrying no key identity
+ *   at all (`key: ""`, which some synthetic-event tools emit for a
+ *   "Return" press) is not an Enter, and is ignored.
+ * - An Enter that confirms an IME composition (Japanese, Chinese, or
+ *   Korean input) arrives with `isComposing: true`. It finishes the
+ *   composed text, so it must not also submit that text half-typed.
+ */
+export function isAiPromptSubmitKey(event: { key: string; isComposing?: boolean }): boolean {
+  return event.key === "Enter" && event.isComposing !== true;
+}
+
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }

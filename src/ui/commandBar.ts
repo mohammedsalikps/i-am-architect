@@ -1,6 +1,6 @@
 import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
-import { AiPromptController } from "../engine/ai/AiPromptController";
+import { AiPromptController, isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
 import type { AiInstructionSubmitter, AiPromptState } from "../engine/ai/AiPromptController";
 
 /**
@@ -71,17 +71,32 @@ function buildAiPromptTab(onSubmitAiInstruction: AiInstructionSubmitter): HTMLEl
   controller.subscribe((state) => renderAiPromptState(state, input, aiButton, status));
 
   function submit(): void {
+    // Disabling the input during the submitting state (see
+    // renderAiPromptState) drops its keyboard focus, and re-enabling it
+    // does not bring focus back - so after an Enter submission, a second
+    // Enter or any typing went nowhere until the user clicked back in.
+    // Remember whether the input had focus when this submission began,
+    // and hand focus back once it settles - unless the user has
+    // deliberately moved focus somewhere else in the meantime.
+    const restoreFocus = document.activeElement === input;
+
     // controller.submit() already no-ops while a submission is in
     // flight (see AiPromptController.submit) - no need to duplicate
-    // that guard here. Deliberately not `await`ed: this is a DOM event
-    // handler, and the controller's own subscription is what drives the
-    // UI update once the (async) submission settles.
-    void controller.submit(input.value);
+    // that guard here. Not `await`ed: this is a DOM event handler, and
+    // the controller's own subscription drives the UI update once the
+    // (async) submission settles. That render re-enables the input
+    // before this `.then()` runs, so focus() lands on an enabled input.
+    void controller.submit(input.value).then(() => {
+      const focusIsUnclaimed = document.activeElement === null || document.activeElement === document.body;
+      if (restoreFocus && focusIsUnclaimed) {
+        input.focus();
+      }
+    });
   }
 
   aiButton.addEventListener("click", submit);
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
+    if (isAiPromptSubmitKey(event)) {
       event.preventDefault();
       submit();
     }
