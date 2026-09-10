@@ -1,6 +1,6 @@
 import type { BackendFetch, BackendHttpResponse } from "../providers/BackendAIProvider";
-import type { AIProjectSnapshot } from "../types";
-import { parseAIProjectSnapshot } from "../parseProjectSnapshot.ts";
+import type { AIProjectContext } from "../types";
+import { parseAIProjectContext } from "../aiProjectContext.ts";
 
 /**
  * A controlled stand-in for the AI proxy backend, used by the
@@ -13,10 +13,13 @@ import { parseAIProjectSnapshot } from "../parseProjectSnapshot.ts";
  * than quietly passing against a permissive fake.
  *
  * The `projectContext` half of that contract isn't mirrored by hand: it
- * is the very same parseAIProjectSnapshot() the real server calls, so
- * the two cannot disagree about what a valid snapshot is, and what gets
- * recorded here is the same sanitized snapshot the real server would
- * hand its provider.
+ * is the very same parseAIProjectContext() the real server calls - the
+ * shared snapshot sanitizer, then geometry derived from the sanitized
+ * snapshot - so the two cannot disagree about what a valid snapshot is,
+ * and what gets recorded here is the same context the real server would
+ * hand its provider, with server-derived geometry. The geometry section
+ * the browser sent is recorded separately (`clientGeometry`) and never
+ * used, exactly as the real server never uses it.
  *
  * Contract fidelity is also verified from the other side: checks in
  * backend/verify.ts run the REAL BackendAIProvider against the REAL
@@ -34,8 +37,10 @@ export interface RecordedBackendRequest {
   url: string;
   method: string;
   instruction: string;
-  /** The sanitized snapshot - exactly what the real server would pass to its provider. */
-  projectContext: AIProjectSnapshot;
+  /** The sanitized snapshot plus geometry derived from it here - exactly what the real server would pass to its provider. */
+  projectContext: AIProjectContext;
+  /** The `geometry` the browser sent inside `projectContext`, as received. Recorded for assertions only - never used. */
+  clientGeometry: unknown;
   availableObjectTypes: unknown;
 }
 
@@ -75,7 +80,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 type ParsedRequestBody =
-  | { ok: true; instruction: string; projectContext: AIProjectSnapshot; availableObjectTypes: unknown }
+  | { ok: true; instruction: string; projectContext: AIProjectContext; clientGeometry: unknown; availableObjectTypes: unknown }
   | { ok: false; error: string };
 
 /** Mirrors backend/src/createServer.ts's request validation - same rules, same 400 response shape. */
@@ -89,9 +94,9 @@ function parseRequestBody(body: unknown): ParsedRequestBody {
     return { ok: false, error: '"instruction" is required and must be a non-empty string.' };
   }
 
-  const snapshot = parseAIProjectSnapshot(body.projectContext);
-  if (!snapshot.ok) {
-    return { ok: false, error: snapshot.error };
+  const context = parseAIProjectContext(body.projectContext);
+  if (!context.ok) {
+    return { ok: false, error: context.error };
   }
 
   const availableObjectTypes = body.availableObjectTypes;
@@ -101,7 +106,8 @@ function parseRequestBody(body: unknown): ParsedRequestBody {
     }
   }
 
-  return { ok: true, instruction, projectContext: snapshot.snapshot, availableObjectTypes };
+  const clientGeometry = isPlainObject(body.projectContext) ? body.projectContext.geometry : undefined;
+  return { ok: true, instruction, projectContext: context.context, clientGeometry, availableObjectTypes };
 }
 
 /**
@@ -139,6 +145,7 @@ export function createMockBackend(handler: MockBackendHandler): MockBackend {
       method: init.method,
       instruction: parsed.instruction,
       projectContext: parsed.projectContext,
+      clientGeometry: parsed.clientGeometry,
       availableObjectTypes: parsed.availableObjectTypes
     };
     requests.push(recorded);

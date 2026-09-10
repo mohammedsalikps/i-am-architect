@@ -1,5 +1,6 @@
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
+import type { ConstructionGeometryAnalysis } from "./geometry/types";
 
 /**
  * Provider-independent AI command pipeline - shared type definitions.
@@ -242,12 +243,28 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
   };
 }
 
+/**
+ * What an AIProvider receives as `projectContext`: the snapshot, plus the
+ * deterministic geometry analysis derived from that same snapshot. Built
+ * only by buildAIProjectContext() (aiProjectContext.ts), which deep-freezes
+ * it - a provider can read it but not change it.
+ */
+export interface AIProjectContext extends AIProjectSnapshot {
+  /**
+   * analyzeConstructionGeometry() of the snapshot fields beside it - see
+   * geometry/ and ai/README.md. Always derived, never taken from a
+   * caller: the AI proxy backend derives its own from the snapshot it
+   * sanitized and ignores any geometry a client sends.
+   */
+  geometry: ConstructionGeometryAnalysis;
+}
+
 /** What AICommandPipeline hands to an AIProvider for one instruction. */
 export interface AIProviderRequest {
   /** The user's raw natural-language instruction, already confirmed non-empty by the pipeline. */
   instruction: string;
-  /** Read-only snapshot of the current project - see AIProjectSnapshot. */
-  projectContext: AIProjectSnapshot;
+  /** Read-only snapshot of the current project plus its derived geometry - see AIProjectContext. */
+  projectContext: AIProjectContext;
   /** Which construction object types are currently available to create/edit. */
   availableObjectTypes: readonly ObjectType[];
 }

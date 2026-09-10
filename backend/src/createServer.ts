@@ -2,8 +2,8 @@ import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, ServerResponse, Server } from "node:http";
 import type { AIProvider } from "../../src/engine/ai/AIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../../src/engine/ai/types.ts";
-import type { AIProjectSnapshot } from "../../src/engine/ai/types.ts";
-import { parseAIProjectSnapshot } from "../../src/engine/ai/parseProjectSnapshot.ts";
+import type { AIProjectContext } from "../../src/engine/ai/types.ts";
+import { parseAIProjectContext } from "../../src/engine/ai/aiProjectContext.ts";
 import type { ObjectType } from "../../src/engine/objects/types.ts";
 
 /**
@@ -108,7 +108,7 @@ type ParsedInterpretRequest =
   | {
       ok: true;
       instruction: string;
-      projectContext: AIProjectSnapshot;
+      projectContext: AIProjectContext;
       availableObjectTypes: readonly ObjectType[];
     }
   | { ok: false; error: string };
@@ -122,11 +122,14 @@ type ParsedInterpretRequest =
  * AICommandPipeline itself rejects an empty instruction before ever
  * calling a provider.
  *
- * `projectContext` is checked and sanitized by the shared
- * parseAIProjectSnapshot() (src/engine/ai/parseProjectSnapshot.ts) - the
- * same function the frontend's end-to-end mock backend uses - and only
- * its rebuilt copy is passed on, so any field a client adds beyond
- * AIProjectSnapshot's is dropped here.
+ * `projectContext` goes through the shared parseAIProjectContext()
+ * (src/engine/ai/aiProjectContext.ts) - the same function the frontend's
+ * end-to-end mock backend uses. It checks and sanitizes the snapshot
+ * fields (any field a client adds beyond AIProjectSnapshot's is dropped),
+ * then derives the geometry section from that sanitized snapshot with the
+ * same analyzeConstructionGeometry() the browser runs. Whatever geometry
+ * the client sent is never read: the provider only ever sees geometry
+ * this server computed.
  */
 function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
   if (!isPlainObject(body)) {
@@ -138,9 +141,9 @@ function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
     return { ok: false, error: '"instruction" is required and must be a non-empty string.' };
   }
 
-  const snapshot = parseAIProjectSnapshot(body.projectContext);
-  if (!snapshot.ok) {
-    return { ok: false, error: snapshot.error };
+  const context = parseAIProjectContext(body.projectContext);
+  if (!context.ok) {
+    return { ok: false, error: context.error };
   }
 
   let availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES;
@@ -155,7 +158,7 @@ function parseInterpretRequest(body: unknown): ParsedInterpretRequest {
   return {
     ok: true,
     instruction,
-    projectContext: snapshot.snapshot,
+    projectContext: context.context,
     availableObjectTypes
   };
 }

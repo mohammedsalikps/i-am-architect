@@ -32,7 +32,9 @@ import type { CommandExecutorLike } from "./AICommandPipeline.ts";
 import { MockAIProvider } from "./MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "./types.ts";
 import { parseAIProjectSnapshot } from "./parseProjectSnapshot.ts";
-import type { AIProjectSnapshot, AIProviderResponse, AIPipelineResult } from "./types.ts";
+import { buildAIProjectContext } from "./aiProjectContext.ts";
+import { analyzeConstructionGeometry } from "./geometry/analyzeConstructionGeometry.ts";
+import type { AIProjectContext, AIProjectSnapshot, AIProviderRequest, AIProviderResponse, AIPipelineResult } from "./types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
 import { AiPromptController, isAiPromptSubmitKey } from "./AiPromptController.ts";
@@ -76,6 +78,9 @@ const emptySnapshot: AIProjectSnapshot = {
   objects: [],
   assemblies: []
 };
+
+/** What a provider receives for an empty project - the snapshot plus its (empty) derived geometry. */
+const emptyContext: AIProjectContext = buildAIProjectContext(emptySnapshot);
 
 /** A CommandExecutorLike spy - records every call it receives and returns a caller-controlled result, defaulting to success. */
 function makeExecutorSpy(
@@ -503,7 +508,7 @@ async function run(): Promise<void> {
     // door by id doesn't change which command is produced.
     const response = new MockAIProvider().interpret({
       instruction: "Add a pillar beside door-1",
-      projectContext,
+      projectContext: buildAIProjectContext(projectContext),
       availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
     });
 
@@ -516,7 +521,7 @@ async function run(): Promise<void> {
 
     const response = new MockAIProvider().interpret({
       instruction: "Add a pillar near wall-10 and door-7",
-      projectContext,
+      projectContext: buildAIProjectContext(projectContext),
       availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
     });
 
@@ -539,7 +544,7 @@ async function run(): Promise<void> {
       const provider = new MockAIProvider();
       const response = provider.interpret({
         instruction: example.instruction,
-        projectContext: emptySnapshot,
+        projectContext: emptyContext,
         availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
       });
 
@@ -553,7 +558,7 @@ async function run(): Promise<void> {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Create a wall and add a pillar and create a beam",
-      projectContext: emptySnapshot,
+      projectContext: emptyContext,
       availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
     });
 
@@ -572,7 +577,7 @@ async function run(): Promise<void> {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Do a backflip",
-      projectContext: emptySnapshot,
+      projectContext: emptyContext,
       availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
     });
 
@@ -584,7 +589,7 @@ async function run(): Promise<void> {
     const provider = new MockAIProvider();
     const response = provider.interpret({
       instruction: "Create a door",
-      projectContext: emptySnapshot,
+      projectContext: emptyContext,
       availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "door")
     });
 
@@ -1128,7 +1133,11 @@ async function run(): Promise<void> {
   }
 
   function interpretAgainst(projectContext: AIProjectSnapshot, instruction: string): AIProviderResponse {
-    return new MockAIProvider().interpret({ instruction, projectContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    return new MockAIProvider().interpret({
+      instruction,
+      projectContext: buildAIProjectContext(projectContext),
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
   }
 
   const editableContext = buildAIProjectSnapshot(
@@ -1262,6 +1271,290 @@ async function run(): Promise<void> {
 
     assertTrue(result.success, "result.success");
     assertEqual(JSON.stringify(frozen), before, "snapshot unchanged");
+  });
+
+  // --- Geometry in the AI context ---
+
+  type ContextObject = AIProjectSnapshot["objects"][number];
+
+  function geometryWall(
+    id: string,
+    x: number,
+    z: number,
+    rotation = 0,
+    dimensions: Record<string, number> = { height: 3, length: 4, thickness: 0.2 }
+  ): ContextObject {
+    return {
+      id,
+      type: "wall",
+      position: { x, y: 1.5, z },
+      rotation,
+      dimensions: { ...dimensions },
+      material: "generic",
+      color: "#c9c9c9",
+      assemblyIds: []
+    };
+  }
+
+  function snapshotOf(objects: ContextObject[]): AIProjectSnapshot {
+    return { ...emptySnapshot, wallCount: objects.filter((object) => object.type === "wall").length, objects };
+  }
+
+  // Two 4 m walls along X, 6 m apart center to center: wall-1 spans x -2..2, wall-2 spans x 4..8.
+  const twoWalls = snapshotOf([geometryWall("wall-1", 0, 0), geometryWall("wall-2", 6, 0)]);
+  const expectedWallPair = {
+    a: "wall-1",
+    b: "wall-2",
+    centerDelta: { x: 6, y: 0, z: 0 },
+    centerDistance: 6,
+    horizontalDistance: 6,
+    verticalDistance: 0,
+    overlap: { x: false, y: true, z: true, aabb: false },
+    gap: { x: 2, y: 0, z: 0 },
+    aRelativeToB: { leftOf: true, rightOf: false, inFrontOf: false, behind: false, above: false, below: false }
+  };
+
+  /** An AIProvider that records every request it receives and answers with no commands. */
+  function makeRecordingProvider(): AIProvider & { requests: AIProviderRequest[] } {
+    const requests: AIProviderRequest[] = [];
+    return {
+      requests,
+      interpret: (request) => {
+        requests.push(request);
+        return { commands: [] };
+      }
+    };
+  }
+
+  function withoutGeometry(context: AIProjectContext): Record<string, unknown> {
+    return Object.fromEntries(Object.entries(context).filter(([key]) => key !== "geometry"));
+  }
+
+  function objectReferences(value: unknown, into: Set<object> = new Set()): Set<object> {
+    if (typeof value === "object" && value !== null) {
+      into.add(value);
+      for (const child of Object.values(value)) {
+        objectReferences(child, into);
+      }
+    }
+    return into;
+  }
+
+  /** Every object and array is plain (no class instance) and frozen; every leaf is JSON data. */
+  function assertPlainAndFrozen(value: unknown, path: string): void {
+    if (typeof value !== "object" || value === null) {
+      assertTrue(typeof value !== "function" && typeof value !== "undefined", `${path} must be JSON data`);
+      return;
+    }
+    const prototype = Object.getPrototypeOf(value);
+    assertTrue(prototype === Object.prototype || prototype === Array.prototype, `${path} must be a plain object or array`);
+    assertTrue(Object.isFrozen(value), `${path} must be frozen`);
+    for (const [key, child] of Object.entries(value)) {
+      assertPlainAndFrozen(child, `${path}.${key}`);
+    }
+  }
+
+  await check("A. a two-wall project's AI context carries a geometry section with both walls and their relationship", () => {
+    const context = buildAIProjectContext(twoWalls);
+
+    assertDeepEqual(context.geometry.objects.map((object) => object.id), ["wall-1", "wall-2"], "analyzed objects");
+    assertEqual(context.geometry.relationships.length, 1, "one pair");
+    assertDeepEqual(context.geometry.invalidObjects, [], "no invalid objects");
+    assertDeepEqual(Object.keys(context), [...Object.keys(twoWalls), "geometry"], "the snapshot's own fields, then geometry");
+  });
+
+  await check("C. exact distances, gaps, overlap flags, and direction flags are in the context", () => {
+    assertDeepEqual(buildAIProjectContext(twoWalls).geometry.relationships[0], expectedWallPair, "wall-1 / wall-2");
+  });
+
+  await check("D. the context's geometry is analyzeConstructionGeometry() of the very snapshot beside it", () => {
+    const context = buildAIProjectContext(twoWalls);
+
+    assertDeepEqual(withoutGeometry(context), twoWalls, "the snapshot fields are the snapshot, unchanged");
+    assertDeepEqual(context.geometry, analyzeConstructionGeometry(twoWalls), "same result as the analyzer on the input");
+    assertDeepEqual(
+      context.geometry,
+      analyzeConstructionGeometry(withoutGeometry(context) as unknown as AIProjectSnapshot),
+      "and on the context's own objects"
+    );
+  });
+
+  await check("B. AICommandPipeline hands the provider the geometry-aware context, relationship intact", async () => {
+    const provider = makeRecordingProvider();
+
+    await new AICommandPipeline(provider, makeExecutorSpy()).run("Describe the walls", twoWalls);
+
+    assertEqual(provider.requests.length, 1, "one provider call");
+    const received = provider.requests[0].projectContext;
+    assertDeepEqual(received.geometry.relationships, [expectedWallPair], "the relationship the provider received");
+    assertDeepEqual(received, buildAIProjectContext(twoWalls), "exactly the context built from the snapshot");
+  });
+
+  await check("AICommandPipeline derives geometry itself - geometry a caller attaches to the snapshot is ignored", async () => {
+    const provider = makeRecordingProvider();
+    const fabricated = { objects: [], relationships: [{ ...expectedWallPair, centerDistance: 999 }], invalidObjects: [] };
+
+    await new AICommandPipeline(provider, makeExecutorSpy()).run("Describe the walls", {
+      ...twoWalls,
+      geometry: fabricated
+    } as AIProjectSnapshot);
+
+    assertDeepEqual(provider.requests[0].projectContext.geometry, analyzeConstructionGeometry(twoWalls), "derived, not the attached one");
+  });
+
+  await check("E. moving an object changes the derived geometry", () => {
+    const moved = buildAIProjectContext(snapshotOf([geometryWall("wall-1", 0, 0), geometryWall("wall-2", 10, 0)]));
+    const pair = moved.geometry.relationships[0];
+
+    assertEqual(pair.centerDistance, 10, "centers 10 m apart");
+    assertDeepEqual(pair.gap, { x: 6, y: 0, z: 0 }, "6 m clear between x 2 and x 8");
+    assertTrue(
+      JSON.stringify(moved.geometry) !== JSON.stringify(buildAIProjectContext(twoWalls).geometry),
+      "different from before the move"
+    );
+  });
+
+  await check("F. rotating an object changes its box and, here, its relationship", () => {
+    // wall-2 sits 1.5 m in front of wall-1. Turned 90 degrees, wall-1 runs along Z and reaches it.
+    const straight = buildAIProjectContext(snapshotOf([geometryWall("wall-1", 0, 0), geometryWall("wall-2", 0, 1.5)]));
+    const turned = buildAIProjectContext(snapshotOf([geometryWall("wall-1", 0, 0, Math.PI / 2), geometryWall("wall-2", 0, 1.5)]));
+
+    assertDeepEqual(straight.geometry.objects[0].aabb, { min: { x: -2, y: 0, z: -0.1 }, max: { x: 2, y: 3, z: 0.1 } }, "unrotated wall-1");
+    assertDeepEqual(turned.geometry.objects[0].aabb, { min: { x: -0.1, y: 0, z: -2 }, max: { x: 0.1, y: 3, z: 2 } }, "rotated wall-1");
+    assertEqual(straight.geometry.relationships[0].overlap.aabb, false, "apart when unrotated");
+    assertEqual(straight.geometry.relationships[0].aRelativeToB.behind, true, "wall-1 entirely behind wall-2");
+    assertEqual(turned.geometry.relationships[0].overlap.aabb, true, "the boxes overlap once wall-1 is rotated");
+    assertEqual(turned.geometry.relationships[0].aRelativeToB.behind, false, "no longer entirely behind");
+  });
+
+  await check("G. an empty project gets a valid, empty geometry section", async () => {
+    assertDeepEqual(emptyContext.geometry, { objects: [], relationships: [], invalidObjects: [] }, "empty geometry");
+
+    const provider = makeRecordingProvider();
+    await new AICommandPipeline(provider, makeExecutorSpy()).run("What is here?", emptySnapshot);
+    assertDeepEqual(provider.requests[0].projectContext, emptyContext, "what the provider received");
+  });
+
+  await check("H. an object whose geometry can't be derived appears in geometry.invalidObjects", () => {
+    const context = buildAIProjectContext(
+      snapshotOf([geometryWall("wall-1", 0, 0), geometryWall("wall-3", 3, 3, 0, { height: 3, length: 4, thickness: 0 })])
+    );
+
+    assertDeepEqual(
+      context.geometry.invalidObjects,
+      [{ id: "wall-3", type: "wall", errors: [{ field: "dimensions.thickness", message: "Thickness must be a finite number greater than 0." }] }],
+      "invalid objects"
+    );
+    assertDeepEqual(context.geometry.objects.map((object) => object.id), ["wall-1"], "only the valid wall is boxed");
+    assertDeepEqual(context.geometry.relationships, [], "no relationship involves it");
+    assertEqual(context.objects.length, 2, "the snapshot part still lists both - geometry doesn't filter the model");
+  });
+
+  await check("I. geometry is deterministic and sorted, whatever order the snapshot lists objects in", () => {
+    const objects = [geometryWall("wall-10", 0, 5), geometryWall("wall-2", 6, 0), geometryWall("wall-1", 0, 0)];
+    const context = buildAIProjectContext(snapshotOf(objects));
+
+    assertDeepEqual(context.geometry.objects.map((object) => object.id), ["wall-1", "wall-2", "wall-10"], "sorted by id");
+    assertDeepEqual(
+      context.geometry.relationships.map((pair) => `${pair.a}|${pair.b}`),
+      ["wall-1|wall-2", "wall-1|wall-10", "wall-2|wall-10"],
+      "pairs in id order"
+    );
+    assertEqual(JSON.stringify(buildAIProjectContext(snapshotOf(objects))), JSON.stringify(context), "a second build is byte-identical");
+    assertEqual(
+      JSON.stringify(buildAIProjectContext(snapshotOf([...objects].reverse())).geometry),
+      JSON.stringify(context.geometry),
+      "reordered input, identical geometry"
+    );
+  });
+
+  await check("J. building the context and running the pipeline leave the snapshot unchanged", async () => {
+    const snapshot = deepFreeze(JSON.parse(JSON.stringify(twoWalls)) as AIProjectSnapshot);
+    const before = JSON.stringify(snapshot);
+
+    const context = buildAIProjectContext(snapshot);
+    await new AICommandPipeline(new MockAIProvider(), makeExecutorSpy()).run("Compare wall-1 with wall-2", snapshot);
+
+    assertEqual(JSON.stringify(snapshot), before, "snapshot byte-for-byte unchanged");
+    const inputReferences = objectReferences(snapshot);
+    const shared = [...objectReferences(context)].filter((reference) => inputReferences.has(reference));
+    assertEqual(shared.length, 0, "the context shares no object with the snapshot");
+  });
+
+  await check("K. no class instances, functions, DOM-like objects, or circular references reach the provider", async () => {
+    class FakeMesh {
+      readonly isObject3D = true;
+      parent: unknown = null;
+    }
+    const mesh = new FakeMesh();
+    mesh.parent = mesh; // circular - JSON.stringify would throw if this were ever reached
+
+    const polluted = JSON.parse(JSON.stringify(twoWalls));
+    polluted.renderer = { domElement: { nodeType: 1, tagName: "CANVAS" } };
+    polluted.self = polluted;
+    polluted.objects[0].mesh = mesh;
+    polluted.objects[0].onClick = () => undefined;
+    polluted.objects[0].position.w = 1;
+    polluted.objects[0].dimensions.area = () => 0;
+    polluted.geometry = { objects: [mesh], relationships: "fabricated", invalidObjects: null };
+
+    const provider = makeRecordingProvider();
+    await new AICommandPipeline(provider, makeExecutorSpy()).run("Describe the walls", polluted as AIProjectSnapshot);
+    const received = provider.requests[0].projectContext;
+
+    assertDeepEqual(received, buildAIProjectContext(twoWalls), "exactly the clean context");
+    const serialized = JSON.stringify(received);
+    for (const leak of ["isObject3D", "nodeType", "renderer", "onClick", "fabricated", '"w"']) {
+      assertTrue(!serialized.includes(leak), `${leak} must not reach the provider`);
+    }
+    assertPlainAndFrozen(received, "context");
+  });
+
+  await check("the context is frozen - a provider can read it but can't change it", () => {
+    const context = buildAIProjectContext(twoWalls);
+
+    let threw = false;
+    try {
+      context.geometry.relationships[0].centerDistance = 1;
+    } catch {
+      threw = true;
+    }
+
+    assertTrue(threw, "writing to the context throws");
+    assertEqual(context.geometry.relationships[0].centerDistance, 6, "value unchanged");
+  });
+
+  await check("MockAIProvider reports the geometry relationship between two named objects, copied verbatim", () => {
+    const response = new MockAIProvider().interpret({
+      instruction: "Compare wall-1 with wall-2",
+      projectContext: buildAIProjectContext(twoWalls),
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertIncludes(response.notes, "Referenced existing objects: wall-1 (wall), wall-2 (wall).", "both walls found");
+    assertIncludes(response.notes, `Geometry relationship: ${JSON.stringify(expectedWallPair)}.`, "the exact relationship from the context");
+  });
+
+  await check("MockAIProvider adds no geometry note when fewer than two objects are named", () => {
+    const response = new MockAIProvider().interpret({
+      instruction: "Make wall-1 5 meters long.",
+      projectContext: buildAIProjectContext(twoWalls),
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertIncludes(response.notes, "Referenced existing objects: wall-1 (wall).", "one wall found");
+    assertTrue(!(response.notes ?? "").includes("Geometry relationship"), "no pair, no geometry note");
+  });
+
+  await check("MockAIProvider's geometry note never becomes a command - no spatial behavior", () => {
+    const response = new MockAIProvider().interpret({
+      instruction: "Make wall-1 5 meters deep and make wall-2 5 meters deep",
+      projectContext: buildAIProjectContext(twoWalls),
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertDeepEqual(response.commands, [], "walls have no depth - nothing to do, and nothing spatial invented");
+    assertIncludes(response.notes, `Geometry relationship: ${JSON.stringify(expectedWallPair)}.`, "the geometry was still seen");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -125,7 +125,10 @@ export class BackendAIProvider implements AIProvider {
 
     // Sent verbatim - exactly the existing AIProviderRequest fields the
     // backend expects (see backend/src/createServer.ts), nothing added,
-    // nothing OpenAI-specific.
+    // nothing OpenAI-specific. projectContext includes the geometry
+    // section AICommandPipeline derived; the backend never trusts it - it
+    // derives its own from the snapshot fields it sanitizes (see
+    // aiProjectContext.ts's parseAIProjectContext).
     const body = JSON.stringify({
       instruction: request.instruction,
       projectContext: request.projectContext,

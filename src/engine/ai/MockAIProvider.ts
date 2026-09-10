@@ -167,7 +167,10 @@ function toUpdateCommand(
  *
  * And it reads the project context for notes: when the instruction names
  * an existing object by id, the notes list each such object with its
- * type. The snapshot is only ever read, never modified.
+ * type. When it names two or more, the notes also carry each named pair's
+ * relationship from the context's geometry section, as the exact JSON the
+ * analysis produced - uninterpreted, and never turned into a command. The
+ * context is only ever read, never modified.
  *
  * There is no free-text dimension parsing for adds, no delete or
  * duplicate, and no spatial reasoning. That's a deliberate limitation of
@@ -215,6 +218,17 @@ export class MockAIProvider implements AIProvider {
     notes.push(...editProblems);
     if (referenced.length > 0) {
       notes.push(`Referenced existing objects: ${referenced.map((object) => `${object.id} (${object.type})`).join(", ")}.`);
+    }
+
+    // For each pair of named objects, the relationship the context's
+    // geometry section already holds - copied verbatim as JSON, in the
+    // analysis's own pair order. Proves geometry reaches a provider; the
+    // mock neither interprets it nor acts on it.
+    const referencedIds = new Set(referenced.map((object) => object.id));
+    for (const relationship of request.projectContext.geometry?.relationships ?? []) {
+      if (referencedIds.has(relationship.a) && referencedIds.has(relationship.b)) {
+        notes.push(`Geometry relationship: ${JSON.stringify(relationship)}.`);
+      }
     }
 
     return {

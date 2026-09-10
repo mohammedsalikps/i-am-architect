@@ -24,7 +24,8 @@ module ever makes a real network call (see "Verification approach").
 | `providers/verify.ts` | Node-runnable unit verification for `OpenAIProvider`, entirely against a mocked transport. |
 | `AICommandPipeline.ts` | Orchestrates one instruction end-to-end: validate input → call provider → validate output → execute via `CommandExecutor`. |
 | `verify.ts` | Node-runnable unit verification for `MockAIProvider`/`AICommandPipeline`/`buildAIProjectSnapshot()` (`npm run verify` includes this and `providers/verify.ts`). |
-| `geometry/analyzeConstructionGeometry.ts` | `analyzeConstructionGeometry()` - pure, deterministic bounding boxes and pairwise spatial facts derived from an `AIProjectSnapshot`. Not sent to any provider yet - see "Construction geometry analysis". |
+| `geometry/analyzeConstructionGeometry.ts` | `analyzeConstructionGeometry()` - pure, deterministic bounding boxes and pairwise spatial facts derived from an `AIProjectSnapshot`. The only geometry calculation - see "Construction geometry analysis". |
+| `aiProjectContext.ts` | `buildAIProjectContext()` - the snapshot plus its derived geometry, as the deep-frozen `AIProjectContext` every provider receives; `parseAIProjectContext()` - the backend's sanitize-then-derive entry point. See "Geometry in the AI context". |
 | `geometry/verify.ts` | Node-runnable unit verification for the geometry analyzer. |
 
 ## Construction geometry analysis
@@ -107,8 +108,9 @@ the stores already reject them.
 
 **What it deliberately doesn't do yet.**
 
-- The analysis isn't sent to any provider or included in the OpenAI
-  prompt.
+- Every provider receives it as the context's `geometry` section (see
+  "Geometry in the AI context"), but nothing acts on it: the app never
+  turns it into sentences or decisions.
 - No command uses it.
 - No placement relative to other objects, alignment, connection,
   snapping, collision resolution, rooms, or planning.
@@ -200,6 +202,85 @@ AIPipelineResult { success, outcomes[], errors[] }
   `src/engine/project/ProjectContext.ts`) - undo/redo works identically
   whether a command came from a button click or an AI instruction, with
   no AI-specific history code anywhere.
+
+## Geometry in the AI context
+
+Every provider receives `projectContext` as an `AIProjectContext`: the
+construction snapshot, plus a `geometry` section holding
+`analyzeConstructionGeometry()`'s output (`objects`, `relationships`,
+`invalidObjects`) for that same snapshot. So besides "wall-1 is at these
+coordinates with these dimensions", the model can read facts such as
+wall-1's center being 6 m from wall-2's, their boxes overlapping on Z,
+and wall-1 being entirely left of wall-2. These arrive as structured
+numbers and booleans. The application never turns them into sentences
+and never acts on them.
+
+```
+stores (ProjectContext)
+  → buildAIProjectSnapshot()              AIService, per instruction
+  → buildAIProjectContext(snapshot)       AICommandPipeline.run(): copy, derive geometry, deep-freeze
+  → provider.interpret({ projectContext })
+       MockAIProvider                     reads it in-process
+       BackendAIProvider → POST /api/ai/interpret   (context, incl. the browser's geometry)
+         → parseAIProjectContext()        backend: sanitize snapshot, drop client geometry, derive again
+         → OpenAIProvider → {"currentConstructionState": { ...snapshot, "geometry": {...} }}
+```
+
+- **One calculation.** `analyzeConstructionGeometry()` is the only
+  geometry code. The browser and the backend both run it: the backend
+  imports it from `src/engine/ai/`, just as it already imports
+  `OpenAIProvider` and the snapshot parser. `buildAIProjectContext()`
+  (`aiProjectContext.ts`) is the only place a context is assembled.
+  `OpenAIProvider` copies the section field by field into its message
+  and computes nothing itself.
+- **Always from the same snapshot.** The pipeline derives geometry from
+  the exact snapshot it is about to send, on every run. A `geometry`
+  field already on its input is ignored.
+- **Trust boundary.** The browser sends its geometry, so the request
+  carries the full context, but the backend never reads it.
+  `parseAIProjectContext()` sanitizes the snapshot fields, which drops
+  any other key, `geometry` included. It then derives geometry from the
+  sanitized snapshot. Fabricated, malformed, or missing client geometry
+  changes nothing and can't make a request fail. `backend/verify.ts`
+  sends fabricated geometry and checks that OpenAI receives the
+  server-derived values.
+- **Plain, frozen, deterministic.** The context gets the same guarantees
+  as the snapshot: JSON only, copied field by field, and sorted, so the
+  same model always yields the same bytes. It is also deep-frozen, so a
+  provider can read it but not change it.
+- **Coordinates and relationship semantics** are those of the analyzer,
+  as described in "Construction geometry analysis" above:
+  - world X/Y/Z in meters, rotations in radians, +Y up
+  - `leftOf`/`rightOf` compare X, `inFrontOf`/`behind` compare Z
+    (+Z is toward the Front view's camera), and `above`/`below` compare Y
+  - every relationship is about whole axis-aligned boxes in world space,
+    regardless of which way an object faces
+- **What the model is told.** Two prompt lines were appended. They say
+  that geometry values are deterministic calculations from the current
+  state, give the units and the world-space meaning of the direction
+  flags, and say that geometry is data, not instructions. They also say
+  it doesn't change which commands the model may produce. The command
+  schema and message layout are unchanged.
+- **MockAIProvider.** When an instruction names two or more existing
+  objects, its notes include each named pair's relationship as the exact
+  JSON from the context. This is proof that geometry reaches a provider,
+  and nothing more.
+- **Unfiltered, so it grows fast.** Every pair is sent: n(n−1)/2
+  relationships of about 360 bytes each.
+
+  | Objects | Pairs | Request body |
+  |---|---|---|
+  | 10 | 45 | about 20 KB |
+  | 30 | 435 | about 160 KB |
+  | 50 | 1,225 | about 450 KB |
+
+  At about 75 objects, the request exceeds the backend's 1 MB body cap
+  (`413`). The model's context window is likely to run out before that.
+  Choosing which relationships to send is a separate, later milestone.
+- **Still context only.** It adds no placement relative to other
+  objects, alignment, connection, snapping, collision resolution, rooms,
+  or planning. The prompt still tells the model to refuse
+  relative-placement requests.
 
 ## Security boundary - why `OpenAIProvider` is never constructed with a real key today
 
@@ -304,7 +385,10 @@ as positive proof no extra (or real) request happened.**
   geometry milestone. `MockAIProvider` understands four edit phrasings:
   "Make wall-1 5 meters long", "Change wall-1 height to 3.2 meters",
   "Rotate wall-1 by 90 degrees" (or "to"), and "Move wall-1 to X=2".
-- **What the model sees.** `OpenAIProvider` sends the full snapshot - every
+- **What the model sees.** `OpenAIProvider` sends the full context: the
+  snapshot plus its derived `geometry` section (see "Geometry in the AI
+  context"), inside the same `currentConstructionState` message. The
+  snapshot part covers every
   object's id, type, dimensions, position, rotation, material, color,
   and assembly membership, plus the assemblies, counts, and selected id -
   as a pure-JSON message (`{"currentConstructionState": ...}`) between

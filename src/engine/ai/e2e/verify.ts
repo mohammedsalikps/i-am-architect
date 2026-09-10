@@ -44,6 +44,7 @@ import { createMockBackend } from "./mockBackend.ts";
 import { MockAIProvider } from "../MockAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
 import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
+import { buildAIProjectContext } from "../aiProjectContext.ts";
 import type { ConstructionGeometryAnalysis } from "../geometry/types.ts";
 import type { MockBackend, MockBackendHandler } from "./mockBackend.ts";
 import type { WallData } from "../../wall/types.ts";
@@ -633,7 +634,11 @@ async function run(): Promise<void> {
     assertPlainJson(built, "snapshot");
 
     // What actually reached the backend matches it exactly.
-    assertSameJson(app.backend.requests[0].projectContext, built, "the backend received exactly the built snapshot");
+    assertSameJson(
+      app.backend.requests[0].projectContext,
+      buildAIProjectContext(built),
+      "the backend received exactly the built snapshot, plus geometry derived from it"
+    );
   });
 
   await check("the context is deterministic - undo reordering a store leaves it unchanged", async () => {
@@ -972,6 +977,93 @@ async function run(): Promise<void> {
 
     context.history.undo();
     assertSameJson(analyzeConstructionGeometry(buildAIProjectSnapshot(context)), before, "undo restores the original analysis exactly");
+  });
+
+  // --- Geometry in the AI context, through the whole real path ---
+  // Real ProjectContext -> stores -> snapshot -> AICommandPipeline (derives
+  // geometry) -> BackendAIProvider -> mock backend (re-derives geometry
+  // from the sanitized snapshot, as the real server does) -> MockAIProvider.
+
+  /**
+   * Walls have no depth, so MockAIProvider produces no command for this
+   * and the model is left untouched - its notes show what it saw. It
+   * names both walls, so the notes include their geometry relationship.
+   */
+  const inspectBothWalls = (first: string, second: string): string => `Make ${first} 5 meters deep and make ${second} 5 meters deep`;
+
+  await check("MockAIProvider sees two real walls' exact geometry relationship through the whole real path", async () => {
+    const app = wireMockProviderApp();
+    const wallA = addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 0, z: 0 } } });
+    const wallB = addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 6, z: 0 } } });
+    const modelBefore = JSON.stringify(buildAIProjectSnapshot(app.context));
+
+    await app.controller.submit(inspectBothWalls(wallA, wallB));
+
+    assertEqual(app.backend.requests.length, 1, "one request");
+    const request = app.backend.requests[0];
+    const { pair, firstRelativeToSecond } = relationBetween(request.projectContext.geometry, wallA, wallB);
+    assertEqual(pair.a, wallA, "pairs are ordered by id");
+    assertEqual(pair.centerDistance, 6, "6 m between centers");
+    assertEqual(pair.horizontalDistance, 6, "all of it horizontal");
+    assertEqual(pair.verticalDistance, 0, "same height");
+    assertSameJson(pair.gap, { x: 2, y: 0, z: 0 }, "2 m clear between the walls");
+    assertSameJson(pair.overlap, { x: false, y: true, z: true, aabb: false }, "overlap flags");
+    assertSameJson(
+      firstRelativeToSecond,
+      { leftOf: true, rightOf: false, inFrontOf: false, behind: false, above: false, below: false },
+      "wall A entirely left of wall B"
+    );
+
+    assertIncludes(
+      app.controller.getState().notes ?? null,
+      `Geometry relationship: ${JSON.stringify(pair)}.`,
+      "the provider reported the exact relationship it received"
+    );
+    assertSameJson(
+      request.projectContext.geometry,
+      analyzeConstructionGeometry(buildAIProjectSnapshot(app.context)),
+      "the geometry of the real model"
+    );
+    assertSameJson(
+      request.clientGeometry,
+      request.projectContext.geometry,
+      "the browser sent geometry too - and the server's own derivation from the sanitized snapshot matches it exactly"
+    );
+    assertPlainJson(request.projectContext, "context");
+    assertEqual(JSON.stringify(buildAIProjectSnapshot(app.context)), modelBefore, "the model is unchanged - no command was produced");
+  });
+
+  await check("moving and rotating real walls changes the geometry the provider receives", async () => {
+    const app = wireMockProviderApp();
+    const wallA = addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 0, z: 0 } } });
+    const wallB = addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, height: 3, thickness: 0.2, position: { x: 6, z: 0 } } });
+
+    await app.controller.submit(inspectBothWalls(wallA, wallB));
+    assertEqual(relationBetween(app.backend.requests[0].projectContext.geometry, wallA, wallB).pair.centerDistance, 6, "before: 6 m apart");
+
+    const moved = app.context.commandExecutor.execute({ type: "update_object", objectId: wallB, changes: { position: { x: 10 } } });
+    assertTrue(moved.success, "moved wall B through the real executor");
+    await app.controller.submit(inspectBothWalls(wallA, wallB));
+    const afterMove = relationBetween(app.backend.requests[1].projectContext.geometry, wallA, wallB).pair;
+    assertEqual(afterMove.centerDistance, 10, "after the move: 10 m apart");
+    assertSameJson(afterMove.gap, { x: 6, y: 0, z: 0 }, "6 m clear between x 2 and x 8");
+
+    const rotated = app.context.commandExecutor.execute({ type: "update_object", objectId: wallA, changes: { rotation: Math.PI / 2 } });
+    assertTrue(rotated.success, "rotated wall A through the real executor");
+    await app.controller.submit(inspectBothWalls(wallA, wallB));
+    const rotatedGeometry = app.backend.requests[2].projectContext.geometry;
+    assertSameJson(
+      rotatedGeometry.objects.find((object) => object.id === wallA)?.aabb,
+      { min: { x: -0.1, y: 0, z: -2 }, max: { x: 0.1, y: 3, z: 2 } },
+      "wall A now runs along Z"
+    );
+    const afterRotation = relationBetween(rotatedGeometry, wallA, wallB).pair;
+    assertSameJson(afterRotation.gap, { x: 7.9, y: 0, z: 0 }, "clear space now measured from wall A's new X extent");
+    assertIncludes(
+      app.controller.getState().notes ?? null,
+      `Geometry relationship: ${JSON.stringify(afterRotation)}.`,
+      "the provider saw the rotated geometry"
+    );
   });
 
   // --- Secrets and harness discipline ---

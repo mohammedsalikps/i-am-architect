@@ -41,8 +41,10 @@ import { OpenAIProvider } from "../src/engine/ai/providers/OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "../src/engine/ai/providers/OpenAIProvider.ts";
 import { BackendAIProvider } from "../src/engine/ai/providers/BackendAIProvider.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../src/engine/ai/types.ts";
+import { buildAIProjectContext } from "../src/engine/ai/aiProjectContext.ts";
+import { analyzeConstructionGeometry } from "../src/engine/ai/geometry/analyzeConstructionGeometry.ts";
 import type { AIProvider } from "../src/engine/ai/AIProvider.ts";
-import type { AIProviderRequest, AIProviderResponse, AIProjectSnapshot } from "../src/engine/ai/types.ts";
+import type { AIProviderRequest, AIProviderResponse, AIProjectContext, AIProjectSnapshot } from "../src/engine/ai/types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -89,6 +91,9 @@ const validSnapshot: AIProjectSnapshot = {
   ],
   assemblies: []
 };
+
+/** What the server hands its provider for validSnapshot: the sanitized snapshot plus geometry the server derived from it. */
+const validContext: AIProjectContext = buildAIProjectContext(validSnapshot);
 
 /** A hand-rolled, HTTP-free AIProvider stand-in - records every request it receives and returns/throws whatever the test configures. Used for every check that isn't specifically about proving OpenAIProvider reuse. */
 function makeFakeProvider(
@@ -314,7 +319,7 @@ async function run(): Promise<void> {
       assertDeepEqual(await res.json(), { commands: [{ type: "wall.add", wall: {} }], notes: "ok" }, "body");
       assertEqual(provider.calls.length, 1, "provider should be called exactly once");
       assertEqual(provider.calls[0].instruction, "Create a wall", "instruction forwarded");
-      assertDeepEqual(provider.calls[0].projectContext, validSnapshot, "projectContext forwarded unchanged");
+      assertDeepEqual(provider.calls[0].projectContext, validContext, "projectContext forwarded unchanged");
     });
   });
 
@@ -443,7 +448,7 @@ async function run(): Promise<void> {
       });
 
       assertEqual(res.status, 200, "extra fields alone are not an error");
-      assertDeepEqual(provider.calls[0].projectContext, validSnapshot, "the provider received only the defined fields");
+      assertDeepEqual(provider.calls[0].projectContext, validContext, "the provider received only the defined fields");
     });
   });
 
@@ -507,13 +512,152 @@ async function run(): Promise<void> {
 
       assertEqual(openAIRequestBodies.length, 1, "exactly one (mocked) OpenAI request");
       const body = JSON.parse(openAIRequestBodies[0]) as { messages: { role: string; content: string }[] };
-      const state = (JSON.parse(body.messages[1].content) as { currentConstructionState: AIProjectSnapshot })
+      const state = (JSON.parse(body.messages[1].content) as { currentConstructionState: AIProjectContext })
         .currentConstructionState;
-      assertDeepEqual(state, validSnapshot, "OpenAI receives the full snapshot the frontend sent");
+      assertDeepEqual(state, validContext, "OpenAI receives the full snapshot the frontend sent, plus server-derived geometry");
       assertEqual(body.messages[2].content, "Add a wall as tall as wall-1", "the instruction is the final message");
       assertTrue(!openAIRequestBodies[0].includes("sk-test"), "the API key is not in the OpenAI request body");
     }
   );
+
+  // --- Geometry: derived by this server, never taken from the client ---
+
+  // Two 4 m walls along X, 6 m apart center to center: wall-1 spans x -2..2, wall-2 spans x 4..8.
+  const twoWallSnapshot: AIProjectSnapshot = {
+    ...validSnapshot,
+    wallCount: 2,
+    objects: [
+      { ...validSnapshot.objects[0], position: { x: 0, y: 1.5, z: 0 }, dimensions: { height: 3, length: 4, thickness: 0.2 } },
+      { ...validSnapshot.objects[0], id: "wall-2", position: { x: 6, y: 1.5, z: 0 }, dimensions: { height: 3, length: 4, thickness: 0.2 } }
+    ]
+  };
+  const expectedWallPair = {
+    a: "wall-1",
+    b: "wall-2",
+    centerDelta: { x: 6, y: 0, z: 0 },
+    centerDistance: 6,
+    horizontalDistance: 6,
+    verticalDistance: 0,
+    overlap: { x: false, y: true, z: true, aabb: false },
+    gap: { x: 2, y: 0, z: 0 },
+    aRelativeToB: { leftOf: true, rightOf: false, inFrontOf: false, behind: false, above: false, below: false }
+  };
+  /** Wrong in every value, and describing an object that doesn't exist - what a tampering client might send. */
+  const fabricatedGeometry = {
+    objects: [
+      {
+        id: "ghost-1",
+        type: "wall",
+        center: { x: 999, y: 999, z: 999 },
+        dimensions: { length: 1 },
+        rotation: 0,
+        size: { x: 1, y: 1, z: 1 },
+        aabb: { min: { x: 998, y: 998, z: 998 }, max: { x: 1000, y: 1000, z: 1000 } }
+      }
+    ],
+    relationships: [
+      {
+        a: "wall-1",
+        b: "wall-2",
+        centerDelta: { x: -999, y: 0, z: 0 },
+        centerDistance: 999,
+        horizontalDistance: 999,
+        verticalDistance: 0,
+        overlap: { x: true, y: true, z: true, aabb: true },
+        gap: { x: 0, y: 0, z: 0 },
+        aRelativeToB: { leftOf: false, rightOf: true, inFrontOf: false, behind: false, above: false, below: false }
+      }
+    ],
+    invalidObjects: [{ id: "wall-1", type: "wall", errors: [{ field: "dimensions.length", message: "fabricated" }] }]
+  };
+  const FABRICATION_MARKERS = ["ghost-1", "999", "fabricated"];
+
+  function postInterpret(baseUrl: string, projectContext: unknown): Promise<Response> {
+    return fetch(`${baseUrl}/api/ai/interpret`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instruction: "Describe wall-1 and wall-2", projectContext })
+    });
+  }
+
+  await check("the backend derives geometry from the sanitized snapshot and ignores fabricated client geometry", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const res = await postInterpret(baseUrl, { ...twoWallSnapshot, geometry: fabricatedGeometry });
+      assertEqual(res.status, 200, "status");
+    });
+
+    assertEqual(provider.calls.length, 1, "the provider was called once");
+    const received = provider.calls[0].projectContext;
+    assertDeepEqual(received.geometry, analyzeConstructionGeometry(twoWallSnapshot), "the server's own derivation");
+    assertDeepEqual(received.geometry.relationships, [expectedWallPair], "correct values: 6 m apart, 2 m clear, wall-1 left of wall-2");
+    assertDeepEqual(received, buildAIProjectContext(twoWallSnapshot), "the sanitized snapshot plus geometry derived from it");
+    const serialized = JSON.stringify(received);
+    for (const marker of FABRICATION_MARKERS) {
+      assertTrue(!serialized.includes(marker), `"${marker}" from the fabricated geometry must not reach the provider`);
+    }
+  });
+
+  await check("regression: fabricated client geometry never reaches OpenAI - the real OpenAIProvider gets server-derived geometry", async () => {
+    const openAIRequestBodies: string[] = [];
+    const recordingFetch: OpenAIFetch = async (_url, init) => {
+      openAIRequestBodies.push(init.body);
+      return okChatResponse({ commands: [] });
+    };
+    const provider = new OpenAIProvider({ apiKey: "sk-test", fetch: recordingFetch });
+
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const res = await postInterpret(baseUrl, { ...twoWallSnapshot, geometry: fabricatedGeometry });
+      assertEqual(res.status, 200, "status");
+    });
+
+    assertEqual(openAIRequestBodies.length, 1, "exactly one (mocked) OpenAI request");
+    const body = JSON.parse(openAIRequestBodies[0]) as { messages: { role: string; content: string }[] };
+    const state = (JSON.parse(body.messages[1].content) as { currentConstructionState: AIProjectContext }).currentConstructionState;
+    assertDeepEqual(state.geometry, analyzeConstructionGeometry(twoWallSnapshot), "OpenAI saw the server's derivation");
+    assertDeepEqual(state.geometry.relationships, [expectedWallPair], "with the correct values");
+    for (const marker of FABRICATION_MARKERS) {
+      assertTrue(!openAIRequestBodies[0].includes(marker), `"${marker}" must not appear anywhere in the OpenAI request`);
+    }
+  });
+
+  await check("a missing or malformed client geometry section is not an error - the server derives geometry either way", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    const variants: unknown[] = ["garbage", 42, null, [], { objects: "not a list" }, { relationships: [{ a: "x" }] }];
+
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      for (const geometry of variants) {
+        const res = await postInterpret(baseUrl, { ...twoWallSnapshot, geometry });
+        assertEqual(res.status, 200, `geometry ${JSON.stringify(geometry)} is accepted`);
+      }
+      const res = await postInterpret(baseUrl, twoWallSnapshot);
+      assertEqual(res.status, 200, "no geometry section at all is accepted");
+    });
+
+    assertEqual(provider.calls.length, variants.length + 1, "every request reached the provider");
+    for (const call of provider.calls) {
+      assertDeepEqual(call.projectContext.geometry, analyzeConstructionGeometry(twoWallSnapshot), "server-derived geometry every time");
+    }
+  });
+
+  await check("the server reports an object whose geometry can't be derived in geometry.invalidObjects", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    const withBadWall = JSON.parse(JSON.stringify(twoWallSnapshot));
+    withBadWall.objects[1].dimensions.thickness = 0;
+
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const res = await postInterpret(baseUrl, withBadWall);
+      assertEqual(res.status, 200, "a zero dimension is still a well-formed snapshot");
+    });
+
+    const geometry = provider.calls[0].projectContext.geometry;
+    assertDeepEqual(
+      geometry.invalidObjects,
+      [{ id: "wall-2", type: "wall", errors: [{ field: "dimensions.thickness", message: "Thickness must be a finite number greater than 0." }] }],
+      "invalid objects"
+    );
+    assertDeepEqual(geometry.relationships, [], "no relationship with an object that has no box");
+  });
 
   // --- Contract check: the real frontend provider against this real server ---
 
@@ -539,7 +683,7 @@ async function run(): Promise<void> {
 
         const response = await backendProvider.interpret({
           instruction: "Build a wall",
-          projectContext: validSnapshot,
+          projectContext: validContext,
           availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
         });
 
@@ -548,7 +692,7 @@ async function run(): Promise<void> {
 
         assertEqual(provider.calls.length, 1, "the server called its provider exactly once");
         assertEqual(provider.calls[0].instruction, "Build a wall", "instruction survived the round trip");
-        assertDeepEqual(provider.calls[0].projectContext, validSnapshot, "snapshot survived the round trip");
+        assertDeepEqual(provider.calls[0].projectContext, validContext, "snapshot survived the round trip");
       });
     }
   );
@@ -563,7 +707,7 @@ async function run(): Promise<void> {
       try {
         await backendProvider.interpret({
           instruction: "   ",
-          projectContext: validSnapshot,
+          projectContext: validContext,
           availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
         });
       } catch (error) {

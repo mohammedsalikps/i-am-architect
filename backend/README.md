@@ -31,6 +31,12 @@ Frontend (future)                  This backend                    OpenAI
  projectContext,                     (only here, only server-side)
  availableObjectTypes}               │
                                       ▼
+                                parseAIProjectContext(projectContext)
+                                      │  (sanitize the snapshot, drop the
+                                      │   client's geometry, derive
+                                      │   geometry from the sanitized
+                                      │   snapshot - src/engine/ai/)
+                                      ▼
                                 new OpenAIProvider({apiKey, fetch})
                                       │  (existing, unmodified logic -
                                       │   see src/engine/ai/providers/)
@@ -71,7 +77,16 @@ This milestone does not add a frontend consumer of this endpoint (no
   - only that origin's browser code can call this endpoint from a page.
 - Request bodies are capped at 1MB (`413` beyond that) - basic,
   dependency-free protection against an unbounded body, independent of
-  the point below.
+  the point below. The frontend's request includes every pairwise
+  geometry relationship, about 360 bytes each. A project of about 75
+  objects therefore exceeds this cap (see `src/engine/ai/README.md`
+  "Geometry in the AI context").
+- **Client-supplied geometry is never trusted.** The provider only ever
+  sees geometry this server derived itself, from the snapshot it has just
+  validated and sanitized (`parseAIProjectContext()` in
+  `src/engine/ai/aiProjectContext.ts`). `verify.ts` sends fabricated
+  geometry and checks that the real `OpenAIProvider`'s request carries
+  the server-derived values instead.
 - **This endpoint has no authentication of its own in this milestone.**
   Anything that can reach it (on whatever network it's deployed to) can
   make it call OpenAI and spend the configured account's quota. That is
@@ -154,6 +169,14 @@ Request body:
 `AI_SUPPORTED_OBJECT_TYPES` (the same default `AICommandPipeline.run()`
 itself uses) when omitted. `projectContext` must match
 `AIProjectSnapshot`'s shape exactly (see `src/engine/ai/types.ts`).
+
+The frontend also sends a `geometry` section inside `projectContext`
+(see `src/engine/ai/README.md` "Geometry in the AI context"). The
+server never reads it. It is dropped along with any other field the
+snapshot doesn't define, and replaced by geometry the server derives
+from the sanitized snapshot with the same `analyzeConstructionGeometry()`
+the frontend runs. A missing, malformed, or fabricated `geometry` is
+therefore never an error and never reaches the provider.
 
 Responses:
 

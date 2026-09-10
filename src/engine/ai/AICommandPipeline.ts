@@ -4,6 +4,7 @@ import type { AIProvider } from "./AIProvider";
 // file directly, e.g. from src/engine/ai/verify.ts - see
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
+import { buildAIProjectContext } from "./aiProjectContext.ts";
 import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectSnapshot } from "./types";
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
@@ -159,7 +160,7 @@ export class AICommandPipeline {
    */
   async run(
     instruction: string,
-    projectContext: AIProjectSnapshot,
+    snapshot: AIProjectSnapshot,
     availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES
   ): Promise<AIPipelineResult> {
     const trimmedInstruction = typeof instruction === "string" ? instruction.trim() : "";
@@ -172,6 +173,12 @@ export class AICommandPipeline {
         errors: [{ stage: "input", message: "Instruction is empty." }]
       };
     }
+
+    // Geometry is derived here, from this exact snapshot, on every run -
+    // so whichever caller built the snapshot, the provider always sees
+    // geometry that matches the objects beside it. Any `geometry` already
+    // on the argument is ignored (see buildAIProjectContext).
+    const projectContext = buildAIProjectContext(snapshot);
 
     let response;
     try {
