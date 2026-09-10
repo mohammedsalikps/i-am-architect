@@ -1548,6 +1548,284 @@ function run(): void {
     assertEqual(executor.execute({ type: "assembly.frobnicate" }).success, false, "result.success");
   });
 
+  // --- update_object: edit an existing object of any type, by id ---
+
+  function makeFullExecutor() {
+    const walls = new WallStore();
+    const pillars = new PillarStore();
+    const beams = new BeamStore();
+    const slabs = new SlabStore();
+    const doors = new DoorStore();
+    const windows = new WindowStore();
+    const assemblies = new AssemblyStore();
+    const wallHistory = makeWallHistoryStub(walls);
+    const executor = new CommandExecutor(
+      walls,
+      wallHistory,
+      assemblies,
+      pillars,
+      makePillarHistoryStub(pillars),
+      beams,
+      makeBeamHistoryStub(beams),
+      slabs,
+      makeSlabHistoryStub(slabs),
+      doors,
+      makeDoorHistoryStub(doors),
+      windows,
+      makeWindowHistoryStub(windows)
+    );
+    return { executor, walls, pillars, beams, slabs, doors, windows, assemblies, wallHistory };
+  }
+
+  /** Adds a default object of `type` through the executor and returns its id. */
+  function addObject(executor: CommandExecutor, type: string): string {
+    const result = executor.execute({ type: `${type}.add`, [type]: {} });
+    assertTrue(result.success && result.objectId, `precondition: ${type}.add succeeded`);
+    return result.objectId;
+  }
+
+  type ObjectStoreView = {
+    get(id: string): { id: string; dimensions: object; position: object; rotation: number } | undefined;
+    getAll(): unknown[];
+  };
+
+  check("update_object edits every construction object type through that type's own store", () => {
+    const app = makeFullExecutor();
+    const cases: { type: string; store: ObjectStoreView; dimension: string; value: number }[] = [
+      { type: "wall", store: app.walls, dimension: "length", value: 6 },
+      { type: "pillar", store: app.pillars, dimension: "width", value: 0.6 },
+      { type: "beam", store: app.beams, dimension: "length", value: 5 },
+      { type: "slab", store: app.slabs, dimension: "width", value: 3 },
+      { type: "door", store: app.doors, dimension: "width", value: 1.1 },
+      { type: "window", store: app.windows, dimension: "width", value: 1.5 }
+    ];
+
+    for (const { type, store, dimension, value } of cases) {
+      const id = addObject(app.executor, type);
+      const before = store.get(id);
+      assertTrue(before, `${type}: precondition`);
+
+      const result = app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { [dimension]: value } } });
+
+      assertTrue(result.success, `${type}: update succeeded`);
+      assertEqual(result.objectId, id, `${type}: result names the same object`);
+      const after = store.get(id);
+      assertTrue(after, `${type}: still stored`);
+      assertEqual(after.id, id, `${type}: id unchanged`);
+      const beforeDimensions = before.dimensions as Record<string, number>;
+      const afterDimensions = after.dimensions as Record<string, number>;
+      assertEqual(afterDimensions[dimension], value, `${type}: ${dimension} changed`);
+      for (const key of Object.keys(beforeDimensions).filter((name) => name !== dimension)) {
+        assertEqual(afterDimensions[key], beforeDimensions[key], `${type}: ${key} untouched`);
+      }
+      assertEqual(store.getAll().length, 1, `${type}: still exactly one`);
+    }
+  });
+
+  check("update_object reports success with the type's own update message", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    const result = app.executor.execute({ type: "update_object", objectId: id, changes: { color: "#123456" } });
+
+    assertTrue(result.success, "result.success");
+    assertEqual(result.message, "Wall updated.", "delegated to wall.update");
+  });
+
+  check("update_object merges a partial dimensions change with the current dimensions", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { length: 5 } } });
+
+    assertDeepEqual(app.walls.get(id)?.dimensions, { length: 5, height: 2.7, thickness: 0.2 }, "only length changed");
+  });
+
+  check("update_object merges a partial position change, keeping the other axes", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const before = app.walls.get(id);
+
+    app.executor.execute({ type: "update_object", objectId: id, changes: { position: { x: 2 } } });
+
+    assertDeepEqual(app.walls.get(id)?.position, { x: 2, y: before!.position.y, z: before!.position.z }, "only x changed");
+  });
+
+  check("update_object sets rotation from radians, or from { y: radians }", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    assertTrue(app.executor.execute({ type: "update_object", objectId: id, changes: { rotation: 0.5 } }).success, "number form");
+    assertEqual(app.walls.get(id)?.rotation, 0.5, "rotation from a number");
+
+    assertTrue(app.executor.execute({ type: "update_object", objectId: id, changes: { rotation: { y: 1.57 } } }).success, "{ y } form");
+    assertEqual(app.walls.get(id)?.rotation, 1.57, "rotation from { y }");
+  });
+
+  check("update_object rejects rotation around any axis the model doesn't have", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const before = app.walls.get(id);
+
+    for (const rotation of [{ x: 1 }, { y: 1, z: 1 }, "1.57"]) {
+      const result = app.executor.execute({ type: "update_object", objectId: id, changes: { rotation } });
+      assertEqual(result.success, false, `rotation ${JSON.stringify(rotation)} rejected`);
+      assertTrue(result.errors?.some((error) => error.field === "changes.rotation"), "error names changes.rotation");
+    }
+    assertDeepEqual(app.walls.get(id), before, "wall untouched");
+  });
+
+  check("update_object changes material and color, with color checked by the store's own validation", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "pillar");
+
+    const valid = app.executor.execute({ type: "update_object", objectId: id, changes: { material: "concrete", color: "#224466" } });
+    assertTrue(valid.success, "valid material and color accepted");
+    assertEqual(app.pillars.get(id)?.material, "concrete", "material");
+    assertEqual(app.pillars.get(id)?.color, "#224466", "color");
+
+    const before = app.pillars.get(id);
+    const invalid = app.executor.execute({ type: "update_object", objectId: id, changes: { color: "red" } });
+    assertEqual(invalid.success, false, "a non-hex color is rejected");
+    assertTrue(invalid.errors?.some((error) => error.field === "color"), "rejected by validatePillar's color rule");
+    assertDeepEqual(app.pillars.get(id), before, "pillar untouched");
+  });
+
+  check("update_object rejects an empty material, including on walls (whose validator doesn't check material)", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const before = app.walls.get(id);
+
+    const result = app.executor.execute({ type: "update_object", objectId: id, changes: { material: "   " } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(result.errors?.some((error) => error.field === "changes.material"), "error names changes.material");
+    assertDeepEqual(app.walls.get(id), before, "wall untouched");
+  });
+
+  check("update_object rejects an id that matches no object - and creates nothing", () => {
+    const app = makeFullExecutor();
+
+    const result = app.executor.execute({ type: "update_object", objectId: "wall-999999", changes: { dimensions: { length: 5 } } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(result.message?.includes('No construction object found with id "wall-999999"'), "clear not-found message");
+    for (const store of [app.walls, app.pillars, app.beams, app.slabs, app.doors, app.windows]) {
+      assertEqual(store.getAll().length, 0, "no object was created");
+    }
+  });
+
+  check("update_object rejects an assembly id - it only edits construction objects", () => {
+    const app = makeFullExecutor();
+    const assembly = app.executor.execute({ type: "assembly.create", assembly: { name: "Core" } });
+
+    const result = app.executor.execute({ type: "update_object", objectId: assembly.objectId, changes: { color: "#000000" } });
+
+    assertEqual(result.success, false, "result.success");
+    assertTrue(result.message?.includes("No construction object found"), "treated as not found");
+  });
+
+  check("update_object rejects properties the construction-object model doesn't have or doesn't allow editing", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const before = app.walls.get(id);
+
+    for (const key of ["height", "id", "type", "assemblyId", "weight", "mesh"]) {
+      const result = app.executor.execute({ type: "update_object", objectId: id, changes: { [key]: 1 } });
+      assertEqual(result.success, false, `changes.${key} rejected`);
+      assertTrue(result.errors?.some((error) => error.field === `changes.${key}`), `error names changes.${key}`);
+    }
+    assertDeepEqual(app.walls.get(id), before, "wall untouched");
+  });
+
+  check("update_object rejects a dimension this object type doesn't have", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    const result = app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { depth: 1 } } });
+
+    assertEqual(result.success, false, "a wall has no depth");
+    assertTrue(result.errors?.some((error) => error.field === "changes.dimensions.depth"), "error names the dimension");
+  });
+
+  check("update_object rejects invalid values through the existing store validation", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const before = app.walls.get(id);
+
+    const zeroLength = app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { length: 0 } } });
+    assertEqual(zeroLength.success, false, "length 0 rejected");
+    assertTrue(zeroLength.errors?.some((error) => error.field === "dimensions.length"), "rejected by validateWall");
+
+    const infinite = app.executor.execute({ type: "update_object", objectId: id, changes: { position: { x: Infinity } } });
+    assertEqual(infinite.success, false, "a non-finite position rejected");
+
+    const text = app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { length: "5" } } });
+    assertEqual(text.success, false, "a non-number dimension rejected");
+
+    assertDeepEqual(app.walls.get(id), before, "wall untouched by every rejected update");
+  });
+
+  check("malformed update_object commands are rejected without throwing", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    assertEqual(app.executor.execute({ type: "update_object", changes: { color: "#000000" } }).success, false, "missing objectId");
+    assertEqual(app.executor.execute({ type: "update_object", objectId: "", changes: { color: "#000000" } }).success, false, "empty objectId");
+    assertEqual(app.executor.execute({ type: "update_object", objectId: id }).success, false, "missing changes");
+    assertEqual(app.executor.execute({ type: "update_object", objectId: id, changes: "wider" }).success, false, "changes not an object");
+    assertEqual(app.executor.execute({ type: "update_object", objectId: id, changes: {} }).success, false, "empty changes");
+  });
+
+  check("a __proto__ key smuggled into update_object changes is rejected, not applied", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    const result = app.executor.execute({
+      type: "update_object",
+      objectId: id,
+      changes: JSON.parse('{"__proto__": {"polluted": true}}')
+    });
+
+    assertEqual(result.success, false, "rejected");
+    assertEqual(({} as Record<string, unknown>).polluted, undefined, "no prototype pollution");
+  });
+
+  check("update_object never creates or duplicates - the object count stays the same", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    for (const changes of [{ dimensions: { length: 7 } }, { position: { z: 3 } }, { rotation: 1 }, { color: "#abcdef" }]) {
+      app.executor.execute({ type: "update_object", objectId: id, changes });
+    }
+
+    assertEqual(app.walls.getAll().length, 1, "still one wall");
+    assertEqual(app.walls.getAll()[0].id, id, "the same wall");
+  });
+
+  check("update_object records exactly one history entry on success and none on failure", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+    const afterAdd = app.wallHistory.recordedCount;
+
+    app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { length: 5 }, color: "#101010" } });
+    assertEqual(app.wallHistory.recordedCount, afterAdd + 1, "a multi-property update is one history entry");
+
+    app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { length: -1 } } });
+    app.executor.execute({ type: "update_object", objectId: "wall-999999", changes: { color: "#101010" } });
+    app.executor.execute({ type: "update_object", objectId: id, changes: { weight: 5 } });
+    assertEqual(app.wallHistory.recordedCount, afterAdd + 1, "rejected updates record nothing");
+  });
+
+  check("update_object keeps the store's grounding rule: a height change without a position regrounds the object", () => {
+    const app = makeFullExecutor();
+    const id = addObject(app.executor, "wall");
+
+    app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { height: 4 } } });
+
+    assertEqual(app.walls.get(id)?.position.y, 2, "base stays on the ground (y = height / 2)");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} verification check(s) failed`);

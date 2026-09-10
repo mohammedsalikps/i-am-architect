@@ -1108,6 +1108,162 @@ async function run(): Promise<void> {
     }
   });
 
+  // --- update_object: MockAIProvider and the pipeline's structural check ---
+
+  function assertIncludes(actual: string | null | undefined, needle: string, message: string): void {
+    if (actual === null || actual === undefined || !actual.includes(needle)) {
+      throw new Error(`${message}: expected ${JSON.stringify(actual)} to include ${JSON.stringify(needle)}`);
+    }
+  }
+
+  /** Freezes `value` and everything inside it - any later attempt to mutate it throws in strict mode. */
+  function deepFreeze<T>(value: T): T {
+    if (value !== null && typeof value === "object") {
+      for (const child of Object.values(value)) {
+        deepFreeze(child);
+      }
+      Object.freeze(value);
+    }
+    return value;
+  }
+
+  function interpretAgainst(projectContext: AIProjectSnapshot, instruction: string): AIProviderResponse {
+    return new MockAIProvider().interpret({ instruction, projectContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+  }
+
+  const editableContext = buildAIProjectSnapshot(
+    makeSnapshotSource({
+      walls: [wallRecord("wall-1", { rotation: 0.5 })],
+      pillars: [objectRecord("pillar-1", "pillar", { width: 0.4, depth: 0.4, height: 2.7 })]
+    })
+  );
+
+  await check('MockAIProvider turns "Make wall-1 5 meters long." into an update_object command', () => {
+    assertDeepEqual(
+      interpretAgainst(editableContext, "Make wall-1 5 meters long.").commands,
+      [{ type: "update_object", objectId: "wall-1", changes: { dimensions: { length: 5 } } }],
+      "commands"
+    );
+  });
+
+  await check('MockAIProvider turns "Change wall-1 height to 3.2 meters." into an update_object command', () => {
+    assertDeepEqual(
+      interpretAgainst(editableContext, "Change wall-1 height to 3.2 meters.").commands,
+      [{ type: "update_object", objectId: "wall-1", changes: { dimensions: { height: 3.2 } } }],
+      "commands"
+    );
+  });
+
+  await check('MockAIProvider turns "Rotate wall-1 by 90 degrees." into a rotation relative to its current one', () => {
+    assertDeepEqual(
+      interpretAgainst(editableContext, "Rotate wall-1 by 90 degrees.").commands,
+      [{ type: "update_object", objectId: "wall-1", changes: { rotation: 0.5 + Math.PI / 2 } }],
+      "0.5 rad (current, from the snapshot) + 90 degrees"
+    );
+    assertDeepEqual(
+      interpretAgainst(editableContext, "Rotate wall-1 to 45 degrees").commands,
+      [{ type: "update_object", objectId: "wall-1", changes: { rotation: Math.PI / 4 } }],
+      '"to" is absolute'
+    );
+  });
+
+  await check('MockAIProvider turns "Move wall-1 to X=2." into a single-axis position change', () => {
+    assertDeepEqual(
+      interpretAgainst(editableContext, "Move wall-1 to X=2.").commands,
+      [{ type: "update_object", objectId: "wall-1", changes: { position: { x: 2 } } }],
+      "commands"
+    );
+  });
+
+  await check("MockAIProvider never invents an id - an edit naming an unknown object produces no command at all", () => {
+    const response = interpretAgainst(editableContext, "Make wall-9 5 meters long.");
+
+    assertDeepEqual(response.commands, [], "no update, and no fallback wall.add");
+    assertTrue(response.notes?.includes('No existing object with id "wall-9"'), "the note explains why");
+  });
+
+  await check("MockAIProvider won't ask to change a dimension the object doesn't have", () => {
+    const response = interpretAgainst(editableContext, "Make pillar-1 5 meters long.");
+
+    assertDeepEqual(response.commands, [], "a pillar has no length");
+    assertTrue(response.notes?.includes('pillar-1 (pillar) has no "length" dimension'), "the note explains why");
+  });
+
+  await check("MockAIProvider only reads the snapshot - a frozen snapshot survives every edit instruction", () => {
+    const frozen = deepFreeze(JSON.parse(JSON.stringify(editableContext)) as AIProjectSnapshot);
+    const before = JSON.stringify(frozen);
+
+    for (const instruction of [
+      "Make wall-1 5 meters long.",
+      "Change wall-1 height to 3.2 meters.",
+      "Rotate wall-1 by 90 degrees.",
+      "Move wall-1 to X=2."
+    ]) {
+      interpretAgainst(frozen, instruction);
+    }
+
+    assertEqual(JSON.stringify(frozen), before, "snapshot unchanged");
+  });
+
+  await check("AICommandPipeline passes a well-formed update_object to CommandExecutor unchanged", async () => {
+    const command = { type: "update_object", objectId: "wall-1", changes: { dimensions: { length: 5 } } };
+    const executor = makeExecutorSpy();
+    const pipeline = new AICommandPipeline(fixedProvider({ commands: [command] }), executor);
+
+    const result = await pipeline.run("Make wall-1 5 meters long", editableContext);
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(executor.calls, [command], "the executor received exactly this command");
+  });
+
+  await check("AICommandPipeline rejects malformed update_object commands before execution", async () => {
+    const malformed = [
+      { type: "update_object", changes: { color: "#000000" } },
+      { type: "update_object", objectId: "", changes: { color: "#000000" } },
+      { type: "update_object", objectId: "wall-1" },
+      { type: "update_object", objectId: "wall-1", changes: "wider" },
+      { type: "update_object", objectId: "wall-1", changes: [1] }
+    ];
+
+    for (const command of malformed) {
+      const executor = makeExecutorSpy();
+      const pipeline = new AICommandPipeline(fixedProvider({ commands: [command] }), executor);
+      const result = await pipeline.run("Edit something", editableContext);
+
+      assertEqual(result.success, false, `${JSON.stringify(command)}: rejected`);
+      assertEqual(result.errors[0].stage, "validation", `${JSON.stringify(command)}: rejected structurally`);
+      assertIncludes(result.errors[0].message, "Malformed update_object", `${JSON.stringify(command)}: clear message`);
+      assertEqual(executor.calls.length, 0, `${JSON.stringify(command)}: never executed`);
+    }
+  });
+
+  await check("AICommandPipeline rejects an update_object whose target type isn't available in this context", async () => {
+    const executor = makeExecutorSpy();
+    const command = { type: "update_object", objectId: "pillar-1", changes: { dimensions: { width: 0.5 } } };
+    const pipeline = new AICommandPipeline(fixedProvider({ commands: [command] }), executor);
+
+    const result = await pipeline.run(
+      "Make pillar-1 wider",
+      editableContext,
+      AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "pillar")
+    );
+
+    assertEqual(result.success, false, "result.success");
+    assertIncludes(result.errors[0].message, "not available", "clear message");
+    assertEqual(executor.calls.length, 0, "never executed");
+  });
+
+  await check("AICommandPipeline leaves the snapshot untouched while running an update", async () => {
+    const frozen = deepFreeze(JSON.parse(JSON.stringify(editableContext)) as AIProjectSnapshot);
+    const before = JSON.stringify(frozen);
+    const pipeline = new AICommandPipeline(new MockAIProvider(), makeExecutorSpy());
+
+    const result = await pipeline.run("Make wall-1 5 meters long.", frozen);
+
+    assertTrue(result.success, "result.success");
+    assertEqual(JSON.stringify(frozen), before, "snapshot unchanged");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} verification check(s) failed`);

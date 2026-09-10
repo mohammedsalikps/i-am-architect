@@ -235,7 +235,46 @@ export type Command =
   | UpdateAssemblyCommand
   | DeleteAssemblyCommand
   | AddObjectToAssemblyCommand
-  | RemoveObjectFromAssemblyCommand;
+  | RemoveObjectFromAssemblyCommand
+  | UpdateObjectCommand;
+
+/**
+ * The editable properties of an existing construction object - only
+ * fields ConstructionObjectBase already has, nothing new. Unlike the
+ * per-type `<type>.update` commands, whose `changes.dimensions` and
+ * `changes.position` must be complete replacement objects, every nested
+ * field here is partial: CommandExecutor merges it over the object's
+ * current values before handing a complete change to the existing
+ * per-type update path.
+ *
+ * `id`, `type`, and `assemblyId` are deliberately absent. An object's
+ * identity never changes, and assembly membership belongs to the
+ * assembly.* commands (the object's own `assemblyId` field is a reserved
+ * placeholder that nothing sets).
+ */
+export interface ObjectChanges {
+  /** Only keys the object already has (a wall: length/height/thickness; a pillar: width/depth/height; ...), in meters. */
+  dimensions?: Record<string, number>;
+  /** Any subset of x/y/z, in meters; omitted axes keep their current value. */
+  position?: { x?: number; y?: number; z?: number };
+  /** Radians around the vertical axis - the only rotation the model has. `{ y: radians }` is accepted as the same value. */
+  rotation?: number | { y: number };
+  material?: string;
+  color?: string;
+}
+
+/**
+ * Edits an existing construction object of any type, by id. The type is
+ * resolved from the id through the shared resolver, and the change is
+ * carried out by that type's existing `<type>.update` path - the same
+ * store validation and history entry a UI edit gets. It never creates an
+ * object: an id that matches nothing is an error.
+ */
+export interface UpdateObjectCommand {
+  type: "update_object";
+  objectId: ObjectId;
+  changes: ObjectChanges;
+}
 
 export interface CommandResult {
   success: boolean;

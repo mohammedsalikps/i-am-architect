@@ -47,6 +47,7 @@ import type {
   DeleteAssemblyCommand,
   AddObjectToAssemblyCommand,
   RemoveObjectFromAssemblyCommand,
+  UpdateObjectCommand,
   WallHistoryLike,
   PillarHistoryLike,
   BeamHistoryLike,
@@ -54,6 +55,7 @@ import type {
   DoorHistoryLike,
   WindowHistoryLike
 } from "./types";
+import { resolveConstructionObject } from "../objects/resolveConstructionObject.ts";
 
 const KNOWN_COMMAND_TYPES = [
   "wall.add",
@@ -84,7 +86,8 @@ const KNOWN_COMMAND_TYPES = [
   "assembly.update",
   "assembly.delete",
   "assembly.addObject",
-  "assembly.removeObject"
+  "assembly.removeObject",
+  "update_object"
 ] as const;
 
 function isCommand(value: unknown): value is Command {
@@ -258,9 +261,190 @@ export class CommandExecutor {
         return this.executeAddObjectToAssembly(input);
       case "assembly.removeObject":
         return this.executeRemoveObjectFromAssembly(input);
+      case "update_object":
+        return this.executeUpdateObject(input);
       default:
         return { success: false, message: `Unknown command type: "${(input as { type: string }).type}".` };
     }
+  }
+
+  /**
+   * Edits an existing object of any type, by id (see UpdateObjectCommand).
+   * A translation layer, not a new mutation path: it resolves the id
+   * through the shared resolver, merges the partial change over the
+   * object's current values, and hands the complete change to that type's
+   * existing `<type>.update` command. Store validation, the grounding rule,
+   * and the single history entry are therefore exactly what a UI edit
+   * gets. It never creates an object, and never touches selection or
+   * assembly membership.
+   */
+  private executeUpdateObject(command: UpdateObjectCommand): CommandResult {
+    // The command arrived as untrusted data - check the id's real type.
+    const objectId: unknown = command.objectId;
+    if (typeof objectId !== "string" || objectId.length === 0) {
+      return { success: false, message: "update_object command is missing an objectId." };
+    }
+
+    const resolved = resolveConstructionObject(objectId, {
+      wallStore: this.wallStore,
+      pillarStore: this.pillarStore,
+      beamStore: this.beamStore,
+      slabStore: this.slabStore,
+      doorStore: this.doorStore,
+      windowStore: this.windowStore
+    });
+    const current = resolved ? this.readConstructionObject(resolved.type, objectId) : undefined;
+    if (!resolved || !current) {
+      return { success: false, objectId, message: `No construction object found with id "${objectId}".` };
+    }
+
+    const built = this.buildObjectChanges(current, command.changes);
+    if (!built.ok) {
+      return {
+        success: false,
+        objectId,
+        errors: built.errors,
+        message: `Could not update ${resolved.type}: unsupported change.`
+      };
+    }
+
+    // The complete change runs through the type's own update command.
+    return this.execute({ type: `${resolved.type}.update`, id: objectId, changes: built.changes });
+  }
+
+  /** The current state of an object resolveConstructionObject() found - a copy from the store, never a live reference. */
+  private readConstructionObject(
+    type: string,
+    id: string
+  ): { dimensions: object; position: { x: number; y: number; z: number } } | undefined {
+    switch (type) {
+      case "wall":
+        return this.wallStore.get(id);
+      case "pillar":
+        return this.pillarStore.get(id);
+      case "beam":
+        return this.beamStore.get(id);
+      case "slab":
+        return this.slabStore.get(id);
+      case "door":
+        return this.doorStore.get(id);
+      case "window":
+        return this.windowStore.get(id);
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Checks an untrusted `changes` object against the object's current
+   * state and merges it into a complete change for the type's update
+   * command. Only properties the object already has are accepted:
+   * dimensions it already has, x/y/z position, rotation around the
+   * vertical axis, material, and color.
+   *
+   * Types are checked here; ranges and formats (positive dimensions,
+   * finite numbers, hex colors) are left to the store's own validator.
+   * The one exception is material: validateWall doesn't check it (the
+   * other five validators do), so a non-empty string is required here
+   * rather than letting an edit blank a wall's material.
+   *
+   * Position is only sent when the change includes it, so a dimensions-only
+   * change still gets the store's grounding rule (see WallStore.update).
+   */
+  private buildObjectChanges(
+    current: { dimensions: object; position: { x: number; y: number; z: number } },
+    raw: unknown
+  ): { ok: true; changes: Record<string, unknown> } | { ok: false; errors: { field: string; message: string }[] } {
+    const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+
+    if (!isPlainObject(raw)) {
+      return { ok: false, errors: [{ field: "changes", message: "changes must be an object." }] };
+    }
+
+    const errors: { field: string; message: string }[] = [];
+    const changes: Record<string, unknown> = {};
+    const currentDimensions = current.dimensions as Record<string, unknown>;
+
+    for (const [key, value] of Object.entries(raw)) {
+      switch (key) {
+        case "dimensions": {
+          if (!isPlainObject(value)) {
+            errors.push({ field: "changes.dimensions", message: "dimensions must be an object." });
+            break;
+          }
+          const merged: Record<string, unknown> = { ...currentDimensions };
+          for (const [dimension, amount] of Object.entries(value)) {
+            if (!Object.prototype.hasOwnProperty.call(currentDimensions, dimension)) {
+              errors.push({
+                field: `changes.dimensions.${dimension}`,
+                message: `"${dimension}" is not a dimension of this object.`
+              });
+            } else if (typeof amount !== "number") {
+              errors.push({ field: `changes.dimensions.${dimension}`, message: `"${dimension}" must be a number.` });
+            } else {
+              merged[dimension] = amount;
+            }
+          }
+          changes.dimensions = merged;
+          break;
+        }
+        case "position": {
+          if (!isPlainObject(value)) {
+            errors.push({ field: "changes.position", message: "position must be an object." });
+            break;
+          }
+          const merged = { ...current.position };
+          for (const [axis, amount] of Object.entries(value)) {
+            if (axis !== "x" && axis !== "y" && axis !== "z") {
+              errors.push({ field: `changes.position.${axis}`, message: `"${axis}" is not a position axis - use x, y, or z.` });
+            } else if (typeof amount !== "number") {
+              errors.push({ field: `changes.position.${axis}`, message: `position.${axis} must be a number.` });
+            } else {
+              merged[axis] = amount;
+            }
+          }
+          changes.position = merged;
+          break;
+        }
+        case "rotation": {
+          const radians = isPlainObject(value) && Object.keys(value).length === 1 && "y" in value ? value.y : value;
+          if (typeof radians !== "number") {
+            errors.push({
+              field: "changes.rotation",
+              message: 'rotation must be radians around the vertical axis - a number, or { "y": radians }. The model has no other rotation.'
+            });
+          } else {
+            changes.rotation = radians;
+          }
+          break;
+        }
+        case "material":
+          if (typeof value !== "string" || value.trim().length === 0) {
+            errors.push({ field: "changes.material", message: "material must be a non-empty string." });
+          } else {
+            changes.material = value;
+          }
+          break;
+        case "color":
+          if (typeof value !== "string") {
+            errors.push({ field: "changes.color", message: "color must be a string, e.g. #c9c9c9." });
+          } else {
+            changes.color = value;
+          }
+          break;
+        default:
+          errors.push({ field: `changes.${key}`, message: `"${key}" is not an editable property.` });
+      }
+    }
+
+    if (errors.length > 0) {
+      return { ok: false, errors };
+    }
+    if (Object.keys(changes).length === 0) {
+      return { ok: false, errors: [{ field: "changes", message: "changes must include at least one property to edit." }] };
+    }
+    return { ok: true, changes };
   }
 
   private executeAddWall(command: AddWallCommand): CommandResult {

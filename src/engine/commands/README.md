@@ -57,6 +57,7 @@ shape itself before doing anything.
 | `wall.update` | `id`, `changes` (same shape `WallStore.update()` takes) | Routes through `WallHistoryController.update()` |
 | `wall.delete` | `id` | Routes through `WallHistoryController.remove()` |
 | `wall.duplicate` | `id` | Builds a copy via `duplicateWallData()`, routes through `WallHistoryController.add()` |
+| `update_object` | `objectId`, `changes` - all partial: `dimensions` the object already has, `position` (any of x/y/z), `rotation` (radians, or `{ y }`), `material`, `color` | Edits any type by id. Resolves the type with `resolveConstructionObject()`, merges the change over the object's current values, then runs that type's own `<type>.update` - so validation, the grounding rule, and the single history entry match a UI edit. Rejects an unknown id and any property the model doesn't have; never creates an object. |
 
 Every `execute()` call returns a `CommandResult` -
 `{ success, objectId?, errors?, message? }` - instead of throwing, the

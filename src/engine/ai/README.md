@@ -200,8 +200,19 @@ as positive proof no extra (or real) request happened.**
 
 ## Limitations
 
-- **The model sees the current construction state, but can act on
-  little of it yet.** `OpenAIProvider` sends the full snapshot - every
+- **The model can edit existing objects, but only by explicit property
+  edits.** Besides `<type>.add`, a provider can return `update_object`
+  (see commands/README.md): an existing object's id, copied from the
+  construction state, plus the dimensions, position axes, rotation,
+  material, or color to change. CommandExecutor resolves the id and runs
+  that type's existing update, so validation and undo/redo are the same
+  as a UI edit, and an unknown id is an error - never a new object. The
+  model can't place objects relative to one another, align or connect
+  them, delete or duplicate them, or plan geometry; those need a later
+  geometry milestone. `MockAIProvider` understands four edit phrasings:
+  "Make wall-1 5 meters long", "Change wall-1 height to 3.2 meters",
+  "Rotate wall-1 by 90 degrees" (or "to"), and "Move wall-1 to X=2".
+- **What the model sees.** `OpenAIProvider` sends the full snapshot - every
   object's id, type, dimensions, position, rotation, material, color,
   and assembly membership, plus the assemblies, counts, and selected id -
   as a pure-JSON message (`{"currentConstructionState": ...}`) between

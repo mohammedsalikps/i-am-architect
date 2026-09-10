@@ -679,6 +679,173 @@ async function run(): Promise<void> {
     assertEqual(app.context.pillarStore.getAll().length, 1, "the pillar was still built");
   });
 
+  // --- update_object through the whole path ---
+
+  /** Freezes `value` and everything inside it - any later attempt to mutate it throws in strict mode. */
+  function deepFreeze<T>(value: T): T {
+    if (value !== null && typeof value === "object") {
+      for (const child of Object.values(value)) {
+        deepFreeze(child);
+      }
+      Object.freeze(value);
+    }
+    return value;
+  }
+
+  /**
+   * Wires the app with MockAIProvider answering behind the mock backend.
+   * Each snapshot it receives is frozen first, so if anything in the
+   * provider tried to modify the AI snapshot, the submission would fail.
+   */
+  function wireMockProviderApp(): WiredApp {
+    const provider = new MockAIProvider();
+    return wireApp((request) => {
+      const response = provider.interpret({
+        instruction: request.instruction,
+        projectContext: deepFreeze(request.projectContext),
+        availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+      });
+      return response.notes === undefined
+        ? { kind: "ok", commands: response.commands }
+        : { kind: "ok", commands: response.commands, notes: response.notes };
+    });
+  }
+
+  await check("AI updates an existing wall's length via MockAIProvider - same id, one wall, exact undo and redo", async () => {
+    const app = wireMockProviderApp();
+    const wallId = app.context.commandExecutor.execute({ type: "wall.add", wall: {} }).objectId as string;
+    const original = app.context.wallStore.get(wallId);
+    assertTrue(original, "precondition: the wall exists");
+
+    await app.controller.submit(`Make ${wallId} 6 meters long.`);
+
+    assertEqual(app.controller.getState().status, "success", "controller status");
+    const walls = app.context.wallStore.getAll();
+    assertEqual(walls.length, 1, "still exactly one wall");
+    assertEqual(walls[0].id, wallId, "the same wall id");
+    assertEqual(walls[0].dimensions.length, 6, "the length changed");
+    assertEqual(walls[0].dimensions.height, original.dimensions.height, "height untouched");
+    assertEqual(walls[0].dimensions.thickness, original.dimensions.thickness, "thickness untouched");
+    const updated = walls[0];
+
+    app.context.history.undo();
+    assertSameJson(app.context.wallStore.get(wallId), original, "undo restores the exact original wall");
+    assertEqual(app.context.wallStore.getAll().length, 1, "undo doesn't remove the wall");
+
+    app.context.history.redo();
+    assertSameJson(app.context.wallStore.get(wallId), updated, "redo restores the exact updated wall");
+    assertEqual(app.context.wallStore.getAll().length, 1, "redo doesn't duplicate the wall");
+  });
+
+  await check("each explicit edit MockAIProvider understands reaches the real store: height, rotation, position", async () => {
+    const app = wireMockProviderApp();
+    const wallId = app.context.commandExecutor.execute({ type: "wall.add", wall: {} }).objectId as string;
+
+    await app.controller.submit(`Change ${wallId} height to 3.2 meters.`);
+    assertEqual(app.context.wallStore.get(wallId)?.dimensions.height, 3.2, "height");
+    assertEqual(app.context.wallStore.get(wallId)?.position.y, 1.6, "the store's own rule re-grounded the wall");
+
+    await app.controller.submit(`Rotate ${wallId} by 90 degrees.`);
+    assertEqual(app.context.wallStore.get(wallId)?.rotation, Math.PI / 2, "rotation, relative to the fresh snapshot");
+
+    await app.controller.submit(`Move ${wallId} to X=2.`);
+    assertSameJson(app.context.wallStore.get(wallId)?.position, { x: 2, y: 1.6, z: 0 }, "only x moved");
+
+    assertEqual(app.context.wallStore.getAll().length, 1, "still one wall after three edits");
+  });
+
+  await check("an AI update of material, color, position, and rotation goes through real validation and exact undo", async () => {
+    // The "AI" picks the id out of the snapshot it receives, as a real model would.
+    const app = wireApp((request) => ({
+      kind: "ok",
+      commands: [
+        {
+          type: "update_object",
+          objectId: request.projectContext.objects[0].id,
+          changes: { material: "concrete", color: "#224466", position: { z: 3 }, rotation: { y: 1.57 } }
+        }
+      ]
+    }));
+    const pillarId = app.context.commandExecutor.execute({ type: "pillar.add", pillar: {} }).objectId as string;
+    const original = app.context.pillarStore.get(pillarId);
+    assertTrue(original, "precondition");
+
+    await app.controller.submit("Make the pillar concrete");
+
+    const updated = app.context.pillarStore.get(pillarId);
+    assertTrue(updated, "still stored");
+    assertEqual(updated.material, "concrete", "material");
+    assertEqual(updated.color, "#224466", "color");
+    assertSameJson(updated.position, { x: original.position.x, y: original.position.y, z: 3 }, "only z moved");
+    assertEqual(updated.rotation, 1.57, "rotation from { y }");
+
+    app.context.history.undo();
+    assertSameJson(app.context.pillarStore.get(pillarId), original, "one undo restores every property at once");
+  });
+
+  await check("assembly membership and selection are untouched by an AI update", async () => {
+    const app = wireMockProviderApp();
+    const wallId = app.context.commandExecutor.execute({ type: "wall.add", wall: {} }).objectId as string;
+    const doorId = app.context.commandExecutor.execute({ type: "door.add", door: {} }).objectId as string;
+    const assemblyId = app.context.commandExecutor.execute({ type: "assembly.create", assembly: { name: "Ground Floor" } })
+      .objectId as string;
+    app.context.commandExecutor.execute({ type: "assembly.addObject", assemblyId, objectId: wallId });
+    app.context.selectionStore.select(doorId);
+
+    await app.controller.submit(`Make ${wallId} 5 meters long.`);
+
+    assertEqual(app.context.wallStore.get(wallId)?.dimensions.length, 5, "precondition: the update happened");
+    assertSameJson(app.context.assemblyStore.get(assemblyId)?.objectIds, [wallId], "assembly still lists the wall");
+    const snapshotWall = buildAIProjectSnapshot(app.context).objects.find((object) => object.id === wallId);
+    assertSameJson(snapshotWall?.assemblyIds, [assemblyId], "membership still reported to the AI");
+    assertEqual(app.context.selectionStore.get(), doorId, "the selected object is unchanged");
+  });
+
+  await check("an AI update naming an id that doesn't exist changes nothing and records no history", async () => {
+    const app = wireApp(() => ({
+      kind: "ok",
+      commands: [{ type: "update_object", objectId: "wall-does-not-exist", changes: { dimensions: { length: 5 } } }]
+    }));
+    app.context.commandExecutor.execute({ type: "wall.add", wall: {} });
+    const before = JSON.stringify(app.context.wallStore.getAll());
+
+    await app.controller.submit("Make that wall 5 meters long");
+
+    assertEqual(app.controller.getState().status, "error", "controller status");
+    assertIncludes(app.controller.getState().message, "No construction object found", "clear message");
+    assertEqual(JSON.stringify(app.context.wallStore.getAll()), before, "the wall is untouched");
+    app.context.history.undo();
+    assertEqual(app.context.wallStore.getAll().length, 0, "the latest history entry was still the add - no update entry");
+  });
+
+  await check("MockAIProvider won't turn an edit of an unknown id into a new object", async () => {
+    const app = wireMockProviderApp();
+    app.context.commandExecutor.execute({ type: "wall.add", wall: {} });
+
+    await app.controller.submit("Make wall-999999 5 meters long.");
+
+    assertEqual(app.context.wallStore.getAll().length, 1, "no wall was added");
+    assertEqual(app.controller.getState().status, "error", "controller status");
+    assertIncludes(app.controller.getState().message, 'No existing object with id "wall-999999"', "the note explains why");
+  });
+
+  await check("an invalid AI update is rejected by the real store validation, leaving the wall and history untouched", async () => {
+    const app = wireApp((request) => ({
+      kind: "ok",
+      commands: [{ type: "update_object", objectId: request.projectContext.objects[0].id, changes: { dimensions: { length: 0 } } }]
+    }));
+    const wallId = app.context.commandExecutor.execute({ type: "wall.add", wall: {} }).objectId as string;
+    const original = app.context.wallStore.get(wallId);
+
+    await app.controller.submit("Make the wall zero meters long");
+
+    assertEqual(app.controller.getState().status, "error", "controller status");
+    assertIncludes(app.controller.getState().message, "validation failed", "rejected by validateWall");
+    assertSameJson(app.context.wallStore.get(wallId), original, "wall untouched");
+    app.context.history.undo();
+    assertEqual(app.context.wallStore.getAll().length, 0, "no update entry was recorded");
+  });
+
   // --- Secrets and harness discipline ---
 
   await check("no OpenAI key, secret, or environment secret read exists anywhere under src/", () => {

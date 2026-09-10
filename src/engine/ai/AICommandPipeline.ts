@@ -24,6 +24,40 @@ export interface CommandExecutorLike {
 
 const SUPPORTED_ACTIONS: readonly string[] = ["add", "update", "delete", "duplicate"];
 
+const UPDATE_OBJECT = "update_object";
+
+/**
+ * Structural checks for update_object - the one command whose name isn't
+ * "<objectType>.<action>". Its object type isn't in the command at all
+ * (CommandExecutor resolves it from the id), so type availability is
+ * checked against the snapshot this run was given. Whether the id really
+ * exists, and whether the changes are valid, stay CommandExecutor's (and
+ * the stores') job - an id the snapshot doesn't know passes through here
+ * and gets the executor's authoritative "not found" error.
+ */
+function validateUpdateObjectShape(
+  raw: Record<string, unknown>,
+  availableObjectTypes: readonly ObjectType[],
+  projectContext: AIProjectSnapshot
+): string | null {
+  const objectId = raw.objectId;
+  if (typeof objectId !== "string" || objectId.length === 0) {
+    return 'Malformed update_object command: missing or invalid "objectId".';
+  }
+
+  const changes = raw.changes;
+  if (typeof changes !== "object" || changes === null || Array.isArray(changes)) {
+    return 'Malformed update_object command: "changes" must be an object.';
+  }
+
+  const target = projectContext.objects.find((object) => object.id === objectId);
+  if (target && !availableObjectTypes.includes(target.type)) {
+    return `Object type "${target.type}" is not available in this context.`;
+  }
+
+  return null;
+}
+
 /**
  * Structurally validates one provider-returned command before it's
  * allowed anywhere near CommandExecutor. This is deliberately separate
@@ -36,7 +70,11 @@ const SUPPORTED_ACTIONS: readonly string[] = ["add", "update", "delete", "duplic
  * checked here - CommandExecutor (via each store's validator) already
  * owns that, and duplicating it here would risk the two disagreeing.
  */
-function validateCommandShape(raw: unknown, availableObjectTypes: readonly ObjectType[]): string | null {
+function validateCommandShape(
+  raw: unknown,
+  availableObjectTypes: readonly ObjectType[],
+  projectContext: AIProjectSnapshot
+): string | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return "Malformed command: expected a plain object.";
   }
@@ -44,6 +82,10 @@ function validateCommandShape(raw: unknown, availableObjectTypes: readonly Objec
   const type = (raw as { type?: unknown }).type;
   if (typeof type !== "string" || type.length === 0) {
     return 'Malformed command: missing or invalid "type" field.';
+  }
+
+  if (type === UPDATE_OBJECT) {
+    return validateUpdateObjectShape(raw as Record<string, unknown>, availableObjectTypes, projectContext);
   }
 
   const separatorIndex = type.indexOf(".");
@@ -177,7 +219,7 @@ export class AICommandPipeline {
     const errors: AIPipelineError[] = [];
 
     response.commands.forEach((rawCommand, index) => {
-      const shapeError = validateCommandShape(rawCommand, availableObjectTypes);
+      const shapeError = validateCommandShape(rawCommand, availableObjectTypes, projectContext);
       if (shapeError) {
         errors.push({ stage: "validation", message: shapeError, commandIndex: index });
         outcomes.push({ command: rawCommand, result: { success: false, message: shapeError } });
