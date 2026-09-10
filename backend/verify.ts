@@ -483,6 +483,38 @@ async function run(): Promise<void> {
     });
   });
 
+  await check(
+    "the detailed snapshot reaches OpenAI through this unchanged server - real server, real OpenAIProvider, mocked OpenAI transport",
+    async () => {
+      // Proves no backend change was needed to expose the construction
+      // state to the model: the server already hands its provider the
+      // parser's full snapshot, and OpenAIProvider now serializes it.
+      const openAIRequestBodies: string[] = [];
+      const recordingFetch: OpenAIFetch = async (_url, init) => {
+        openAIRequestBodies.push(init.body);
+        return okChatResponse({ commands: [] });
+      };
+      const provider = new OpenAIProvider({ apiKey: "sk-test", fetch: recordingFetch });
+
+      await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/api/ai/interpret`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ instruction: "Add a wall as tall as wall-1", projectContext: validSnapshot })
+        });
+        assertEqual(res.status, 200, "status");
+      });
+
+      assertEqual(openAIRequestBodies.length, 1, "exactly one (mocked) OpenAI request");
+      const body = JSON.parse(openAIRequestBodies[0]) as { messages: { role: string; content: string }[] };
+      const state = (JSON.parse(body.messages[1].content) as { currentConstructionState: AIProjectSnapshot })
+        .currentConstructionState;
+      assertDeepEqual(state, validSnapshot, "OpenAI receives the full snapshot the frontend sent");
+      assertEqual(body.messages[2].content, "Add a wall as tall as wall-1", "the instruction is the final message");
+      assertTrue(!openAIRequestBodies[0].includes("sk-test"), "the API key is not in the OpenAI request body");
+    }
+  );
+
   // --- Contract check: the real frontend provider against this real server ---
 
   await check(

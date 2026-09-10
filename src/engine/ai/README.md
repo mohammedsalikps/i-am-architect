@@ -200,15 +200,24 @@ as positive proof no extra (or real) request happened.**
 
 ## Limitations
 
-- **OpenAI doesn't use the construction context yet.** Every provider
-  now receives the full snapshot - each object's id, type, dimensions,
-  transform, material, color, and assembly membership - and the
-  backend validates and relays it. But `OpenAIProvider`'s system prompt
-  was deliberately left unchanged in this milestone, so it still only
-  summarizes the counts and selected id. Putting the objects in front of
-  the model is a separate prompt change. `MockAIProvider` does read the
-  context, to prove a provider can: it notes any existing object the
-  instruction names by id.
+- **The model sees the current construction state, but can act on
+  little of it yet.** `OpenAIProvider` sends the full snapshot - every
+  object's id, type, dimensions, position, rotation, material, color,
+  and assembly membership, plus the assemblies, counts, and selected id -
+  as a pure-JSON message (`{"currentConstructionState": ...}`) between
+  the system prompt and the instruction. The system prompt tells the
+  model this is the current state and that existing ids may be
+  referenced. The state is a separate user-role message, not part of the
+  system prompt, because it contains text users typed (assembly names,
+  materials) that shouldn't carry the app's own authority. It is
+  projected field by field, so nothing beyond the snapshot's defined
+  fields is ever sent, and the same snapshot always produces the same
+  request. The command schema is unchanged, though: the model can still
+  only produce `<type>.add` commands, which carry no position. So it can
+  read an existing object's dimensions (e.g. "as tall as wall-7"), but
+  it cannot place a new object relative to one, edit one, or plan
+  geometry. `MockAIProvider` also reads the context: it notes any
+  existing object the instruction names by id.
 - **`MockAIProvider`'s language understanding is still limited.** It
   only recognizes "create/add a `<type>`" style clauses via whole-word
   keyword matching (wall/pillar/beam/slab/door/window) - no
