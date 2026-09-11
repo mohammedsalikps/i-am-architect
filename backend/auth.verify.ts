@@ -18,8 +18,10 @@
  * shape (one "anon", one "service_role") - not credentials of any project.
  */
 import type { AddressInfo } from "node:net";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createServer } from "./src/createServer.ts";
 import type { CreateServerOptions } from "./src/createServer.ts";
 import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
@@ -1182,7 +1184,7 @@ async function run(): Promise<void> {
 
   // --- Hosting configuration (read as text) ---
 
-  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; .dockerignore uses plain exclusions only, excludes nothing inside a copied path and never lets a .env file in", () => {
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image copies only four paths, holds no .env file and runs in production mode", () => {
     const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 
     const render = read("render.yaml");
@@ -1200,53 +1202,39 @@ async function run(): Promise<void> {
     assertTrue(/dockerfile = "Dockerfile"/.test(fly), "fly.toml: the root Dockerfile");
     assertTrue(/internal_port = 8787/.test(fly) && /path = "\/health"/.test(fly), "fly.toml: port and /health check kept");
 
+    // There is no .dockerignore (the Render build-context test), so the COPY
+    // list alone decides what enters the image: exactly these four paths,
+    // never the whole repository, and no ADD.
     const dockerfile = read("Dockerfile");
+    const copiedPaths = ["package.json", "backend/package.json", "backend/src", "src/engine"];
     assertDeepEqual(
-      [...dockerfile.matchAll(/^COPY\s+(\S+)/gm)].map((match) => match[1]),
-      ["package.json", "backend/package.json", "backend/src", "src/engine"],
-      "the image copies only these paths"
+      [...dockerfile.matchAll(/^\s*(?:COPY|ADD)\s+(.+?)\s+\S+\s*$/gim)].map((match) => match[1]),
+      copiedPaths,
+      "the image copies only these paths (no ADD, no whole-repository COPY)"
     );
     assertTrue(/^ENV NODE_ENV=production\s*$/m.test(dockerfile), "the image runs in production mode");
+    assertTrue(!/NODE_ENV/.test(render.replace(/^\s*#.*$/gm, "")), "render.yaml doesn't override NODE_ENV");
+    assertTrue(/^\s*NODE_ENV = "production"\s*$/m.test(fly), "fly.toml keeps NODE_ENV=production");
     assertTrue(/^CMD \["node", "backend\/src\/server\.ts"\]\s*$/m.test(dockerfile), "the image starts the server");
-    // .dockerignore: plain exclusions only, and none may reach inside a path
-    // the Dockerfile copies - Render's context filter dropped src/engine
-    // while rules excluded files inside it.
-    const ignoreRules = read(".dockerignore")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line !== "" && !line.startsWith("#"));
-    assertDeepEqual(ignoreRules.filter((rule) => rule.startsWith("!")), [], '.dockerignore has no "!" re-include rules');
-    for (const rule of ["**/.env", "**/.env.*", ".git", "**/node_modules", "dist", ".claude", ".vercel", ".fly", ".railway", "**/*.log"]) {
-      assertTrue(ignoreRules.includes(rule), `.dockerignore excludes ${rule}`);
-    }
-    // Docker's matching: a rule excludes a path when it matches the path or
-    // one of its parent directories.
-    const globParts: Record<string, string> = { "**/": "(.*/)?", "**": ".*", "*": "[^/]*", "?": "[^/]" };
-    const ruleMatchers = ignoreRules.map((rule) => {
-      const pattern = rule
-        .replace(/^\/+|\/+$/g, "")
-        .split(/(\*\*\/|\*\*|\*|\?)/)
-        .map((part) => globParts[part] ?? part.replace(/[.+^${}()|[\]\\]/g, "\\$&"))
-        .join("");
-      return { rule, regex: new RegExp(`^${pattern}$`) };
-    });
-    const excludedBy = (path: string): string | undefined => {
-      const segments = path.split("/");
-      return ruleMatchers.find(({ regex }) => segments.some((_, index) => regex.test(segments.slice(0, index + 1).join("/"))))?.rule;
-    };
-    for (const secretPath of [".env", ".env.local", "backend/.env", "backend/.env.integration", "backend/src/.env"]) {
-      assertTrue(excludedBy(secretPath) !== undefined, `.dockerignore keeps ${secretPath} out of the build context`);
-    }
-    for (const copiedPath of ["package.json", "backend/package.json", "backend/src", "src/engine"]) {
+
+    // No .env file inside a copied path - the image would include it.
+    const isEnvFile = (path: string) => /(^|\/)\.env[^/]*$/.test(path);
+    for (const copiedPath of copiedPaths) {
       const url = new URL(`../${copiedPath}`, import.meta.url);
       const inside = statSync(url).isDirectory()
         ? readdirSync(url, { encoding: "utf8", recursive: true }).map((entry) => `${copiedPath}/${entry.replaceAll("\\", "/")}`)
         : [];
-      for (const path of [copiedPath, ...inside]) {
-        const rule = excludedBy(path);
-        assertTrue(rule === undefined, `no .dockerignore rule excludes ${path} (it is inside a Dockerfile COPY source; rule: ${rule})`);
-      }
+      assertDeepEqual([copiedPath, ...inside].filter(isEnvFile), [], `no .env file inside ${copiedPath}`);
     }
+    // No real .env file is tracked, so none reaches a clone (Render's build
+    // context) - only the value-free .example templates.
+    const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" })
+      .split("\0")
+      .filter(Boolean);
+    assertTrue(tracked.includes("backend/src/server.ts") && tracked.includes("src/engine/project/projectDocument.ts"), "git lists the tracked files");
+    assertDeepEqual(tracked.filter((path) => isEnvFile(path) && !path.endsWith(".example")), [], "no real .env file is tracked - only .example templates");
+    const gitignore = read(".gitignore");
+    assertTrue(/^\.env$/m.test(gitignore) && /^\.env\.\*$/m.test(gitignore), ".gitignore keeps .env and .env.* files out of Git");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);
