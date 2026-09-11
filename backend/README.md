@@ -8,9 +8,10 @@ that needs a secret. It:
 - stores each signed-in user's projects (`/api/projects`) in Supabase
   PostgreSQL - or in memory - where each user reaches only their own;
 - relays AI command-interpretation requests (`/api/ai/interpret`) from a
-  signed-in user to the existing `OpenAIProvider`, keeping
-  `OPENAI_API_KEY` server-side. It does **not** execute anything - see
-  "Architecture".
+  signed-in user to whichever `AIProvider` `AI_PROVIDER` selects -
+  `OpenAIProvider` or `GeminiProvider` - keeping its API key
+  (`OPENAI_API_KEY`/`GEMINI_API_KEY`) server-side. It does **not** execute
+  anything - see "Architecture".
 
 This is a separate, independently-installed service (its own
 `package.json`/`node_modules`/`tsconfig.json`) - it is not part of the Vite
@@ -33,7 +34,9 @@ createServer()  ── checks the token with the AuthService on EVERY request �
    │                                               user's token → Row Level  │
    │                                               Security                  │
    │                        InMemoryProjectStore → memory, filtered by owner │
-   └─ /api/ai/interpret → parseAIProjectContext() → OpenAIProvider (OPENAI_API_KEY)
+   └─ /api/ai/interpret → parseAIProjectContext() → AI_PROVIDER selects:
+                             OpenAIProvider (OPENAI_API_KEY), or
+                             GeminiProvider (GEMINI_API_KEY)
                           relays { commands, notes } - no execution
 ```
 
@@ -46,8 +49,10 @@ path.**
 
 Everything is injected: `createServer()` takes the AI provider, the
 `AuthService` and the `ProjectStore`, and every outbound transport (to
-OpenAI, to Supabase) is an injected `fetch`. `server.ts` wires the real
-ones; the tests wire test doubles, so no test can reach a real service.
+OpenAI or Gemini, to Supabase) is an injected `fetch`. `server.ts` wires
+the real ones - constructing whichever of `OpenAIProvider`/
+`GeminiProvider` `config.ai.provider` names - the tests wire test
+doubles, so no test can reach a real service.
 
 ## Security posture
 
@@ -72,7 +77,7 @@ ones; the tests wire test doubles, so no test can reach a real service.
   another user. In memory, `InMemoryProjectRepository` applies the same
   rule. Another user's project answers exactly like a missing one (`404`).
 - **The AI endpoint requires a signed-in user**, so an anonymous caller
-  can't spend the OpenAI quota.
+  can't spend the configured provider's quota.
 - **Tokens stay out of logs and caches.** Failures are logged by name and
   message only - never headers or bodies - and every response carries
   `Cache-Control: no-store`.
@@ -101,7 +106,8 @@ ones; the tests wire test doubles, so no test can reach a real service.
 cd backend
 npm install
 cp .env.example .env
-# edit .env: set OPENAI_API_KEY, and choose account storage (below)
+# edit .env: choose AI_PROVIDER (gemini or openai) and set its key, and
+# choose account storage (below)
 npm start        # or: npm run dev (restarts on file changes)
 ```
 
@@ -153,8 +159,8 @@ npm run mock     # no .env, no API key, no Supabase needed
 `mockBackend.ts` starts the **same** `createServer()` - same routing, CORS,
 validation, authentication checks and status codes - with the
 deterministic keyword-matching `MockAIProvider` in place of
-`OpenAIProvider`, and accounts and projects in memory. No OpenAI or Supabase
-request is ever made. There are no built-in accounts: use **Sign in →
+`OpenAIProvider`/`GeminiProvider`, and accounts and projects in memory. No
+OpenAI, Gemini, or Supabase request is ever made. There are no built-in accounts: use **Sign in →
 Create an account** in the app. The app defaults to
 `http://localhost:8787` (see the root `.env.example`'s
 `VITE_AI_BACKEND_URL`), so `npm run mock` plus `npm run dev` at the root
@@ -214,7 +220,7 @@ replaced by server-derived geometry.
 | `400` | Malformed/incomplete request body | `{ "error": "..." }` |
 | `401` | Not signed in | `{ "error": "Sign in to use the AI assistant.", "code": "unauthorized" }` |
 | `413` | Request body over 1 MB | `{ "error": "Request body too large." }` |
-| `502` | The provider call failed | `{ "error": "..." }` - `OpenAIProvider`'s own key-free messages |
+| `502` | The provider call failed | `{ "error": "..." }` - the provider's own key-free messages (`OpenAIProvider`/`GeminiProvider`) |
 
 ### `GET /health` and `OPTIONS *`
 
@@ -241,7 +247,9 @@ loopback:
   route; ownership between users; the AI endpoint's sign-in requirement;
   token-free logs; the Supabase adapters against a mocked transport and an
   in-process fake Supabase (Auth + PostgREST with the migration's Row
-  Level Security rule); and the server configuration.
+  Level Security rule); the server configuration, including AI_PROVIDER
+  selecting between OpenAI and Gemini; and the hosting configuration
+  (`render.yaml`/`fly.toml`/`Dockerfile`).
 - `persistence.verify.ts` - the complete house saved and reopened through
   the real server, compared, then edited by hand and by AI with undo and
   redo, and saved again (runs with `--experimental-transform-types`).

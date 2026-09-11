@@ -10,12 +10,14 @@ a dashboard, a gitignored `.env` file, or a host's secret store.
 Browser ──HTTPS──▶ Frontend (Vercel, static files)
    │
    └──HTTPS, Bearer <user token>──▶ Backend (Render or Fly.io, Node container) ──▶ Supabase (Auth + PostgreSQL, RLS)
-                                          └──▶ OpenAI (OPENAI_API_KEY, server-side only)
+                                          └──▶ AI_PROVIDER selects one:
+                                                 Gemini (GEMINI_API_KEY, server-side only) - staging default
+                                                 OpenAI (OPENAI_API_KEY, server-side only)
 ```
 
 The browser holds only the signed-in user's own session tokens and the
-backend's URL. The Supabase keys and the OpenAI key live on the backend
-host only.
+backend's URL. The Supabase keys and the AI provider's key (Gemini or
+OpenAI) live on the backend host only.
 
 ## Environments
 
@@ -23,7 +25,7 @@ host only.
 |---|---|---|---|---|
 | Backend | `npm run mock` | `npm start` in `backend/` | Render web service `iarchitect-backend-staging` (or a Fly.io app) | a separate service |
 | Accounts & projects | in memory | a **staging** Supabase project | the **staging** Supabase project | a separate **production** Supabase project |
-| AI | MockAIProvider (no key) | OpenAI | OpenAI | OpenAI |
+| AI | MockAIProvider (no key) | Gemini or OpenAI (`AI_PROVIDER`) | Gemini (default) | Gemini or OpenAI |
 | Frontend | `npm run dev` | `npm run dev` | a Vercel project, e.g. `iarchitect-staging` | a separate Vercel project (or domain) |
 
 Keep staging and production fully separate: separate Supabase projects,
@@ -137,7 +139,7 @@ secret key anywhere - the backend refuses to start with one.
 
 ```bash
 cd backend
-cp .env.example .env          # OPENAI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY
+cp .env.example .env          # AI_PROVIDER, its key (GEMINI_API_KEY or OPENAI_API_KEY), SUPABASE_URL, SUPABASE_ANON_KEY
 npm start
 ```
 
@@ -222,9 +224,13 @@ fly auth login
 fly apps create iarchitect-backend-staging
 
 # secrets - you type these; Fly stores them encrypted, never in the repo.
-# --stage stores them without starting anything yet.
+# --stage stores them without starting anything yet. AI_PROVIDER is not a
+# secret, but fly secrets set works fine for it too - or set it as a
+# regular Fly env var. This example uses Gemini; for OpenAI instead, set
+# AI_PROVIDER=openai and OPENAI_API_KEY=... in place of the two GEMINI_* lines.
 fly secrets set --stage -a iarchitect-backend-staging \
-  OPENAI_API_KEY=... \
+  AI_PROVIDER=gemini \
+  GEMINI_API_KEY=... \
   SUPABASE_URL=https://<ref>.supabase.co \
   SUPABASE_ANON_KEY=... \
   FRONTEND_ORIGIN=https://iarchitect-staging.vercel.app
@@ -316,7 +322,7 @@ default local address.
 ```bash
 cd backend
 # add DEPLOYED_BACKEND_URL and DEPLOYED_FRONTEND_URL to .env.integration
-npm run test:deployed                  # add DEPLOYED_RUN_AI=yes for one real OpenAI request
+npm run test:deployed                  # add DEPLOYED_RUN_AI=yes for one real AI request (whichever provider is configured)
 ```
 
 It checks HTTPS and the health endpoint, CORS (the frontend allowed by
@@ -350,15 +356,22 @@ don't set `PORT` yourself. The image's `PORT=8787` is only the default for
 other hosts and local runs. `NODE_ENV=production` comes from the image.
 
 **Environment variables** - set in Render → the service → **Environment**,
-where Render stores them encrypted. `render.yaml` only names them
-(`sync: false`, no values), so applying the Blueprint asks for each one:
+where Render stores them encrypted. `render.yaml` sets `AI_PROVIDER` to
+the plain (non-secret) value `gemini`; every other variable below is only
+named (`sync: false`, no value), so applying the Blueprint asks for each:
 
 | Variable | Value |
 |---|---|
-| `OPENAI_API_KEY` | the backend's OpenAI key (secret) |
+| `AI_PROVIDER` | `gemini` (set in `render.yaml` - staging's default, no paid OpenAI key needed) |
+| `GEMINI_API_KEY` | the backend's Gemini key (secret) - free to create at https://aistudio.google.com/apikey |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` (the staging project) |
 | `SUPABASE_ANON_KEY` | the staging anon/publishable key - never the service-role/secret key (the server refuses it) |
 | `FRONTEND_ORIGIN` | the exact Vercel production URL, e.g. `https://iarchitect-staging.vercel.app` - explicit origins, never a wildcard |
+
+To use OpenAI on Render instead, change `AI_PROVIDER` to `openai` and add
+an `OPENAI_API_KEY` variable by hand in Render → Environment -
+`render.yaml` doesn't declare one, but `OpenAIProvider` is unchanged and
+fully supported (see `src/engine/ai/providers/`).
 
 **HTTPS and CORS.** `https://<service>.onrender.com` is HTTPS, and Render
 redirects plain HTTP. The frontend (Vercel) and the backend (Render) are
@@ -373,9 +386,10 @@ included.
    if the name is taken - use the URL it shows); Vercel project
    `iarchitect-staging`.
 2. Push the commits to GitHub - Render builds from the repository.
-3. Render → **New → Blueprint** → the repository (it reads `render.yaml`) -
-   or **New → Web Service** with the settings above. Enter the four
-   environment variables; `FRONTEND_ORIGIN` = the planned Vercel URL.
+3. Render → **New → Blueprint** → the repository (it reads `render.yaml`,
+   including `AI_PROVIDER=gemini`) - or **New → Web Service** with the
+   settings above. Enter the four remaining environment variables;
+   `FRONTEND_ORIGIN` = the planned Vercel URL.
 4. Deploy, then check `https://<service>.onrender.com/health` →
    `{"status":"ok"}`, and Render → **Logs** (one JSON line per request).
 5. Vercel - section 3, steps 5 and 6, with `VITE_AI_BACKEND_URL` =
@@ -397,7 +411,9 @@ request can fail - retry, or use a paid instance for demos.
 
 | Variable | Where | Example | Notes |
 |---|---|---|---|
-| `OPENAI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
+| `AI_PROVIDER` | host env var (plain, non-secret) | `gemini` | `gemini` or `openai`; defaults to `openai` if unset. `render.yaml` sets `gemini` for staging. |
+| `GEMINI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Required when `AI_PROVIDER=gemini`. Free to create at https://aistudio.google.com/apikey. |
+| `OPENAI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Required when `AI_PROVIDER=openai`. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
 | `SUPABASE_URL` | host secret | `https://abcdefgh.supabase.co` | |
 | `SUPABASE_ANON_KEY` | host secret | - | The anon/publishable key. A service-role/secret key is refused. |
 | `FRONTEND_ORIGIN` | host secret | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. No wildcards, no paths; non-local origins must be https. |
@@ -420,7 +436,7 @@ ids replaced by `:id`), operation (`projects.save`, `auth.signin`,
 `ai.interpret`...), status, duration, whether the caller was signed in
 (`user` / `none` / `invalid` / `unverified`), and a short failure reason.
 Never a token, password, email address, or document. Failures of Supabase
-or OpenAI are logged by error name and message.
+or the AI provider (Gemini or OpenAI) are logged by error name and message.
 
 ### CORS and HTTPS
 
@@ -438,8 +454,9 @@ or OpenAI are logged by error name and message.
 - `npm run mock` in `backend/` + `npm run dev` - no keys, no Supabase:
   in-memory accounts (create one in the app) and the keyword-matching mock
   AI.
-- `npm start` in `backend/` with `backend/.env` - real OpenAI, and either
-  the staging Supabase project or `LOCAL_AUTH=memory`.
+- `npm start` in `backend/` with `backend/.env` - real Gemini or OpenAI
+  (`AI_PROVIDER`), and either the staging Supabase project or
+  `LOCAL_AUTH=memory`.
 - `npm run verify` (root) and `npm run verify` (backend) - the
   deterministic suites. `npm run build` - the production bundle.
 
@@ -447,7 +464,7 @@ or OpenAI are logged by error name and message.
 
 `.env`, `.env.local`, `.env.integration`, any `.env.*` other than the
 `*.example` templates (all gitignored), Supabase service-role/secret keys,
-OpenAI keys, database passwords, access tokens. Before a commit, scan the
+Gemini or OpenAI keys, database passwords, access tokens. Before a commit, scan the
 staged changes (`git diff --cached`) for key-shaped strings. The
 production bundle is checked by `npm run test:deployed`. `.dockerignore`
 (the Docker build on Render or Fly.io) and `.vercelignore` (Vercel CLI) keep
@@ -465,4 +482,5 @@ variables without values.
 | Browser console: CORS error, backend log `origin not allowed` | `FRONTEND_ORIGIN` doesn't list the exact frontend origin (scheme, host, port, no trailing path) - or it's a Preview URL (by design). |
 | Sign-in says "Confirm your email address first" | Email confirmation is on and the account isn't confirmed - confirm it, or create it with Auto Confirm (staging). |
 | Save/Open say "temporarily unavailable" (503) | The backend can't reach Supabase - check the project is running (free projects pause when idle). |
-| AI says "Backend request failed with status 502" | OpenAI refused or failed - check the key and the account's quota. |
+| AI says "Backend request failed with status 502" | The configured provider (Gemini or OpenAI) refused or failed - check `AI_PROVIDER`, its key, and the account's quota. |
+| Backend exits at start: "Missing GEMINI_API_KEY" / "Missing OPENAI_API_KEY" | `AI_PROVIDER` names a provider whose key isn't set on the host - set that key, or switch `AI_PROVIDER` to the one you did set. |

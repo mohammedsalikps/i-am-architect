@@ -1,0 +1,28 @@
+# The image takes only what the Dockerfile COPYs (package.json,
+# backend/package.json, backend/src, src/engine). This file keeps
+# secrets, dependencies, build output, coverage reports, and local
+# tool/editor state out of the Docker build context. Plain exclusions
+# only - never a "!" re-include - and no rule below reaches inside a
+# path the Dockerfile copies: an earlier version that did caused Render
+# to drop src/engine from its build context (see DEPLOYMENT.md's Render
+# section and this repository's git history for the investigation).
+**/.env
+**/.env.*
+.git
+**/node_modules
+dist
+build
+coverage
+.claude
+.vercel
+.fly
+.railway
+**/*.log
+
+# Local editor/IDE and OS files - never needed by the image.
+.vscode
+.idea
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

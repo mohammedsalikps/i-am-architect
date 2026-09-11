@@ -1,22 +1,24 @@
 /**
- * Lightweight in-memory verification for this directory's two real
- * (network-backed) AIProvider implementations - OpenAIProvider (talks
- * to OpenAI directly) and BackendAIProvider (talks to the AI proxy
- * backend under backend/ - see its own section below). Same approach as
- * every other verify.ts in this project: no test framework, plain
- * assertion helpers, run directly by Node. Run with:
+ * Lightweight in-memory verification for this directory's three real
+ * (network-backed) AIProvider implementations - OpenAIProvider (talks to
+ * OpenAI directly), GeminiProvider (talks to Gemini directly), and
+ * BackendAIProvider (talks to the AI proxy backend under backend/ - see
+ * its own section below). Same approach as every other verify.ts in this
+ * project: no test framework, plain assertion helpers, run directly by
+ * Node. Run with:
  *   npm run verify
  * or directly:
  *   node src/engine/ai/providers/verify.ts
  *
  * Every check below constructs its provider with a hand-rolled mock
  * `fetch` function - never the real global `fetch`, never a real
- * secret of any kind, and neither provider ever falls back to a global
+ * secret of any kind, and no provider ever falls back to a global
  * transport on its own (see each class's constructor). That combination
  * is what guarantees this file makes zero real network calls: nothing
- * here has a code path capable of reaching api.openai.com OR a real AI
- * proxy backend. Every mock fetch call is also counted, and every check
- * that expects exactly one request asserts that count.
+ * here has a code path capable of reaching api.openai.com,
+ * generativelanguage.googleapis.com, OR a real AI proxy backend. Every
+ * mock fetch call is also counted, and every check that expects exactly
+ * one request asserts that count.
  *
  * Explicit .ts extensions below are required for Node's native
  * TypeScript support to resolve these relative imports (see
@@ -30,6 +32,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OpenAIProvider } from "./OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "./OpenAIProvider.ts";
+import { GeminiProvider } from "./GeminiProvider.ts";
+import type { GeminiFetch, GeminiHttpResponse } from "./GeminiProvider.ts";
+import { COMMAND_TYPES } from "./promptSchema.ts";
 import { BackendAIProvider } from "./BackendAIProvider.ts";
 import type { BackendFetch, BackendHttpResponse } from "./BackendAIProvider.ts";
 import { AICommandPipeline } from "../AICommandPipeline.ts";
@@ -139,6 +144,37 @@ function okChatResponse(content: unknown): OpenAIHttpResponse {
     ok: true,
     status: 200,
     json: async () => ({ choices: [{ message: { content: serialized } }] }),
+    text: async () => serialized
+  };
+}
+
+// --- GeminiProvider-specific helpers ---
+
+type MockGeminiFetchCall = { url: string; init: { method: "POST"; headers: Record<string, string>; body: string } };
+
+/** Mirrors makeMockFetch above, for GeminiFetch instead of OpenAIFetch - a hand-rolled mock that never touches the network. */
+function makeMockGeminiFetch(
+  handler: (call: MockGeminiFetchCall) => GeminiHttpResponse | Promise<GeminiHttpResponse>
+): GeminiFetch & { calls: MockGeminiFetchCall[] } {
+  const calls: MockGeminiFetchCall[] = [];
+  const fetchImpl = async (
+    url: string,
+    init: { method: "POST"; headers: Record<string, string>; body: string }
+  ): Promise<GeminiHttpResponse> => {
+    const call = { url, init };
+    calls.push(call);
+    return handler(call);
+  };
+  return Object.assign(fetchImpl, { calls });
+}
+
+/** A well-formed Gemini generateContent HTTP response wrapping `content` as its single candidate's text. */
+function okGeminiResponse(content: unknown): GeminiHttpResponse {
+  const serialized = JSON.stringify(content);
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ candidates: [{ content: { parts: [{ text: serialized }] }, finishReason: "STOP" }] }),
     text: async () => serialized
   };
 }
@@ -1069,6 +1105,336 @@ async function run(): Promise<void> {
   );
 
   // --- BackendAIProvider ---
+
+  console.log("\nGeminiProvider verification\n");
+
+  interface SentGeminiRequest {
+    systemInstruction: { role: string; parts: { text: string }[] };
+    contents: { role: string; parts: { text: string }[] }[];
+    generationConfig: { temperature: number; responseMimeType: string; responseSchema: Record<string, unknown> };
+  }
+
+  async function captureGeminiRequest(
+    projectContext: AIProjectContext,
+    instruction = "Create a wall",
+    apiKey = "gm-test"
+  ): Promise<{ body: SentGeminiRequest; rawBody: string; headers: Record<string, string>; url: string }> {
+    const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ commands: [] }));
+    const provider = new GeminiProvider({ apiKey, fetch: mockFetch });
+    await provider.interpret({ instruction, projectContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    const call = mockFetch.calls[0];
+    return { body: JSON.parse(call.init.body) as SentGeminiRequest, rawBody: call.init.body, headers: call.init.headers, url: call.url };
+  }
+
+  // --- Missing API key / missing transport ---
+
+  await check("GeminiProvider throws a clear error when constructed without an API key", () => {
+    let threw = false;
+    try {
+      new GeminiProvider({ apiKey: "", fetch: makeMockGeminiFetch(() => okGeminiResponse({ commands: [] })) });
+    } catch (error) {
+      threw = true;
+      const message = error instanceof Error ? error.message : String(error);
+      assertTrue(message.includes("API key"), 'error message should mention "API key"');
+    }
+    assertTrue(threw, "constructing without an API key should throw");
+  });
+
+  await check("GeminiProvider throws a clear error when constructed with only whitespace as the API key", () => {
+    let threw = false;
+    try {
+      new GeminiProvider({ apiKey: "   ", fetch: makeMockGeminiFetch(() => okGeminiResponse({ commands: [] })) });
+    } catch {
+      threw = true;
+    }
+    assertTrue(threw, "constructing with a whitespace-only API key should throw");
+  });
+
+  await check("GeminiProvider throws a clear error when constructed without a fetch transport", () => {
+    let threw = false;
+    try {
+      new GeminiProvider({ apiKey: "gm-test" } as unknown as ConstructorParameters<typeof GeminiProvider>[0]);
+    } catch (error) {
+      threw = true;
+      const message = error instanceof Error ? error.message : String(error);
+      assertTrue(message.includes("fetch"), 'error message should mention "fetch"');
+    }
+    assertTrue(threw, "constructing without a fetch transport should throw");
+  });
+
+  // --- Request shaping: same prompt/context/schema as OpenAI, Gemini's own wire shape ---
+
+  await check("GeminiProvider posts to <baseUrl>/<model>:generateContent with the key in x-goog-api-key, never in the URL or body", async () => {
+    const { url, headers, rawBody } = await captureGeminiRequest(emptyContext, "Create a wall", "gm-test-marker");
+
+    assertTrue(url.endsWith("/gemini-2.5-flash:generateContent"), `expected the default model in the URL, got "${url}"`);
+    assertTrue(!url.includes("gm-test-marker"), "the key must never be in the URL");
+    assertEqual(headers["x-goog-api-key"], "gm-test-marker", "the key is in the x-goog-api-key header");
+    assertTrue(!rawBody.includes("gm-test-marker"), "the key must not appear anywhere in the body");
+  });
+
+  await check("GeminiProvider sends the exact same system prompt and construction state as OpenAIProvider, in Gemini's own shape", async () => {
+    const [openAI, gemini] = await Promise.all([
+      captureOpenAIRequest(constructionContext, "Add a wall"),
+      captureGeminiRequest(constructionContext, "Add a wall")
+    ]);
+
+    assertEqual(gemini.body.systemInstruction.role, "system", "systemInstruction role");
+    assertEqual(gemini.body.systemInstruction.parts[0].text, openAI.body.messages[0].content, "the identical system prompt, shared via promptSchema.ts");
+
+    assertEqual(gemini.body.contents.length, 1, "one user turn, not one per message");
+    assertEqual(gemini.body.contents[0].role, "user", "content role");
+    assertDeepEqual(gemini.body.contents[0].parts.length, 2, "two parts: the construction state, then the instruction");
+    assertEqual(gemini.body.contents[0].parts[0].text, openAI.body.messages[1].content, "the identical construction-state JSON");
+    assertEqual(gemini.body.contents[0].parts[1].text, "Add a wall", "the instruction is the final part, verbatim");
+
+    const sentState = JSON.parse(gemini.body.contents[0].parts[0].text) as { currentConstructionState: AIProjectContext };
+    assertDeepEqual(sentState.currentConstructionState, constructionContext, "the whole snapshot reaches Gemini unchanged, same as OpenAI");
+  });
+
+  await check("GeminiProvider requests JSON output with temperature 0, same as OpenAIProvider", async () => {
+    const { body } = await captureGeminiRequest(emptyContext);
+    assertEqual(body.generationConfig.temperature, 0, "temperature");
+    assertEqual(body.generationConfig.responseMimeType, "application/json", "responseMimeType");
+  });
+
+  await check("GeminiProvider adapts the shared schema: OBJECT/ARRAY/STRING types, the same command type enum", async () => {
+    const { body } = await captureGeminiRequest(emptyContext);
+    const schema = body.generationConfig.responseSchema as {
+      type: string;
+      properties: { commands: { type: string; items: { type: string; properties: Record<string, { type?: string; enum?: string[] }> } } };
+    };
+
+    assertEqual(schema.type, "OBJECT", "the root schema is an OBJECT");
+    assertEqual(schema.properties.commands.type, "ARRAY", "commands is an ARRAY");
+    const commandItem = schema.properties.commands.items;
+    assertEqual(commandItem.type, "OBJECT", "each command is an OBJECT");
+    assertDeepEqual(commandItem.properties.type.enum, [...COMMAND_TYPES], "the command type enum is unchanged");
+    assertEqual(commandItem.properties.objectId.type, "STRING", "objectId maps to STRING");
+    assertEqual((commandItem.properties.wall as { type: string }).type, "OBJECT", "wall maps to OBJECT");
+  });
+
+  await check(
+    "GeminiProvider's schema adapter falls back to an unconstrained OBJECT for the two dynamic-key fields (dimensions, params) Gemini's schema can't express, and STRING for params' multi-type values",
+    async () => {
+      const { body } = await captureGeminiRequest(emptyContext);
+      const schema = body.generationConfig.responseSchema as {
+        properties: {
+          commands: {
+            items: {
+              properties: {
+                changes: { properties: { dimensions: Record<string, unknown> } };
+                element: { properties: { dimensions: Record<string, unknown>; params: Record<string, unknown> } };
+              };
+            };
+          };
+        };
+      };
+      const commandProps = schema.properties.commands.items.properties;
+
+      // additionalProperties has no Gemini equivalent - dropped down to a bare OBJECT (no properties/additionalProperties leaks through).
+      assertDeepEqual(commandProps.changes.properties.dimensions, { type: "OBJECT" }, "update_object's changes.dimensions");
+      assertDeepEqual(commandProps.element.properties.dimensions, { type: "OBJECT" }, "element.add's dimensions");
+      // params' additionalProperties value was itself a type UNION (number | string) - also no Gemini equivalent.
+      assertDeepEqual(commandProps.element.properties.params, { type: "OBJECT" }, "element.add's params");
+    }
+  );
+
+  // --- Response parsing ---
+
+  await check("GeminiProvider parses a well-formed candidate into a command", async () => {
+    const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ commands: [{ type: "wall.add", wall: { length: 5 } }] }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+
+    const response = await provider.interpret({
+      instruction: "Create a 5 meter wall",
+      projectContext: emptyContext,
+      availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES
+    });
+
+    assertDeepEqual(response.commands, [{ type: "wall.add", wall: { length: 5 } }], "the single command");
+    assertEqual(mockFetch.calls.length, 1, "exactly one request");
+  });
+
+  await check("GeminiProvider joins multiple text parts of the first candidate before parsing", async () => {
+    const commands = [{ type: "wall.add", wall: {} }, { type: "pillar.add", pillar: {} }];
+    const serialized = JSON.stringify({ commands });
+    const split = Math.floor(serialized.length / 2);
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: serialized.slice(0, split) }, { text: serialized.slice(split) }] } }] }),
+      text: async () => serialized
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+
+    const response = await provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertDeepEqual(response.commands, commands, "the two parts were joined before JSON.parse");
+  });
+
+  await check("GeminiProvider preserves the model's notes field", async () => {
+    const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ commands: [], notes: "nothing to build" }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    const response = await provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertEqual(response.notes, "nothing to build", "notes");
+  });
+
+  // --- Error cases ---
+
+  await check("GeminiProvider throws when the HTTP request itself fails", async () => {
+    const mockFetch: GeminiFetch = async () => {
+      throw new Error("network down");
+    };
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "network down",
+      "transport failure"
+    );
+  });
+
+  await check("GeminiProvider throws with the status code when Gemini returns a non-OK response", async () => {
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { message: "API key not valid" } }),
+      text: async () => '{"error":{"message":"API key not valid"}}'
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-bad", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "403",
+      "non-OK response"
+    );
+  });
+
+  await check("GeminiProvider throws when the HTTP body is not valid JSON", async () => {
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token");
+      },
+      text: async () => "not json"
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "not valid JSON",
+      "malformed HTTP body"
+    );
+  });
+
+  await check("GeminiProvider throws a clear, specific error when the prompt was blocked (no candidates)", async () => {
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ promptFeedback: { blockReason: "SAFETY" } }),
+      text: async () => "{}"
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "blocked: SAFETY",
+      "a blocked prompt"
+    );
+  });
+
+  await check("GeminiProvider throws when a candidate has no text parts (e.g. finishReason MAX_TOKENS)", async () => {
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [] }, finishReason: "MAX_TOKENS" }] }),
+      text: async () => "{}"
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "finishReason: MAX_TOKENS",
+      "no text parts"
+    );
+  });
+
+  await check("GeminiProvider throws when the candidate's text is not valid JSON", async () => {
+    const mockFetch = makeMockGeminiFetch(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: "not json{" }] } }] }),
+      text: async () => "not json{"
+    }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "not valid JSON",
+      "non-JSON candidate text"
+    );
+  });
+
+  await check('GeminiProvider throws when parsed content is missing a "commands" array', async () => {
+    const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ notes: "no commands field" }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    await assertRejects(
+      () => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "malformed",
+      'missing "commands" array'
+    );
+  });
+
+  await check("GeminiProvider's source never reads an environment variable - the key arrives only through its constructor", () => {
+    const source = readFileSync(fileURLToPath(new URL("./GeminiProvider.ts", import.meta.url)), "utf8");
+    // Usage patterns, not bare words: the file's own doc comments mention
+    // `process.env`/`import.meta.env` to say it never reads them.
+    assertTrue(!/process\.env(\.[A-Za-z_]|\[)/.test(source), "no process.env read");
+    assertTrue(!/import\.meta\.env(\.[A-Za-z_]|\[)/.test(source), "no import.meta.env read");
+  });
+
+  // --- AICommandPipeline integration ---
+
+  await check("AICommandPipeline executes GeminiProvider output end-to-end via a mocked transport, making exactly one request", async () => {
+    const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ commands: [{ type: "pillar.add", pillar: { height: 3 } }] }));
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    const executor = makeExecutorSpy();
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Add a pillar", emptySnapshot);
+
+    assertEqual(result.success, true, "result.success");
+    assertEqual(executor.calls.length, 1, "executor called once");
+    assertEqual(mockFetch.calls.length, 1, "exactly one (mocked) Gemini request");
+  });
+
+  await check("AICommandPipeline surfaces a GeminiProvider request failure as a provider-stage pipeline error", async () => {
+    const mockFetch: GeminiFetch = async () => {
+      throw new Error("gemini boom");
+    };
+    const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+    const executor = makeExecutorSpy();
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Add a wall", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(result.errors[0].stage, "provider", "error stage");
+    assertTrue(result.errors[0].message.includes("gemini boom"), "error message");
+    assertEqual(executor.calls.length, 0, "executor should never be called");
+  });
+
+  await check(
+    "AICommandPipeline rejects an unsupported command from GeminiProvider the same way it rejects any other provider's",
+    async () => {
+      const mockFetch = makeMockGeminiFetch(() => okGeminiResponse({ commands: [{ type: "roof.add", roof: {} }] }));
+      const provider = new GeminiProvider({ apiKey: "gm-test", fetch: mockFetch });
+      const executor = makeExecutorSpy();
+      const pipeline = new AICommandPipeline(provider, executor);
+
+      const result = await pipeline.run("Create a roof", emptySnapshot);
+
+      assertEqual(result.success, false, "result.success");
+      assertEqual(result.errors[0].stage, "validation", "error stage");
+      assertTrue(result.errors[0].message.includes("Unsupported object type"), "error message");
+      assertEqual(executor.calls.length, 0, "executor should never be called");
+    }
+  );
 
   console.log("\nBackendAIProvider verification\n");
 

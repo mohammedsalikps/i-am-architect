@@ -2,9 +2,11 @@
 # See DEPLOYMENT.md "4. Render staging". The frontend is on Vercel; this
 # file describes only the Node backend.
 #
-# No secret belongs in this file. Every environment variable below is
-# declared with `sync: false` and no value: Render asks for each value when
-# the Blueprint is applied, and stores it encrypted in the dashboard
+# No secret belongs in this file. AI_PROVIDER is a plain, non-secret
+# value (which of the two already-implemented AIProvider classes to use -
+# see src/engine/ai/providers/); every OTHER environment variable below
+# is declared with `sync: false` and no value: Render asks for each value
+# when the Blueprint is applied, and stores it encrypted in the dashboard
 # (the service -> Environment).
 #
 # PORT is deliberately not set: Render sets it (10000) and the server listens
@@ -25,7 +27,14 @@ services:
     branch: master
     healthCheckPath: /health
     envVars:
-      - key: OPENAI_API_KEY
+      # Staging defaults to Gemini (no paid OpenAI key required) - see
+      # backend/src/config.ts. To use OpenAI instead, change this value to
+      # "openai" and add an OPENAI_API_KEY variable in Render -> Environment
+      # (this Blueprint does not declare one; OpenAIProvider stays fully
+      # supported in the code either way - see src/engine/ai/providers/).
+      - key: AI_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL
         sync: false

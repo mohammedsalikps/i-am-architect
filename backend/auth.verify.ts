@@ -1122,11 +1122,11 @@ async function run(): Promise<void> {
 
   // --- Configuration ---
 
-  await check("config: an OpenAI key and ONE account storage are required; a service-role key is refused; no secret is echoed back", () => {
+  await check("config: an AI provider key (default: OpenAI) and ONE account storage are required; a service-role key is refused; no secret is echoed back", () => {
     const openAI = "sk-test-not-a-real-key";
     const base = { OPENAI_API_KEY: openAI };
     const failures: [string, Record<string, string | undefined>, string][] = [
-      ["no OpenAI key", { LOCAL_AUTH: "memory" }, "OPENAI_API_KEY"],
+      ["no OpenAI key (AI_PROVIDER defaults to openai)", { LOCAL_AUTH: "memory" }, "OPENAI_API_KEY"],
       ["no storage chosen", base, "LOCAL_AUTH=memory"],
       ["only a Supabase URL", { ...base, SUPABASE_URL }, "both SUPABASE_URL and SUPABASE_ANON_KEY"],
       ["only a Supabase key", { ...base, SUPABASE_ANON_KEY: ANON_KEY }, "both SUPABASE_URL and SUPABASE_ANON_KEY"],
@@ -1154,8 +1154,14 @@ async function run(): Promise<void> {
     assertTrue(memory.ok, "LOCAL_AUTH=memory");
     assertDeepEqual(
       memory.config,
-      { openAIApiKey: openAI, port: 8787, frontendOrigins: [FRONTEND_ORIGIN], production: false, storage: { mode: "memory" } },
-      "in-memory, with the defaults"
+      {
+        ai: { provider: "openai", apiKey: openAI },
+        port: 8787,
+        frontendOrigins: [FRONTEND_ORIGIN],
+        production: false,
+        storage: { mode: "memory" }
+      },
+      "in-memory, with the defaults - AI_PROVIDER unset defaults to openai"
     );
 
     const hosted = readServerConfig({ ...base, SUPABASE_URL, SUPABASE_ANON_KEY: ANON_KEY, PORT: "9000", FRONTEND_ORIGIN: "https://app.example.com" });
@@ -1182,9 +1188,53 @@ async function run(): Promise<void> {
     assertEqual(isPrivilegedSupabaseKey("not.a-jwt.at-all"), false, "garbage isn't");
   });
 
+  await check("config: AI_PROVIDER selects openai or gemini; only the chosen provider's key is required or checked", () => {
+    const gemini = "gm-test-not-a-real-key";
+    const openAI = "sk-test-not-a-real-key";
+    const memoryStorage = { LOCAL_AUTH: "memory" };
+
+    // Explicit "openai" behaves exactly like the (unset-defaults-to-openai) case above.
+    const explicitOpenAI = readServerConfig({ AI_PROVIDER: "openai", OPENAI_API_KEY: openAI, ...memoryStorage });
+    assertTrue(explicitOpenAI.ok, "AI_PROVIDER=openai with OPENAI_API_KEY set");
+    assertDeepEqual(explicitOpenAI.config.ai, { provider: "openai", apiKey: openAI }, "the openai provider config");
+
+    // AI_PROVIDER=gemini: GEMINI_API_KEY is required, OPENAI_API_KEY is not even read.
+    const geminiOnly = readServerConfig({ AI_PROVIDER: "gemini", GEMINI_API_KEY: gemini, ...memoryStorage });
+    assertTrue(geminiOnly.ok, "AI_PROVIDER=gemini with only GEMINI_API_KEY set - no OPENAI_API_KEY needed");
+    assertDeepEqual(geminiOnly.config.ai, { provider: "gemini", apiKey: gemini }, "the gemini provider config");
+
+    const geminiCaseInsensitive = readServerConfig({ AI_PROVIDER: "Gemini", GEMINI_API_KEY: gemini, ...memoryStorage });
+    assertTrue(geminiCaseInsensitive.ok, "AI_PROVIDER is matched case-insensitively");
+
+    const geminiWithBothKeys = readServerConfig({ AI_PROVIDER: "gemini", GEMINI_API_KEY: gemini, OPENAI_API_KEY: openAI, ...memoryStorage });
+    assertTrue(geminiWithBothKeys.ok, "AI_PROVIDER=gemini with an unused OPENAI_API_KEY also set");
+    assertDeepEqual(geminiWithBothKeys.config.ai, { provider: "gemini", apiKey: gemini }, "still only the gemini key, openai's is ignored");
+
+    // Missing GEMINI_API_KEY under AI_PROVIDER=gemini: a clear configuration error - OPENAI_API_KEY does not help.
+    const missingGemini = readServerConfig({ AI_PROVIDER: "gemini", OPENAI_API_KEY: openAI, ...memoryStorage });
+    assertTrue(!missingGemini.ok, "AI_PROVIDER=gemini without GEMINI_API_KEY is refused");
+    assertTrue(missingGemini.error.includes("GEMINI_API_KEY"), `expected the error to name GEMINI_API_KEY, got "${missingGemini.error}"`);
+    assertTrue(!missingGemini.error.includes("OPENAI_API_KEY"), "the error should not ask for the unrelated OpenAI key");
+
+    // Missing OPENAI_API_KEY only matters when AI_PROVIDER=openai (or unset) - it is irrelevant under gemini.
+    const missingOpenAIUnderGemini = readServerConfig({ AI_PROVIDER: "gemini", GEMINI_API_KEY: gemini, ...memoryStorage });
+    assertTrue(missingOpenAIUnderGemini.ok, "no OPENAI_API_KEY at all is fine when AI_PROVIDER=gemini");
+
+    // An unsupported value is a clear configuration error, not a silent fallback.
+    const badProvider = readServerConfig({ AI_PROVIDER: "claude", GEMINI_API_KEY: gemini, OPENAI_API_KEY: openAI, ...memoryStorage });
+    assertTrue(!badProvider.ok, "an unrecognized AI_PROVIDER is refused");
+    assertTrue(badProvider.error.includes("AI_PROVIDER"), `expected the error to name AI_PROVIDER, got "${badProvider.error}"`);
+    for (const secret of [openAI, gemini]) {
+      assertTrue(!badProvider.error.includes(secret), "the error never repeats a key");
+    }
+
+    const blankProvider = readServerConfig({ AI_PROVIDER: "  ", OPENAI_API_KEY: openAI, ...memoryStorage });
+    assertTrue(blankProvider.ok, "a blank AI_PROVIDER counts as unset, defaulting to openai");
+  });
+
   // --- Hosting configuration (read as text) ---
 
-  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image copies only four paths, holds no .env file and runs in production mode", () => {
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image copies only four paths, holds no .env file and runs in production mode; .dockerignore excludes secrets/artifacts without reaching inside a copied path", () => {
     const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 
     const render = read("render.yaml");
@@ -1192,19 +1242,25 @@ async function run(): Promise<void> {
     assertTrue(/^\s*dockerfilePath:\s*\.\/Dockerfile\s*$/m.test(render), "Render: the root Dockerfile");
     assertTrue(/^\s*dockerContext:\s*\.\s*$/m.test(render), "Render: the repository root as build context");
     assertTrue(/^\s*healthCheckPath:\s*\/health\s*$/m.test(render), "Render: the /health check");
-    for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "FRONTEND_ORIGIN"]) {
+    for (const key of ["GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "FRONTEND_ORIGIN"]) {
       assertTrue(new RegExp(`-\\s*key:\\s*${key}\\s*\\n\\s*sync:\\s*false\\s*$`, "m").test(render), `render.yaml declares ${key} with sync: false`);
     }
-    assertTrue(!/^\s*value:/m.test(render), "render.yaml sets no value at all - Render asks for each");
+    // AI_PROVIDER is the one deliberate exception: a plain, non-secret value
+    // (staging defaults to Gemini - no paid OpenAI key required) - see
+    // backend/src/config.ts. Every OTHER key must stay value-free.
+    assertTrue(/^\s*-\s*key:\s*AI_PROVIDER\s*\n\s*value:\s*gemini\s*$/m.test(render), "render.yaml sets AI_PROVIDER: gemini as a plain value");
+    assertEqual((render.match(/^\s*value:/gm) ?? []).length, 1, "AI_PROVIDER is the only key with a value: line - every secret stays sync: false");
+    assertTrue(!/key:\s*OPENAI_API_KEY\b/.test(render), "render.yaml no longer asks for an OpenAI key - staging is Gemini by default");
     assertTrue(!/key:\s*(PORT|LOCAL_AUTH)\b/.test(render), "render.yaml leaves PORT to Render and never enables in-memory accounts");
 
     const fly = read("fly.toml");
     assertTrue(/dockerfile = "Dockerfile"/.test(fly), "fly.toml: the root Dockerfile");
     assertTrue(/internal_port = 8787/.test(fly) && /path = "\/health"/.test(fly), "fly.toml: port and /health check kept");
 
-    // There is no .dockerignore (the Render build-context test), so the COPY
-    // list alone decides what enters the image: exactly these four paths,
-    // never the whole repository, and no ADD.
+    // The Dockerfile's own COPY list alone decides what enters the IMAGE:
+    // exactly these four paths, never the whole repository, and no ADD.
+    // .dockerignore (checked separately below) only trims what reaches the
+    // BUILD CONTEXT - a stricter but non-overlapping protection.
     const dockerfile = read("Dockerfile");
     const copiedPaths = ["package.json", "backend/package.json", "backend/src", "src/engine"];
     assertDeepEqual(
@@ -1217,15 +1273,93 @@ async function run(): Promise<void> {
     assertTrue(/^\s*NODE_ENV = "production"\s*$/m.test(fly), "fly.toml keeps NODE_ENV=production");
     assertTrue(/^CMD \["node", "backend\/src\/server\.ts"\]\s*$/m.test(dockerfile), "the image starts the server");
 
-    // No .env file inside a copied path - the image would include it.
+    // No .env file inside a copied path - the image would include it,
+    // regardless of what .dockerignore says (defense in depth).
     const isEnvFile = (path: string) => /(^|\/)\.env[^/]*$/.test(path);
+    const copiedPathContents = new Map<string, string[]>();
     for (const copiedPath of copiedPaths) {
       const url = new URL(`../${copiedPath}`, import.meta.url);
       const inside = statSync(url).isDirectory()
         ? readdirSync(url, { encoding: "utf8", recursive: true }).map((entry) => `${copiedPath}/${entry.replaceAll("\\", "/")}`)
         : [];
+      copiedPathContents.set(copiedPath, inside);
       assertDeepEqual([copiedPath, ...inside].filter(isEnvFile), [], `no .env file inside ${copiedPath}`);
     }
+
+    // .dockerignore: restored after a controlled diagnostic had removed it
+    // entirely - plain exclusions only (never "!"), and no rule may reach
+    // inside a path the Dockerfile copies. An earlier version that did
+    // ("**" + "!src/engine") coincided with Render dropping src/engine from
+    // its build context; see DEPLOYMENT.md's Render section and this
+    // repository's git history for the investigation.
+    const dockerignore = read(".dockerignore");
+    const ignoreRules = dockerignore
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    assertDeepEqual(ignoreRules.filter((rule) => rule.startsWith("!")), [], '.dockerignore has no "!" re-include rules');
+    for (const rule of [
+      "**/.env",
+      "**/.env.*",
+      ".git",
+      "**/node_modules",
+      "dist",
+      "build",
+      "coverage",
+      ".claude",
+      ".vercel",
+      ".fly",
+      ".railway",
+      "**/*.log",
+      ".vscode",
+      ".idea",
+      "*.swp",
+      "*.swo",
+      ".DS_Store",
+      "Thumbs.db"
+    ]) {
+      assertTrue(ignoreRules.includes(rule), `.dockerignore excludes ${rule}`);
+    }
+
+    // Docker's matching: a rule excludes a path when it matches the path or
+    // one of its parent directories.
+    const globParts: Record<string, string> = { "**/": "(.*/)?", "**": ".*", "*": "[^/]*", "?": "[^/]" };
+    const ruleMatchers = ignoreRules.map((rule) => {
+      const pattern = rule
+        .replace(/^\/+|\/+$/g, "")
+        .split(/(\*\*\/|\*\*|\*|\?)/)
+        .map((part) => globParts[part] ?? part.replace(/[.+^${}()|[\]\\]/g, "\\$&"))
+        .join("");
+      return { rule, regex: new RegExp(`^${pattern}$`) };
+    });
+    const excludedBy = (path: string): string | undefined => {
+      const segments = path.split("/");
+      return ruleMatchers.find(({ regex }) => segments.some((_, index) => regex.test(segments.slice(0, index + 1).join("/"))))?.rule;
+    };
+
+    for (const copiedPath of copiedPaths) {
+      for (const path of [copiedPath, ...(copiedPathContents.get(copiedPath) ?? [])]) {
+        const rule = excludedBy(path);
+        assertTrue(rule === undefined, `no .dockerignore rule excludes ${path} (it is inside a Dockerfile COPY source; rule: ${rule})`);
+      }
+    }
+    for (const secretOrArtifact of [
+      ".env",
+      ".env.local",
+      "backend/.env",
+      "backend/.env.integration",
+      "backend/src/.env",
+      "node_modules/x",
+      "dist/index.js",
+      "build/out.js",
+      "coverage/lcov.info",
+      ".vscode/settings.json",
+      "a.swp",
+      ".DS_Store"
+    ]) {
+      assertTrue(excludedBy(secretOrArtifact) !== undefined, `.dockerignore keeps ${secretOrArtifact} out of the build context`);
+    }
+
     // No real .env file is tracked, so none reaches a clone (Render's build
     // context) - only the value-free .example templates.
     const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: fileURLToPath(new URL("..", import.meta.url)), encoding: "utf8" })

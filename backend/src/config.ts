@@ -3,6 +3,12 @@
  * server.ts, a plain object in the tests. Nothing here is ever sent to a
  * browser, and no secret from it is ever echoed back in an error message.
  *
+ * AI_PROVIDER chooses which real AIProvider server.ts constructs -
+ * "openai" (the default, unchanged from before AI_PROVIDER existed) or
+ * "gemini". Only the chosen provider's own key is required: OPENAI_API_KEY
+ * for "openai", GEMINI_API_KEY for "gemini" - the other is never read. See
+ * src/engine/ai/providers/OpenAIProvider.ts and GeminiProvider.ts.
+ *
  * Accounts and projects are kept in ONE of two places:
  *
  * - Supabase: SUPABASE_URL + SUPABASE_ANON_KEY (the project's anon /
@@ -24,8 +30,17 @@
 
 export type StorageConfig = { mode: "supabase"; url: string; anonKey: string } | { mode: "memory" };
 
+/**
+ * Which real AIProvider to construct, and its own (only) API key -
+ * server.ts passes this straight to `new OpenAIProvider({ apiKey, fetch })`
+ * or `new GeminiProvider({ apiKey, fetch })`. Never both fields at once:
+ * the unused provider's key is never read from the environment at all,
+ * so it need not even be set.
+ */
+export type AIProviderConfig = { provider: "openai"; apiKey: string } | { provider: "gemini"; apiKey: string };
+
 export interface ServerConfig {
-  openAIApiKey: string;
+  ai: AIProviderConfig;
   port: number;
   /** The exact browser origins allowed to call this server (CORS). */
   frontendOrigins: string[];
@@ -115,15 +130,49 @@ function supabaseUrlProblem(value: string): string | null {
   return null;
 }
 
-export function readServerConfig(env: Record<string, string | undefined>): ServerConfigResult {
-  const openAIApiKey = env.OPENAI_API_KEY?.trim();
-  if (!openAIApiKey) {
+/**
+ * AI_PROVIDER, defaulting to "openai" when unset - the behavior every
+ * config that predates AI_PROVIDER (nothing but OPENAI_API_KEY) still
+ * gets unchanged. Only the chosen provider's key is validated below.
+ */
+function readAIProviderConfig(env: Record<string, string | undefined>): { ok: true; ai: AIProviderConfig } | { ok: false; error: string } {
+  const raw = env.AI_PROVIDER?.trim().toLowerCase();
+  const provider = raw || "openai";
+  if (provider !== "openai" && provider !== "gemini") {
+    return { ok: false, error: 'AI_PROVIDER must be "openai" or "gemini".' };
+  }
+
+  if (provider === "gemini") {
+    const apiKey = env.GEMINI_API_KEY?.trim();
+    if (!apiKey) {
+      return {
+        ok: false,
+        error:
+          "Missing GEMINI_API_KEY environment variable (AI_PROVIDER=gemini). Copy backend/.env.example to " +
+          "backend/.env, fill in a real Gemini API key from https://aistudio.google.com/apikey, and start this " +
+          "server with: node --env-file=.env src/server.ts"
+      };
+    }
+    return { ok: true, ai: { provider: "gemini", apiKey } };
+  }
+
+  const apiKey = env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
     return {
       ok: false,
       error:
         "Missing OPENAI_API_KEY environment variable. Copy backend/.env.example to backend/.env, fill in a real " +
-        "OpenAI API key, and start this server with: node --env-file=.env src/server.ts"
+        "OpenAI API key, and start this server with: node --env-file=.env src/server.ts - or set " +
+        "AI_PROVIDER=gemini and GEMINI_API_KEY instead."
     };
+  }
+  return { ok: true, ai: { provider: "openai", apiKey } };
+}
+
+export function readServerConfig(env: Record<string, string | undefined>): ServerConfigResult {
+  const aiResult = readAIProviderConfig(env);
+  if (!aiResult.ok) {
+    return { ok: false, error: aiResult.error };
   }
 
   const rawPort = env.PORT?.trim();
@@ -137,7 +186,7 @@ export function readServerConfig(env: Record<string, string | undefined>): Serve
     return { ok: false, error: origins.error };
   }
   const production = env.NODE_ENV?.trim() === "production";
-  const base = { openAIApiKey, port, frontendOrigins: origins.origins, production };
+  const base = { ai: aiResult.ai, port, frontendOrigins: origins.origins, production };
 
   const url = env.SUPABASE_URL?.trim();
   const anonKey = env.SUPABASE_ANON_KEY?.trim();

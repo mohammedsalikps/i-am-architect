@@ -4,13 +4,18 @@ A provider-independent layer that turns a natural-language construction
 instruction into validated, structured construction commands, executed
 through the existing `CommandExecutor` (see `src/engine/commands/`).
 
-`providers/OpenAIProvider.ts` is the first real (network-backed)
-provider, using OpenAI's Chat Completions API with structured JSON
-output. **Read "Security boundary" below before using it anywhere** -
-this repository has no backend, and nothing in the running application
-currently constructs `OpenAIProvider` with a real API key. No API key
-is hardcoded anywhere, no `.env` file is committed, and no test in this
-module ever makes a real network call (see "Verification approach").
+`providers/OpenAIProvider.ts` and `providers/GeminiProvider.ts` are the
+two real (network-backed) providers: OpenAI's Chat Completions API and
+Google's Gemini `generateContent` API, respectively, both with
+structured JSON output. `backend/src/config.ts`'s `AI_PROVIDER` decides
+which one the backend constructs (see backend/README.md); staging
+defaults to Gemini so it needs no paid OpenAI key. Both share the exact
+same command schema, system prompt, and construction/geometry context
+from `providers/promptSchema.ts` - see "Provider independence" below.
+**Read "Security boundary" below before constructing either with a real
+key** - no key is hardcoded anywhere, no `.env` file is committed, and
+no test in this module ever makes a real network call (see "Verification
+approach").
 
 ## Files
 
@@ -21,8 +26,10 @@ module ever makes a real network call (see "Verification approach").
 | `AIProvider.ts` | The `AIProvider` interface every provider (mock or real) implements. |
 | `MockAIProvider.ts` | A deterministic, keyword-matching `AIProvider` - no network calls, no randomness. Answers a house instruction with the plan from `housePlan.ts`. |
 | `housePlan.ts` | `buildSimpleHousePlan()` - the deterministic 12-command plan for a simple house, and `findHouseCenter()` - where it goes so it clears existing objects. See "AI house builder". |
+| `providers/promptSchema.ts` | The command JSON Schema, system prompt, and construction/geometry context projection - provider-neutral, shared by every real provider so a model sees the same thing regardless of which one is configured. |
 | `providers/OpenAIProvider.ts` | A real, OpenAI-backed `AIProvider` - structured JSON output, injected API key and HTTP transport. See "Security boundary". |
-| `providers/verify.ts` | Node-runnable unit verification for `OpenAIProvider`, entirely against a mocked transport. |
+| `providers/GeminiProvider.ts` | A real, Gemini-backed `AIProvider` - same schema/prompt as OpenAIProvider (via `promptSchema.ts`), adapted to Gemini's `generateContent` request/response shape and `responseSchema`. See "Security boundary". |
+| `providers/verify.ts` | Node-runnable unit verification for `OpenAIProvider`, `GeminiProvider`, and `BackendAIProvider`, entirely against mocked transports. |
 | `AICommandPipeline.ts` | Orchestrates one instruction end-to-end: validate input → call provider → validate output → execute via `CommandExecutor`. |
 | `verify.ts` | Node-runnable unit verification for `MockAIProvider`/`AICommandPipeline`/`buildAIProjectSnapshot()` (`npm run verify` includes this and `providers/verify.ts`). |
 | `geometry/analyzeConstructionGeometry.ts` | `analyzeConstructionGeometry()` - pure, deterministic bounding boxes and pairwise spatial facts derived from an `AIProjectSnapshot`. The only geometry calculation - see "Construction geometry analysis". |
@@ -150,13 +157,19 @@ AIPipelineResult { success, outcomes[], errors[] }
 - **Provider independence.** `AIProvider` is a plain interface
   (`interpret(request): AIProviderResponse | Promise<AIProviderResponse>`).
   `AICommandPipeline` only ever depends on that interface, never on
-  `MockAIProvider`/`OpenAIProvider`/any specific implementation -
-  `OpenAIProvider` was added with zero changes to `AICommandPipeline`'s
-  validation logic, `CommandExecutor`, or any store (the only pipeline
-  change was making `run()` return a `Promise`, needed because a real
-  network call can't resolve synchronously - see "Sync or async,
-  provider's choice" below). A future Gemini/Claude-backed provider
-  needs only a new class implementing `AIProvider`.
+  `MockAIProvider`/`OpenAIProvider`/`GeminiProvider`/any specific
+  implementation - `OpenAIProvider` was added with zero changes to
+  `AICommandPipeline`'s validation logic, `CommandExecutor`, or any store
+  (the only pipeline change was making `run()` return a `Promise`, needed
+  because a real network call can't resolve synchronously - see "Sync or
+  async, provider's choice" below), and `GeminiProvider` proved the same
+  again: it needed zero changes anywhere outside `providers/` either.
+  `OpenAIProvider` and `GeminiProvider` also don't duplicate "what to ask
+  a model for" between themselves - both import the same command schema,
+  system prompt, and context projection from `providers/promptSchema.ts`,
+  and each adapts only its own wire format (see that file's own header).
+  A future Claude-backed provider needs only a new class implementing
+  `AIProvider`, most likely reusing `promptSchema.ts` the same way.
 - **No direct store or scene access.** Neither `AIProvider` nor
   `AICommandPipeline` imports `WallStore`/`PillarStore`/.../`SceneManager`/
   any Three.js type. A provider only ever sees a read-only
@@ -358,9 +371,20 @@ engine builds the objects.
     It is validated exactly like any other response, and a malformed or
     invalid one fails whole.
 
-## Security boundary - why `OpenAIProvider` is never constructed with a real key today
+## Security boundary - why neither real provider is ever constructed with a real key in browser code
 
-This application is currently a **pure client-side Vite SPA** - `npm run
+> This section predates `backend/` (the AI proxy backend now described in
+> `backend/README.md`), which is exactly the backend this section says a
+> real deployment needs - it exists now, and does construct
+> `OpenAIProvider`/`GeminiProvider` server-side with a real key (see
+> `backend/src/server.ts`, chosen by `AI_PROVIDER`). It is kept here
+> unchanged because the reasoning below (why an API key can never safely
+> reach browser-shipped code) is still exactly why that backend exists,
+> and applies identically to `GeminiProvider` - nothing below is
+> OpenAI-specific reasoning. For the current, live security posture, see
+> `backend/README.md` "Security posture".
+
+This application started as a **pure client-side Vite SPA** - `npm run
 build` produces static HTML/CSS/JS with no server of any kind (see the
 project root's `package.json`: `dev`/`build`/`preview` are all plain
 Vite commands, nothing else). That matters a great deal for an API key:
@@ -437,21 +461,30 @@ group handle. The end-to-end suite (`e2e/verify.ts`) builds the house
 through the real `ProjectContext` and checks the objects, the geometry,
 one-step undo/redo, rollback of bad plans, and editability.
 
-`providers/verify.ts` covers `OpenAIProvider` specifically: request
-shaping (method, headers, structured `response_format`, the raw
-instruction as the user message), response parsing for a single command
-and for all six object types in one multi-command response, notes
-passthrough, every required error case (missing/blank API key, missing
-transport, a failed request, a non-OK HTTP status, a non-JSON HTTP
-body, a response missing `choices[0].message.content`, non-JSON message
-content, and content missing a `commands` array), and end-to-end
-integration through the real `AICommandPipeline` (including an
-unsupported command from the model being rejected the exact same way
-any other provider's bad output is). **Every check constructs
-`OpenAIProvider` with a hand-rolled mock `fetch` - never the real global
-`fetch`, never a real key - so this file makes zero real network calls;
-several checks additionally assert the mock was called exactly once,
-as positive proof no extra (or real) request happened.**
+`providers/verify.ts` covers `OpenAIProvider`, `GeminiProvider` and
+`BackendAIProvider` each in their own section. `OpenAIProvider`'s
+section: request shaping (method, headers, structured
+`response_format`, the raw instruction as the user message), response
+parsing for a single command and for all six object types in one
+multi-command response, notes passthrough, every required error case
+(missing/blank API key, missing transport, a failed request, a non-OK
+HTTP status, a non-JSON HTTP body, a response missing
+`choices[0].message.content`, non-JSON message content, and content
+missing a `commands` array), and end-to-end integration through the real
+`AICommandPipeline` (including an unsupported command from the model
+being rejected the exact same way any other provider's bad output is).
+`GeminiProvider`'s section mirrors it for Gemini's own error/response
+shape (blocked prompts, a candidate with no text parts, joining several
+text parts before parsing), and additionally proves it sends the exact
+same system prompt and construction state as `OpenAIProvider` (both come
+from the shared `promptSchema.ts`) and that its schema adapter
+(`toGeminiSchema()`) produces the expected `OBJECT`/`ARRAY`/`STRING`
+types, including its fallback for the two dynamic-key fields
+(`dimensions`, `params`) Gemini's schema can't express. **Every check
+constructs its provider with a hand-rolled mock `fetch` - never the real
+global `fetch`, never a real key - so this file makes zero real network
+calls; several checks additionally assert the mock was called exactly
+once, as positive proof no extra (or real) request happened.**
 
 ## Limitations
 
@@ -469,16 +502,19 @@ as positive proof no extra (or real) request happened.**
   its coordinates are. `MockAIProvider` understands four edit phrasings:
   "Make wall-1 5 meters long", "Change wall-1 height to 3.2 meters",
   "Rotate wall-1 by 90 degrees" (or "to"), and "Move wall-1 to X=2".
-- **What the model sees.** `OpenAIProvider` sends the full context: the
+- **What the model sees.** Every real provider sends the full context
+  (built once, identically, by `providers/promptSchema.ts`): the
   snapshot plus its derived `geometry` section (see "Geometry in the AI
   context"), inside the same `currentConstructionState` message. The
   snapshot part covers every
   object's id, type, dimensions, position, rotation, material, color,
   and assembly membership, plus the assemblies, counts, and selected id -
   as a pure-JSON message (`{"currentConstructionState": ...}`) between
-  the system prompt and the instruction. The system prompt tells the
+  the system prompt and the instruction (OpenAI: a separate `messages`
+  entry; Gemini: a separate `parts` entry in the same user turn - see
+  each provider's own file). The system prompt tells the
   model this is the current state and that existing ids may be
-  referenced. The state is a separate user-role message, not part of the
+  referenced. The state is kept separate from the
   system prompt, because it contains text users typed (assembly names,
   materials) that shouldn't carry the app's own authority. It is
   projected field by field, so nothing beyond the snapshot's defined
@@ -499,15 +535,14 @@ as positive proof no extra (or real) request happened.**
   those into the structured response), but is likewise scoped to
   "`<type>.add`" commands only in this milestone - see its system
   prompt in `providers/OpenAIProvider.ts`.
-- **No backend, so no real `OpenAIProvider` usage yet.** See "Security
-  boundary" above - this is the actual blocker on end-to-end real-AI
-  behavior right now, not anything about `OpenAIProvider`'s own code.
-- **No Gemini or Claude provider yet.** Only `MockAIProvider` and
-  `OpenAIProvider` exist. Adding another network-backed provider means
-  writing another `AIProvider` implementation under `providers/` - no
+- **No Claude provider yet.** `MockAIProvider`, `OpenAIProvider`, and
+  `GeminiProvider` exist; `backend/src/config.ts`'s `AI_PROVIDER` selects
+  between the two real ones server-side. Adding a third network-backed
+  provider means writing another `AIProvider` implementation under
+  `providers/` (most likely reusing `providers/promptSchema.ts`) - no
   changes to `AICommandPipeline` or the `AIProvider` interface should be
-  needed, since `OpenAIProvider` already proved the interface supports a
-  real async, network-backed provider.
+  needed, since `OpenAIProvider` and `GeminiProvider` already proved the
+  interface supports a real async, network-backed provider, twice.
 - **No visible AI chat UI.** There is no chat panel, text input, or
   ribbon button wired up to `AICommandPipeline` yet. This module is
   usable today only from code (e.g. a future UI, or the `verify.ts`
