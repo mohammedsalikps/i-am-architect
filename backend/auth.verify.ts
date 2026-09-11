@@ -1182,7 +1182,7 @@ async function run(): Promise<void> {
 
   // --- Hosting configuration (read as text) ---
 
-  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image never includes a .env file", () => {
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; .dockerignore uses plain exclusions only, keeps every copied path and never lets a .env file in", () => {
     const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 
     const render = read("render.yaml");
@@ -1208,8 +1208,25 @@ async function run(): Promise<void> {
     );
     assertTrue(/^ENV NODE_ENV=production\s*$/m.test(dockerfile), "the image runs in production mode");
     assertTrue(/^CMD \["node", "backend\/src\/server\.ts"\]\s*$/m.test(dockerfile), "the image starts the server");
-    const dockerignore = read(".dockerignore");
-    assertTrue(/^\*\*\/\.env\s*$/m.test(dockerignore) && /^\*\*\/\.env\.\*\s*$/m.test(dockerignore), ".dockerignore excludes every .env file");
+    // .dockerignore: plain exclusions only. Render's context filter doesn't
+    // re-enter a directory a catch-all excluded, so "**" + "!src/engine"
+    // left src/engine out of the build.
+    const ignoreRules = read(".dockerignore")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#"));
+    assertDeepEqual(ignoreRules.filter((rule) => rule.startsWith("!")), [], '.dockerignore has no "!" re-include rules');
+    for (const rule of ["**/.env", "**/.env.*", ".git", "**/node_modules", "dist", ".claude", ".vercel", ".fly", ".railway", "**/*.log", "**/verify.ts", "src/engine/testing"]) {
+      assertTrue(ignoreRules.includes(rule), `.dockerignore excludes ${rule}`);
+    }
+    const copied = ["package.json", "backend/package.json", "backend/src", "src/engine"];
+    for (const rule of ignoreRules) {
+      const bare = rule.replace(/\/+$/, "");
+      assertTrue(
+        bare !== "*" && bare !== "**" && !copied.some((path) => path === bare || path.startsWith(`${bare}/`)),
+        `.dockerignore rule "${rule}" keeps every copied path in the build context`
+      );
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

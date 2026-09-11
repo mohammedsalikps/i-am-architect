@@ -1,11 +1,17 @@
-# The backend image needs only these (see Dockerfile). Everything else -
-# including every .env file, node_modules, dist and .git - stays out.
-**
-!package.json
-!backend/package.json
-!backend/src
-!src/engine
-**/verify.ts
-src/engine/testing
+# The image takes only what the Dockerfile COPYs (package.json,
+# backend/package.json, backend/src, src/engine). This file keeps secrets,
+# dependencies, build output, local tool state, logs and test-only code out
+# of the build context. Plain exclusions only - never a "!" re-include:
+# Render's context filter does not re-enter an excluded directory.
 **/.env
 **/.env.*
+.git
+**/node_modules
+dist
+.claude
+.vercel
+.fly
+.railway
+**/*.log
+**/verify.ts
+src/engine/testing
