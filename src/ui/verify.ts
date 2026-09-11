@@ -21,6 +21,8 @@
 // why it exists instead of an @types/node dependency.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+// Explicit .ts extension: Node runs this file directly (see above).
+import { SPLASH_HOLD_MS, SPLASH_REDUCED_HOLD_MS, splashRemainingMs } from "./splash.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -243,6 +245,76 @@ function run(): void {
     // viewport needs its own definite height or it would collapse to 0.
     assertTrue(lastValueOf(rules, ".viewport-area", "height", stackedMedia), "stacked .viewport-area needs a definite height");
     assertEqual(lastValueOf(rules, ".viewport-area", "flex-shrink", stackedMedia), "0", "stacked .viewport-area flex-shrink");
+  });
+
+  // --- The Eavara startup screen (index.html + splash.ts) ---
+
+  const indexHtml = readFileSync(fileURLToPath(new URL("../../index.html", import.meta.url)), "utf8");
+  const mainSource = readFileSync(fileURLToPath(new URL("../main.ts", import.meta.url)), "utf8");
+  const splashStart = indexHtml.indexOf('id="eavara-splash"');
+  const appStart = indexHtml.indexOf('<div id="app">');
+  const splashMarkup = indexHtml.slice(splashStart, appStart);
+  const pageRules = parseCss(indexHtml.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? "");
+  const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
+
+  check("the startup screen is static markup in index.html, before #app - painted on the first frame, before any script", () => {
+    assertTrue(splashStart > 0 && appStart > splashStart, "the #eavara-splash markup must come before <div id=\"app\">");
+    const scripts = [...indexHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)];
+    assertTrue(scripts.length > 0, "index.html loads the app");
+    for (const [, attributes, body] of scripts) {
+      assertTrue(/\bsrc=/.test(attributes) && body.trim() === "", "no inline script - the production Content-Security-Policy allows none");
+    }
+  });
+
+  check("it reads EAVARA - THE SCHOOL OF ARCHITECTURE, never the old \"Eavara Estates\"", () => {
+    assertTrue(splashMarkup.includes('aria-label="EAVARA"'), "the wordmark is labelled EAVARA");
+    assertTrue(splashMarkup.includes("THE SCHOOL OF ARCHITECTURE"), "the tagline");
+    assertTrue(!/estates/i.test(indexHtml), "\"Estates\" must not appear anywhere in index.html");
+  });
+
+  check("it is decorative and can't take focus: aria-hidden, nothing focusable, SVGs not focusable", () => {
+    assertTrue(/id="eavara-splash"[^>]*aria-hidden="true"/.test(splashMarkup), "#eavara-splash is aria-hidden");
+    assertTrue(!/<(a|button|input|select|textarea)\b|tabindex=/i.test(splashMarkup), "no focusable element inside the startup screen");
+    const svgs = splashMarkup.match(/<svg\b[^>]*>/g) ?? [];
+    assertTrue(svgs.length > 0 && svgs.every((svg) => svg.includes('focusable="false"')), "every SVG is focusable=\"false\"");
+  });
+
+  check("it sits above every dialog, never makes the page scroll, and hides itself if the app never starts", () => {
+    assertTrue(Number(lastValueOf(pageRules, ".eavara-splash", "z-index")) > 110, "above the auth dialog (z-index 110)");
+    assertEqual(lastValueOf(pageRules, ".eavara-splash", "position"), "fixed", ".eavara-splash position");
+    assertEqual(lastValueOf(pageRules, ".eavara-splash", "overflow"), "hidden", ".eavara-splash overflow");
+    const failsafe = lastValueOf(pageRules, ".eavara-splash", "animation") ?? "";
+    assertTrue(failsafe.includes("eavara-failsafe") && failsafe.includes("8s") && failsafe.includes("forwards"), `a CSS failsafe, got "${failsafe}"`);
+  });
+
+  check("prefers-reduced-motion turns every startup animation off", () => {
+    const animated = [
+      ".eavara-splash__guides",
+      ".eavara-splash__guides line",
+      ".eavara-splash__build",
+      ".eavara-splash__ridge",
+      ".eavara-splash__pine",
+      ".eavara-splash__rule",
+      ".eavara-splash__tagline-text"
+    ];
+    for (const selector of animated) {
+      assertTrue(lastValueOf(pageRules, selector, "animation") !== undefined, `${selector} is animated normally`);
+      assertEqual(lastValueOf(pageRules, selector, "animation", REDUCED_MOTION), "none", `${selector} with reduced motion`);
+    }
+    assertEqual(lastValueOf(pageRules, ".eavara-splash", "transition", REDUCED_MOTION), "none", "no fade with reduced motion");
+  });
+
+  check("the app releases the startup screen only once the workspace is running, and the hold counts from page load", () => {
+    assertTrue(mainSource.includes('import { releaseSplash } from "./ui/splash";'), "main.ts imports releaseSplash");
+    const release = mainSource.indexOf("releaseSplash();");
+    assertTrue(release > mainSource.indexOf("sceneManager.current.start();"), "released after the 3D workspace starts");
+    assertTrue(SPLASH_HOLD_MS >= 1500 && SPLASH_HOLD_MS <= 2000, `the animated screen stays 1.5-2 s, got ${SPLASH_HOLD_MS} ms`);
+    assertTrue(SPLASH_REDUCED_HOLD_MS <= 500, "the reduced-motion screen is brief");
+    assertEqual(splashRemainingMs(0, false), SPLASH_HOLD_MS, "a fresh page waits the whole hold");
+    assertEqual(splashRemainingMs(700, false), SPLASH_HOLD_MS - 700, "time already spent loading counts");
+    assertEqual(splashRemainingMs(5000, false), 0, "a slow start never adds waiting");
+    assertEqual(splashRemainingMs(0, true), SPLASH_REDUCED_HOLD_MS, "reduced motion: the short hold");
+    assertEqual(splashRemainingMs(-10, false), SPLASH_HOLD_MS, "never more than the hold");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

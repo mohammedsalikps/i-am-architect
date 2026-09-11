@@ -4,6 +4,7 @@ import { createAppShell } from "./ui/layout";
 import { createProjectChooser } from "./ui/projectChooser";
 import type { ProjectDeleteResult, ProjectOpenResult } from "./ui/projectChooser";
 import { createAuthDialog } from "./ui/authDialog";
+import { releaseSplash } from "./ui/splash";
 import type { RibbonActions } from "./ui/ribbonTabs";
 import { clearProject, createProjectContext } from "./engine/project/ProjectContext";
 import { firstFreeSlot } from "./engine/project/placement";
@@ -604,3 +605,7 @@ sceneManager.current.start();
 
 // Restore a stored session, if any, and confirm it with the backend.
 void auth.start();
+
+// The workspace is running: the Eavara startup screen (index.html) can
+// hand over to it - see ui/splash.ts.
+releaseSplash();
