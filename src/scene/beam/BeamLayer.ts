@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { BeamData } from "../../engine/beam/types";
 import type { BeamStore } from "../../engine/beam/BeamStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
+import type { VisibilityStore } from "../visibility/VisibilityStore";
 import { buildBeamMesh, applyBeamDataToMesh } from "./buildBeamMesh";
 import { buildSelectionOutline, refreshSelectionOutline } from "../selectionOutline";
 
@@ -28,10 +29,12 @@ export class BeamLayer {
   constructor(
     private readonly scene: THREE.Scene,
     private readonly beamStore: BeamStore,
-    private readonly selectionStore: SelectionStore
+    private readonly selectionStore: SelectionStore,
+    private readonly visibilityStore: VisibilityStore
   ) {
     this.beamStore.subscribe((beams) => this.syncBeams(beams));
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
+    this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
   /** Current beam meshes, for the shared SelectionRaycaster to raycast against. */
@@ -68,11 +71,19 @@ export class BeamLayer {
     }
 
     this.syncSelection(this.selectionStore.get());
+    this.syncVisibility(this.visibilityStore.getHidden());
   }
 
   private syncSelection(selectedId: string | null): void {
     for (const [id, entry] of this.entries) {
       entry.outline.visible = id === selectedId;
+    }
+  }
+
+  /** Hiding a beam never deletes it - only its mesh's own .visible flag changes; the store and undo history are untouched. */
+  private syncVisibility(hidden: ReadonlySet<string>): void {
+    for (const [id, entry] of this.entries) {
+      entry.mesh.visible = !hidden.has(id);
     }
   }
 

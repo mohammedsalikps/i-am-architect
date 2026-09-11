@@ -553,7 +553,8 @@ async function run(): Promise<void> {
       addElement: (kind) => void calls.push(`element:${kind}`),
       addRoom: (preset) => void calls.push(`room:${preset.name}`),
       paintSelected: (color) => void calls.push(`paint:${color}`),
-      canPaintSelection: () => paintable
+      canPaintSelection: () => paintable,
+      isPlacementActive: () => false
     };
     const tabs = buildRibbonTabs(actions);
     assertSameJson(

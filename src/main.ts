@@ -18,11 +18,13 @@ import { BackendAIProvider } from "./engine/ai/providers/BackendAIProvider";
 import type { BackendFetch } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
 import { getElementKind } from "./engine/elements/catalog";
-import type { ElementCategory } from "./engine/elements/catalog";
+import type { ElementKindDefinition } from "./engine/elements/catalog";
+import type { PlacementTool } from "./scene/placement/PlacementController";
 import { roomPresetOptions } from "./engine/elements/roomPresets";
 import type { CreateElementOptions } from "./engine/elements/createElement";
 import { resolveConstructionObject } from "./engine/objects/resolveConstructionObject";
 import { SnapSettings } from "./engine/snapping/SnapSettings";
+import { VisibilityStore } from "./scene/visibility/VisibilityStore";
 import type { WallData } from "./engine/wall/types";
 import type {
   AddWallCommand,
@@ -166,16 +168,20 @@ const persistence = new ProjectPersistenceController({ repository: projectReposi
 const objectStores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore };
 
 // Each type has a row of default slots; a new object takes the first slot
-// no existing object of that type sits on (see engine/project/placement.ts),
-// so adding after a delete never lands on top of a survivor.
+// no existing object of that type sits on (see engine/project/placement.ts) -
+// used only for the one startup wall below now; every ribbon/palette tool
+// places through PlacementController (pick-and-place) instead - see
+// armPlacement() and ribbonActions.
 const positionsOf = (objects: readonly { position: { x: number; z: number } }[]) => objects.map((object) => object.position);
 
-// Successive walls are spaced along Z so "Add Wall" produces a visibly
-// separate wall each time instead of stacking exactly on top of another.
+// The one startup wall (below) is spaced along Z the same way manual
+// placement used to space every add, so a fresh project still starts with
+// a wall visible on the grid, not stacked on the origin.
 const WALL_Z_START = -4;
 const WALL_Z_SPACING = 2.5;
 
-function addWall(): void {
+/** The one wall present when a project starts - not a ribbon action, so it does not go through the placement/pick-and-place path below. */
+function addStartupWall(): void {
   const index = firstFreeSlot(positionsOf(wallStore.getAll()), (slot) => ({ x: 0, z: WALL_Z_START + slot * WALL_Z_SPACING }));
   const command: AddWallCommand = {
     type: "wall.add",
@@ -184,50 +190,51 @@ function addWall(): void {
   commandExecutor.execute(command);
 }
 
-// Successive pillars are spaced along X, on the opposite side of the
-// grid from where walls stack along Z, so a freshly-added pillar is
-// never buried inside a wall.
-const PILLAR_X_START = 4;
-const PILLAR_X_SPACING = 1.5;
+/**
+ * Arms the viewport for pick-and-place: the next click places the real
+ * construction object there, through the exact same CommandExecutor path
+ * every other creation path (AI included) already uses - only the
+ * position source changes, from a computed slot to the clicked ground
+ * point. See scene/placement/PlacementController.ts.
+ */
+function armPlacement(id: string, label: string, ghostSize: PlacementTool["ghostSize"], buildCommand: (point: { x: number; z: number }) => unknown): void {
+  sceneManager.current?.placementController.arm({
+    id,
+    label,
+    ghostSize,
+    place: (point) => commandExecutor.execute(buildCommand(point))
+  });
+}
+
+// Ghost-preview footprints for the six original types, matching each
+// factory's own DEFAULTS (createWall.ts/createPillar.ts/.../createWindow.ts) -
+// the ghost is a visual preview only; the real object is still built by
+// the real factory once placed, so these numbers drifting from a
+// factory's own default would only make the PREVIEW briefly inaccurate,
+// never the placed object itself.
+const ORIGINAL_GHOST_SIZES: Record<"wall" | "pillar" | "beam" | "slab" | "door" | "window", PlacementTool["ghostSize"]> = {
+  wall: { x: 4, y: 2.7, z: 0.2 },
+  pillar: { x: 0.4, y: 2.7, z: 0.4 },
+  beam: { x: 3, y: 0.4, z: 0.3 },
+  slab: { x: 4, y: 0.2, z: 4 },
+  door: { x: 0.9, y: 2.1, z: 0.05 },
+  window: { x: 1.2, y: 1.2, z: 0.05 }
+};
+
+function addWall(): void {
+  armPlacement("wall", "Wall", ORIGINAL_GHOST_SIZES.wall, (point) => ({ type: "wall.add", wall: { position: { x: point.x, z: point.z } } }) satisfies AddWallCommand);
+}
 
 function addPillar(): void {
-  const index = firstFreeSlot(positionsOf(pillarStore.getAll()), (slot) => ({ x: PILLAR_X_START + slot * PILLAR_X_SPACING, z: 0 }));
-  const command: AddPillarCommand = {
-    type: "pillar.add",
-    pillar: { position: { x: PILLAR_X_START + index * PILLAR_X_SPACING } }
-  };
-  commandExecutor.execute(command);
+  armPlacement("pillar", "Pillar", ORIGINAL_GHOST_SIZES.pillar, (point) => ({ type: "pillar.add", pillar: { position: { x: point.x, z: point.z } } }) satisfies AddPillarCommand);
 }
-
-// Successive beams are spaced along Z on the positive side, away from
-// both the wall stack (negative Z) and the pillar stack (positive X),
-// so a freshly-added beam is never buried inside either.
-const BEAM_Z_START = 4;
-const BEAM_Z_SPACING = 1.5;
 
 function addBeam(): void {
-  const index = firstFreeSlot(positionsOf(beamStore.getAll()), (slot) => ({ x: 0, z: BEAM_Z_START + slot * BEAM_Z_SPACING }));
-  const command: AddBeamCommand = {
-    type: "beam.add",
-    beam: { position: { z: BEAM_Z_START + index * BEAM_Z_SPACING } }
-  };
-  commandExecutor.execute(command);
+  armPlacement("beam", "Beam", ORIGINAL_GHOST_SIZES.beam, (point) => ({ type: "beam.add", beam: { position: { x: point.x, z: point.z } } }) satisfies AddBeamCommand);
 }
 
-// Successive slabs are spaced along X on the negative side, away from
-// the wall stack (negative Z), the pillar stack (positive X), and the
-// beam stack (positive Z), so a freshly-added slab is never buried
-// under any of them.
-const SLAB_X_START = -4;
-const SLAB_X_SPACING = 5;
-
 function addSlab(): void {
-  const index = firstFreeSlot(positionsOf(slabStore.getAll()), (slot) => ({ x: SLAB_X_START - slot * SLAB_X_SPACING, z: 0 }));
-  const command: AddSlabCommand = {
-    type: "slab.add",
-    slab: { position: { x: SLAB_X_START - index * SLAB_X_SPACING } }
-  };
-  commandExecutor.execute(command);
+  armPlacement("slab", "Slab", ORIGINAL_GHOST_SIZES.slab, (point) => ({ type: "slab.add", slab: { position: { x: point.x, z: point.z } } }) satisfies AddSlabCommand);
 }
 
 /** The selected object, when it's a wall - doors and windows are then placed in it. */
@@ -247,94 +254,51 @@ function addHostedOpening(type: "door" | "window", wall: WallData): void {
   commandExecutor.execute(type === "door" ? { type: "door.add", door: { hostId: wall.id } } : { type: "window.add", window: { hostId: wall.id } });
 }
 
-// Successive free-standing doors are spaced along Z on the negative side,
-// further out than the wall stack, so a freshly-added door is never
-// buried inside a wall.
-const DOOR_Z_START = -8;
-const DOOR_Z_SPACING = 1.5;
-
-/** With a wall selected, the door goes in that wall; otherwise it's placed free-standing, as before. */
+/**
+ * With a wall selected, the door goes in that wall INSTANTLY, exactly as
+ * before (unchanged - preserved exactly, not routed through placement,
+ * since the wall already fully determines where it goes). Without a wall
+ * selected, arms pick-and-place for a free-standing door.
+ */
 function addDoor(): void {
   const wall = selectedWall();
   if (wall) {
     addHostedOpening("door", wall);
     return;
   }
-  const index = firstFreeSlot(positionsOf(doorStore.getAll()), (slot) => ({ x: 0, z: DOOR_Z_START - slot * DOOR_Z_SPACING }));
-  const command: AddDoorCommand = {
-    type: "door.add",
-    door: { position: { z: DOOR_Z_START - index * DOOR_Z_SPACING } }
-  };
-  commandExecutor.execute(command);
+  armPlacement("door", "Door", ORIGINAL_GHOST_SIZES.door, (point) => ({ type: "door.add", door: { position: { x: point.x, z: point.z } } }) satisfies AddDoorCommand);
 }
 
-// Successive free-standing windows are spaced along X on the positive
-// side, further out than the pillar stack, so a freshly-added window is
-// never buried inside a pillar.
-const WINDOW_X_START = 8;
-const WINDOW_X_SPACING = 1.5;
-
-/** With a wall selected, the window goes in that wall at sill height; otherwise it's placed free-standing, as before. */
+/** With a wall selected, the window goes in that wall at sill height, unchanged; otherwise arms pick-and-place for a free-standing window. */
 function addWindow(): void {
   const wall = selectedWall();
   if (wall) {
     addHostedOpening("window", wall);
     return;
   }
-  const index = firstFreeSlot(positionsOf(windowStore.getAll()), (slot) => ({ x: WINDOW_X_START + slot * WINDOW_X_SPACING, z: 0 }));
-  const command: AddWindowCommand = {
-    type: "window.add",
-    window: { position: { x: WINDOW_X_START + index * WINDOW_X_SPACING } }
-  };
-  commandExecutor.execute(command);
+  armPlacement("window", "Window", ORIGINAL_GHOST_SIZES.window, (point) => ({ type: "window.add", window: { position: { x: point.x, z: point.z } } }) satisfies AddWindowCommand);
 }
-
-/** House-scale kinds start centered on the origin - under, over, or around the house. */
-const HOUSE_SCALE_KINDS: ReadonlySet<string> = new Set(["foundation", "roof", "landscape"]);
 
 /**
- * Every other element starts in its category's staging row, clear of the
- * six original types' rows (which run along the X and Z axes through the
- * origin) - move it into place from there. Spacing fits the category's
- * largest default footprint.
+ * A catalog kind's ghost footprint, read from the SAME catalog data the
+ * kind's real dimensions come from (ElementKindDefinition.dimensions +
+ * .axes) - never a second, hand-maintained size list.
  */
-const ELEMENT_ROW_X_START = 3;
-const ELEMENT_ROWS: Readonly<Record<ElementCategory, { z: number; spacing: number }>> = {
-  structure: { z: -16, spacing: 4.5 },
-  openings: { z: -16, spacing: 4.5 },
-  rooms: { z: 11, spacing: 5.5 },
-  finish: { z: 16, spacing: 5 },
-  plumbing: { z: -11, spacing: 3.5 },
-  electrical: { z: -13, spacing: 3.5 },
-  interior: { z: 20, spacing: 3 },
-  exterior: { z: 24, spacing: 11 }
-};
-
-function elementSlot(kind: string): { x: number; z: number } {
-  const definition = getElementKind(kind);
-  if (!definition) {
-    return { x: 0, z: 0 };
-  }
-  if (HOUSE_SCALE_KINDS.has(kind)) {
-    const step = definition.dimensions[0].default + 2;
-    const occupied = positionsOf(elementStore.getAll().filter((element) => element.kind === kind));
-    const index = firstFreeSlot(occupied, (slot) => ({ x: slot * step, z: 0 }));
-    return { x: index * step, z: 0 };
-  }
-  const row = ELEMENT_ROWS[definition.category];
-  const occupied = positionsOf(
-    elementStore
-      .getAll()
-      .filter((element) => !HOUSE_SCALE_KINDS.has(element.kind) && getElementKind(element.kind)?.category === definition.category)
-  );
-  const index = firstFreeSlot(occupied, (slot) => ({ x: ELEMENT_ROW_X_START + slot * row.spacing, z: row.z }));
-  return { x: ELEMENT_ROW_X_START + index * row.spacing, z: row.z };
+function elementGhostSize(definition: ElementKindDefinition): PlacementTool["ghostSize"] {
+  const byKey = new Map(definition.dimensions.map((spec) => [spec.key, spec.default]));
+  return { x: byKey.get(definition.axes.x) ?? 0.5, y: byKey.get(definition.axes.y) ?? 0.5, z: byKey.get(definition.axes.z) ?? 0.5 };
 }
 
-/** Adds one element of a catalog kind at its next free slot - an element.add command, so it validates, and undoes, like any other add. */
+/** Arms pick-and-place for one catalog element kind - an element.add command once placed, so it validates and undoes like any other add. */
 function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}): void {
-  const slot = elementSlot(kind);
-  commandExecutor.execute({ type: "element.add", element: { ...options, kind, position: { x: slot.x, z: slot.z } } });
+  const definition = getElementKind(kind);
+  if (!definition) {
+    return;
+  }
+  armPlacement(kind, definition.label, elementGhostSize(definition), (point) => ({
+    type: "element.add",
+    element: { ...options, kind, position: { x: point.x, z: point.z } }
+  }));
 }
 
 /** Whether the selection is an object Paint can repaint - any construction object. */
@@ -356,6 +320,11 @@ function paintSelected(color: string): void {
   commandExecutor.execute({ type: "update_object", objectId: selectedId, changes: { material: "paint", color } });
 }
 
+/** Whether ribbon/palette tool `id` is the one currently armed for pick-and-place - drives the ribbon's "active" button state. */
+function isPlacementActive(id: string): boolean {
+  return sceneManager.current?.placementController.activeToolId() === id;
+}
+
 const ribbonActions: RibbonActions = {
   addWall,
   addPillar,
@@ -369,10 +338,11 @@ const ribbonActions: RibbonActions = {
     addElement(kind, options);
   },
   paintSelected,
-  canPaintSelection
+  canPaintSelection,
+  isPlacementActive
 };
 
-addWall(); // default wall, visible on the grid at startup
+addStartupWall(); // default wall, visible on the grid at startup
 history.clearHistory(); // the startup wall isn't a user action - start with a clean undo/redo state
 
 /** True when discarding the model would lose something: any object or assembly. */
@@ -553,6 +523,12 @@ const sceneManager = { current: null as SceneManager | null };
 // Whether drags snap - a UI preference (the viewport's Snap toggle), not part of the model.
 const snapSettings = new SnapSettings();
 
+// Which objects are hidden right now - a viewport/session concern, never
+// part of the saved project document (see VisibilityStore's own docs).
+// Constructed here, once, so the left sidebar's visibility controls and
+// SceneManager's layers share exactly one instance.
+const visibilityStore = new VisibilityStore();
+
 const shell = createAppShell({
   projectMeta,
   persistence,
@@ -560,6 +536,15 @@ const shell = createAppShell({
   onSignIn: () => void authDialog.open(),
   onSignOut: () => void signOut(),
   onViewChange: (preset) => sceneManager.current?.setView(preset),
+  onFitToScene: () => sceneManager.current?.fitToScene(),
+  onFocusSelected: () => {
+    const selectedId = selectionStore.get();
+    if (selectedId) {
+      sceneManager.current?.focusOn([selectedId]);
+    }
+  },
+  onFocusObjects: (objectIds) => sceneManager.current?.focusOn(objectIds),
+  visibilityStore,
   ribbonActions,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
@@ -599,9 +584,18 @@ sceneManager.current = new SceneManager(
   selectionStore,
   commandExecutor,
   history,
-  snapSettings
+  snapSettings,
+  visibilityStore
 );
 sceneManager.current.start();
+
+// The ribbon shows which tool is armed (RibbonTool.isActive), and the
+// status bar shows the plain-text placement state - both re-derived from
+// PlacementController, not duplicated state of their own.
+sceneManager.current.placementController.subscribe((tool) => {
+  shell.refreshRibbon();
+  shell.setPlacementStatus(tool ? `Placing: ${tool.label} — click in the viewport to place, Esc to cancel` : null);
+});
 
 // Restore a stored session, if any, and confirm it with the backend.
 void auth.start();

@@ -36,9 +36,17 @@ export type TopBarOptions = {
  * clickable no-ops.
  */
 export function createTopBar(options: TopBarOptions): HTMLElement {
+  // The product identity (i am Architect) plus a small, understated Eavara
+  // lockup - the school of architecture this product is associated with.
+  // Not a splash screen: two quiet text lines, no logo graphic, so it
+  // reads as attribution/identity rather than competing with the
+  // workspace for attention - see UI milestone notes.
   const branding = el("div", { className: "app-header__brand" }, [
     el("span", { className: "app-header__brand-mark", text: "iA" }),
-    el("span", { className: "app-header__brand-name", text: "iArchitect" })
+    el("div", { className: "app-header__brand-text" }, [
+      el("span", { className: "app-header__brand-name", text: "i am Architect" }),
+      el("span", { className: "app-header__brand-eavara", text: "EAVARA · THE SCHOOL OF ARCHITECTURE" })
+    ])
   ]);
 
   const undoButton = el("button", {

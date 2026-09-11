@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { DoorData } from "../../engine/door/types";
 import type { DoorStore } from "../../engine/door/DoorStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
+import type { VisibilityStore } from "../visibility/VisibilityStore";
 import { buildDoorMesh, applyDoorDataToMesh } from "./buildDoorMesh";
 import { buildSelectionOutline, refreshSelectionOutline } from "../selectionOutline";
 
@@ -29,10 +30,12 @@ export class DoorLayer {
   constructor(
     private readonly scene: THREE.Scene,
     private readonly doorStore: DoorStore,
-    private readonly selectionStore: SelectionStore
+    private readonly selectionStore: SelectionStore,
+    private readonly visibilityStore: VisibilityStore
   ) {
     this.doorStore.subscribe((doors) => this.syncDoors(doors));
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
+    this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
   /** Current door meshes, for the shared SelectionRaycaster to raycast against. */
@@ -69,11 +72,19 @@ export class DoorLayer {
     }
 
     this.syncSelection(this.selectionStore.get());
+    this.syncVisibility(this.visibilityStore.getHidden());
   }
 
   private syncSelection(selectedId: string | null): void {
     for (const [id, entry] of this.entries) {
       entry.outline.visible = id === selectedId;
+    }
+  }
+
+  /** Hiding a door never deletes it - only its mesh's own .visible flag changes; the store and undo history are untouched. */
+  private syncVisibility(hidden: ReadonlySet<string>): void {
+    for (const [id, entry] of this.entries) {
+      entry.mesh.visible = !hidden.has(id);
     }
   }
 

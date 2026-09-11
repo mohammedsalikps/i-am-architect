@@ -2,6 +2,7 @@ import * as THREE from "three";
 import type { PillarData } from "../../engine/pillar/types";
 import type { PillarStore } from "../../engine/pillar/PillarStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
+import type { VisibilityStore } from "../visibility/VisibilityStore";
 import { buildPillarMesh, applyPillarDataToMesh } from "./buildPillarMesh";
 import { buildSelectionOutline, refreshSelectionOutline } from "../selectionOutline";
 
@@ -27,10 +28,12 @@ export class PillarLayer {
   constructor(
     private readonly scene: THREE.Scene,
     private readonly pillarStore: PillarStore,
-    private readonly selectionStore: SelectionStore
+    private readonly selectionStore: SelectionStore,
+    private readonly visibilityStore: VisibilityStore
   ) {
     this.pillarStore.subscribe((pillars) => this.syncPillars(pillars));
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
+    this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
   /** Current pillar meshes, for the shared SelectionRaycaster to raycast against. */
@@ -67,11 +70,19 @@ export class PillarLayer {
     }
 
     this.syncSelection(this.selectionStore.get());
+    this.syncVisibility(this.visibilityStore.getHidden());
   }
 
   private syncSelection(selectedId: string | null): void {
     for (const [id, entry] of this.entries) {
       entry.outline.visible = id === selectedId;
+    }
+  }
+
+  /** Hiding a pillar never deletes it - only its mesh's own .visible flag changes; the store and undo history are untouched. */
+  private syncVisibility(hidden: ReadonlySet<string>): void {
+    for (const [id, entry] of this.entries) {
+      entry.mesh.visible = !hidden.has(id);
     }
   }
 

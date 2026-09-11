@@ -30,6 +30,9 @@ export function createConstructionRibbon(tabs: readonly RibbonTab[], initialTabI
       const title = enabled || !tool.disabledTitle ? tool.title : tool.disabledTitle;
       button.title = title;
       button.setAttribute("aria-label", title);
+      const active = tool.isActive ? tool.isActive() : false;
+      button.classList.toggle("app-ribbon__item--active", active);
+      button.setAttribute("aria-pressed", String(active));
     }
   };
 

@@ -24,6 +24,7 @@ import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { AuthController } from "../engine/auth/AuthController";
+import type { VisibilityStore } from "../scene/visibility/VisibilityStore";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
@@ -37,6 +38,14 @@ export type AppShellOptions = {
   /** Signs out - see main.ts's signOut. */
   onSignOut: () => void;
   onViewChange: (preset: ViewPreset) => void;
+  /** Frames every visible object ("Fit House") - see SceneManager.fitToScene(). */
+  onFitToScene: () => void;
+  /** Frames the selected object ("Focus Selected") - see SceneManager.focusOn(). */
+  onFocusSelected: () => void;
+  /** Frames a specific set of object ids ("Focus Room", from the left sidebar's hierarchy) - see SceneManager.focusOn(). */
+  onFocusObjects: (objectIds: string[]) => void;
+  /** Which objects are hidden right now - shared with SceneManager's layers. See VisibilityStore's own docs. */
+  visibilityStore: VisibilityStore;
   /** What every ribbon tool does - see ribbonTabs.ts and main.ts. */
   ribbonActions: RibbonActions;
   onDuplicateSelected: () => void;
@@ -86,6 +95,10 @@ export type AppShell = {
   root: HTMLElement;
   /** Empty container the 3D renderer should be mounted into. */
   viewportContainer: HTMLElement;
+  /** Re-checks every ribbon tool's enabled/active state - call after anything that could change one (e.g. PlacementController arming/disarming). */
+  refreshRibbon: () => void;
+  /** Shows/clears the status bar's pick-and-place indicator - see PlacementController. */
+  setPlacementStatus: (text: string | null) => void;
 };
 
 /**
@@ -143,7 +156,9 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.slabStore,
     options.doorStore,
     options.windowStore,
-    options.elementStore
+    options.elementStore,
+    options.visibilityStore,
+    options.onFocusObjects
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
@@ -163,7 +178,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // Perspective/Top/Front/Side used to live in the header - they're
   // purely a viewport concern, so they're now an overlay on the
   // viewport itself instead of competing for header space.
-  const viewControls = createViewControls(options.onViewChange);
+  const viewControls = createViewControls(options.onViewChange, options.onFitToScene, options.onFocusSelected);
   const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings)]);
   const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay]);
 
@@ -179,8 +194,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
     ribbon,
     body,
     commandBar,
-    statusBar
+    statusBar.element
   ]);
 
-  return { root, viewportContainer };
+  return { root, viewportContainer, refreshRibbon, setPlacementStatus: statusBar.setPlacementStatus };
 }

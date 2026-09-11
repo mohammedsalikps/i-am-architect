@@ -16,6 +16,9 @@ import { ObjectManipulator, createStoreObjectReader } from "../engine/manipulati
 import type { ManipulationHistory } from "../engine/manipulation/ObjectManipulator";
 import { createStoreSnapper } from "../engine/snapping/storeSnapper";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
+import type { VisibilityStore } from "./visibility/VisibilityStore";
+import { PlacementController } from "./placement/PlacementController";
+import { computeFitCamera } from "./camera/fitCamera";
 import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -53,6 +56,9 @@ export class SceneManager {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly controls: OrbitControls;
   private readonly container: HTMLElement;
+  /** The pick-and-place interaction - armed by ribbon/palette tools (main.ts), placing through the same CommandExecutor every other path uses. */
+  readonly placementController: PlacementController;
+  private readonly getAllMeshes: () => THREE.Object3D[];
 
   constructor(
     container: HTMLElement,
@@ -68,7 +74,9 @@ export class SceneManager {
     commandExecutor: { execute(input: unknown): CommandResult },
     history: ManipulationHistory,
     /** Whether drags snap - see engine/snapping/. */
-    snapSettings: SnapSettings
+    snapSettings: SnapSettings,
+    /** Which construction objects are hidden right now - constructed once in main.ts (shared with the left sidebar's visibility controls), not owned by this class. See VisibilityStore's own docs. */
+    visibilityStore: VisibilityStore
   ) {
     this.container = container;
 
@@ -96,16 +104,25 @@ export class SceneManager {
     addGround(this.scene);
 
     // Not stored on `this`: every *Layer stays alive via the
-    // subscriptions it registers with its store/selectionStore, which
-    // outlive this constructor.
+    // subscriptions it registers with its store/selectionStore/
+    // visibilityStore, which outlive this constructor.
     // Walls also follow the door and window stores: they're drawn with a hole for each hosted opening.
-    const wallLayer = new WallLayer(this.scene, wallStore, doorStore, windowStore, selectionStore);
-    const pillarLayer = new PillarLayer(this.scene, pillarStore, selectionStore);
-    const beamLayer = new BeamLayer(this.scene, beamStore, selectionStore);
-    const slabLayer = new SlabLayer(this.scene, slabStore, selectionStore);
-    const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore);
-    const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore);
-    const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore);
+    const wallLayer = new WallLayer(this.scene, wallStore, doorStore, windowStore, selectionStore, visibilityStore);
+    const pillarLayer = new PillarLayer(this.scene, pillarStore, selectionStore, visibilityStore);
+    const beamLayer = new BeamLayer(this.scene, beamStore, selectionStore, visibilityStore);
+    const slabLayer = new SlabLayer(this.scene, slabStore, selectionStore, visibilityStore);
+    const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore, visibilityStore);
+    const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore, visibilityStore);
+    const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore, visibilityStore);
+    this.getAllMeshes = () => [
+      ...wallLayer.getMeshes(),
+      ...pillarLayer.getMeshes(),
+      ...beamLayer.getMeshes(),
+      ...slabLayer.getMeshes(),
+      ...doorLayer.getMeshes(),
+      ...windowLayer.getMeshes(),
+      ...elementLayer.getMeshes()
+    ];
 
     // One shared raycaster combines every layer's meshes into a single
     // click handler - see SelectionRaycaster.ts for why independent
@@ -156,6 +173,14 @@ export class SceneManager {
       })
     });
 
+    // Pick-and-place: armed by ribbon/palette tools (main.ts). Constructed
+    // last so its capture-phase listeners on `container` register after
+    // ManipulationController's - see PlacementController's own docs for
+    // why the two never contend for the same click regardless of order
+    // (arm() always deselects first).
+    this.placementController = new PlacementController({ container, canvas: this.renderer.domElement, camera: this.camera, scene: this.scene });
+    this.placementController.setDeselectCallback(() => selectionStore.clear());
+
     window.addEventListener("resize", this.handleResize);
   }
 
@@ -174,6 +199,61 @@ export class SceneManager {
     this.camera.position.set(x, y, z);
     this.controls.target.set(0, 0, 0);
     this.camera.lookAt(0, 0, 0);
+    this.controls.update();
+  }
+
+  /**
+   * Frames every VISIBLE construction object ("Fit House"). Objects
+   * hidden through visibilityStore don't count toward the frame - fitting
+   * with something hidden frames only what's actually shown. A no-op
+   * when nothing is visible (an empty project, or everything hidden) -
+   * the camera is left exactly where it was rather than jumping
+   * somewhere arbitrary.
+   */
+  fitToScene(): void {
+    this.applyFit(this.boundingBoxOf(null));
+  }
+
+  /**
+   * Frames exactly the given object ids ("Focus Selected"/"Focus Room"),
+   * still skipping any that are currently hidden. A no-op if none of the
+   * given ids currently has a visible mesh.
+   */
+  focusOn(objectIds: readonly string[]): void {
+    if (objectIds.length === 0) {
+      return;
+    }
+    this.applyFit(this.boundingBoxOf(new Set(objectIds)));
+  }
+
+  /** The union bounding box of every visible mesh, optionally restricted to `ids`; null when nothing qualifies. */
+  private boundingBoxOf(ids: ReadonlySet<string> | null): THREE.Box3 | null {
+    const box = new THREE.Box3();
+    let found = false;
+    for (const mesh of this.getAllMeshes()) {
+      if (!mesh.visible) {
+        continue;
+      }
+      const objectId = mesh.userData.objectId as string | undefined;
+      if (ids && (!objectId || !ids.has(objectId))) {
+        continue;
+      }
+      box.expandByObject(mesh);
+      found = true;
+    }
+    return found ? box : null;
+  }
+
+  /** Keeps the camera's current viewing angle, moving only its distance and look-at target to frame `box`. */
+  private applyFit(box: THREE.Box3 | null): void {
+    if (!box) {
+      return;
+    }
+    const direction = this.camera.position.clone().sub(this.controls.target);
+    const { position, target } = computeFitCamera(box, direction, { fovDegrees: this.camera.fov });
+    this.camera.position.copy(position);
+    this.controls.target.copy(target);
+    this.camera.lookAt(target);
     this.controls.update();
   }
 

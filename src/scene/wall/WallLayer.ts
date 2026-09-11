@@ -4,6 +4,7 @@ import type { WallStore } from "../../engine/wall/WallStore";
 import type { DoorStore } from "../../engine/door/DoorStore";
 import type { WindowStore } from "../../engine/window/WindowStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
+import type { VisibilityStore } from "../visibility/VisibilityStore";
 import { wallOpeningRects } from "../../engine/openings/hostOpening";
 import type { HostPlacement, OpeningSize, WallOpeningRect } from "../../engine/openings/hostOpening";
 import { buildWallMesh, applyWallDataToMesh } from "./buildWallMesh";
@@ -39,13 +40,15 @@ export class WallLayer {
     private readonly wallStore: WallStore,
     private readonly doorStore: DoorStore,
     private readonly windowStore: WindowStore,
-    private readonly selectionStore: SelectionStore
+    private readonly selectionStore: SelectionStore,
+    private readonly visibilityStore: VisibilityStore
   ) {
     const resync = (): void => this.syncWalls(this.wallStore.getAll());
     this.wallStore.subscribe((walls) => this.syncWalls(walls));
     this.doorStore.subscribe(resync);
     this.windowStore.subscribe(resync);
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
+    this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
   /** Current wall meshes, for the shared SelectionRaycaster to raycast against. */
@@ -102,11 +105,19 @@ export class WallLayer {
     }
 
     this.syncSelection(this.selectionStore.get());
+    this.syncVisibility(this.visibilityStore.getHidden());
   }
 
   private syncSelection(selectedId: string | null): void {
     for (const [id, entry] of this.entries) {
       entry.outline.visible = id === selectedId;
+    }
+  }
+
+  /** Hiding a wall never deletes it - only its mesh's own .visible flag changes; the store and undo history are untouched. */
+  private syncVisibility(hidden: ReadonlySet<string>): void {
+    for (const [id, entry] of this.entries) {
+      entry.mesh.visible = !hidden.has(id);
     }
   }
 

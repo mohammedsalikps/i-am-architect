@@ -2,6 +2,7 @@ import type * as THREE from "three";
 import type { ElementData } from "../../engine/elements/types";
 import type { ElementStore } from "../../engine/elements/ElementStore";
 import type { SelectionStore } from "../../engine/selection/SelectionStore";
+import type { VisibilityStore } from "../visibility/VisibilityStore";
 import {
   applyElementTransform,
   buildElementVisual,
@@ -34,10 +35,12 @@ export class ElementLayer {
   constructor(
     private readonly scene: THREE.Scene,
     private readonly elementStore: ElementStore,
-    private readonly selectionStore: SelectionStore
+    private readonly selectionStore: SelectionStore,
+    private readonly visibilityStore: VisibilityStore
   ) {
     this.elementStore.subscribe((elements) => this.syncElements(elements));
     this.selectionStore.subscribe((selectedId) => this.syncSelection(selectedId));
+    this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
   /** Every element part, for the shared SelectionRaycaster to raycast against. */
@@ -73,11 +76,19 @@ export class ElementLayer {
     }
 
     this.syncSelection(this.selectionStore.get());
+    this.syncVisibility(this.visibilityStore.getHidden());
   }
 
   private syncSelection(selectedId: string | null): void {
     for (const [id, entry] of this.entries) {
       entry.visual.outline.visible = id === selectedId;
+    }
+  }
+
+  /** Hiding an element never deletes it - only its group's own .visible flag changes; the store and undo history are untouched. */
+  private syncVisibility(hidden: ReadonlySet<string>): void {
+    for (const [id, entry] of this.entries) {
+      entry.visual.group.visible = !hidden.has(id);
     }
   }
 

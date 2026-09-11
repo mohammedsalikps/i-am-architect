@@ -126,9 +126,25 @@ button {
   flex-shrink: 0;
 }
 
+.app-header__brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
+}
+
 .app-header__brand-name {
   font-weight: 600;
   letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+/* The Eavara lockup: quiet attribution under the product name, not a second logo. */
+.app-header__brand-eavara {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.6px;
+  color: var(--color-text-muted);
   white-space: nowrap;
 }
 
@@ -454,7 +470,7 @@ button {
 @media (max-width: 1365px) {
   .app-header__search,
   .app-header__icons,
-  .app-header__brand-name {
+  .app-header__brand-text {
     display: none;
   }
 
@@ -638,6 +654,22 @@ button {
   cursor: not-allowed;
 }
 
+/* A tool armed for pick-and-place - see PlacementController/RibbonTool.isActive. */
+.app-ribbon__item--active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.app-ribbon__item--active .app-ribbon__label {
+  color: var(--color-accent-text);
+}
+
+.app-ribbon__item--active .app-ribbon__icon {
+  background: var(--color-accent-text);
+  border-color: var(--color-accent-text);
+  color: var(--color-accent);
+}
+
 .app-ribbon__icon {
   display: inline-flex;
   align-items: center;
@@ -802,6 +834,14 @@ button {
   color: var(--color-accent-text);
 }
 
+/* Separates Perspective/Top/Front/Side from Fit House/Focus Selected. */
+.view-controls__divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 2px 2px;
+  background: var(--color-border);
+}
+
 /* ---------- Sidebars (shared) ---------- */
 
 .sidebar {
@@ -940,6 +980,138 @@ button {
   background: var(--color-accent);
   border-color: var(--color-accent);
   color: var(--color-accent-text);
+}
+
+.hierarchy-objects__item--hidden {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.hierarchy-objects__group-title {
+  margin: 10px 0 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-muted);
+}
+
+.hierarchy-objects__group-title:first-child {
+  margin-top: 0;
+}
+
+/* One object row: the select button plus its own visibility (eye) toggle. */
+.hierarchy-objects__row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.hierarchy-objects__row .hierarchy-objects__item {
+  flex: 1;
+  min-width: 0;
+}
+
+.hierarchy-objects__eye {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.hierarchy-objects__eye:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+/* ---------- Rooms (left sidebar hierarchy) ---------- */
+
+.hierarchy-room {
+  margin-bottom: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.hierarchy-room__header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  background: var(--color-surface-raised);
+}
+
+.hierarchy-room__disclosure {
+  flex-shrink: 0;
+  width: 18px;
+  background: transparent;
+  border: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.hierarchy-room__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 3px 6px;
+  color: var(--color-text);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.hierarchy-room__name:hover {
+  background: var(--color-surface);
+}
+
+.hierarchy-room__action {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  font-size: 10.5px;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.hierarchy-room__action:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
+}
+
+.hierarchy-room__action--active {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
+
+.hierarchy-room__members {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 4px 4px 20px;
+}
+
+.hierarchy-room__empty {
+  margin: 4px 4px 4px 20px;
+  font-size: 11px;
 }
 
 /* ---------- Right sidebar tabs ---------- */
@@ -1344,6 +1516,15 @@ button {
   border-radius: 50%;
   background: var(--color-success);
   flex-shrink: 0;
+}
+
+/* Pick-and-place armed - see PlacementController/setPlacementStatus. */
+.status-bar__item--placing {
+  color: var(--color-accent);
+}
+
+.status-bar__item--placing .status-bar__dot {
+  background: var(--color-accent);
 }
 
 /* ---------- Responsive: collapse the 3-column body below 1024px ---------- */

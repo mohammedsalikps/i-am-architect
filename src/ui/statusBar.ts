@@ -9,6 +9,12 @@ export type StatusBarOptions = {
   selectionStore: SelectionStore;
 };
 
+export interface StatusBar {
+  element: HTMLElement;
+  /** Shows the pick-and-place state ("Placing: Wall — click..."), or clears it (null) when nothing is armed - see PlacementController. */
+  setPlacementStatus(text: string | null): void;
+}
+
 function statusItem(label: string, value: string): HTMLElement {
   return el("span", { className: "status-bar__item" }, [
     el("span", { className: "status-bar__item-label", text: `${label}:` }),
@@ -31,8 +37,14 @@ function statusItem(label: string, value: string): HTMLElement {
  *     MOVE_STEP/RESIZE_STEP in engine/manipulation/manipulationMath.ts.
  *   - zoom: a static placeholder (no camera-distance plumbing added in
  *     this UI-focused milestone) - documented as a known limitation.
+ *
+ * Also shows the pick-and-place state (set by setPlacementStatus(), from
+ * main.ts's PlacementController subscription) in the same state slot -
+ * "Placing: Wall — click to place, Esc to cancel" replaces "Ready"/"N
+ * selected" while a tool is armed, and the selection text returns the
+ * moment it's disarmed.
  */
-export function createStatusBar(options: StatusBarOptions): HTMLElement {
+export function createStatusBar(options: StatusBarOptions): StatusBar {
   const state = el("span", { className: "status-bar__item status-bar__item--state" }, [
     el("span", { className: "status-bar__dot" }),
     el("span", { className: "status-bar__state-text", text: "Ready" })
@@ -51,14 +63,28 @@ export function createStatusBar(options: StatusBarOptions): HTMLElement {
   ]);
 
   const stateText = state.querySelector(".status-bar__state-text") as HTMLElement;
-  options.selectionStore.subscribe((selectedId) => {
-    stateText.textContent = selectedId ? "1 object selected" : "Ready";
-  });
+  let placementText: string | null = null;
+  const renderState = (): void => {
+    if (placementText) {
+      stateText.textContent = placementText;
+      state.classList.add("status-bar__item--placing");
+      return;
+    }
+    state.classList.remove("status-bar__item--placing");
+    stateText.textContent = options.selectionStore.get() ? "1 object selected" : "Ready";
+  };
+  options.selectionStore.subscribe(renderState);
 
   const projectName = projectItem.querySelector(".status-bar__item-value") as HTMLElement;
   options.projectMeta.subscribe((meta) => {
     projectName.textContent = meta.name;
   });
 
-  return bar;
+  return {
+    element: bar,
+    setPlacementStatus(text: string | null): void {
+      placementText = text;
+      renderState();
+    }
+  };
 }

@@ -22,6 +22,8 @@ export interface RibbonTool {
   isEnabled?(): boolean;
   /** The tooltip while disabled - why it can't be used right now. */
   disabledTitle?: string;
+  /** When present, the button is shown "armed"/active - e.g. its pick-and-place tool is the one currently loaded in the viewport. */
+  isActive?(): boolean;
   /** A color picker shown next to the button. */
   colorInput?: { label: string; initial: string };
 }
@@ -45,6 +47,8 @@ export interface RibbonActions {
   /** Repaints the selected object (a wall, an element, ...): the same object, material "paint" and the chosen color. */
   paintSelected(color: string): void;
   canPaintSelection(): boolean;
+  /** Whether tool `id` is the one currently armed for pick-and-place in the viewport. */
+  isPlacementActive(id: string): boolean;
 }
 
 type OriginalType = "wall" | "pillar" | "beam" | "slab" | "door" | "window";
@@ -140,9 +144,12 @@ function originalTool(type: OriginalType, group: string, actions: RibbonActions)
     id: type,
     label,
     icon: iconFor(label),
-    title: hosted ? `Add ${withArticle(type)} - placed in the selected wall when a wall is selected` : `Add ${withArticle(type)}`,
+    title: hosted
+      ? `Add ${withArticle(type)} - placed in the selected wall when a wall is selected, otherwise click to place it in the viewport`
+      : `Click, then click in the viewport to place ${withArticle(type)}`,
     group,
-    run: run[type]
+    run: run[type],
+    isActive: () => actions.isPlacementActive(type)
   };
 }
 
@@ -155,9 +162,14 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
       id: `room-preset:${preset.name}`,
       label: preset.name,
       icon: iconFor(preset.name),
-      title: `Add ${withArticle(preset.name)} (${preset.length} × ${preset.width} m)`,
+      title: `Click, then click in the viewport to place ${withArticle(preset.name)} (${preset.length} × ${preset.width} m)`,
       group,
-      run: () => actions.addRoom(preset)
+      run: () => actions.addRoom(preset),
+      // Every room preset arms placement under the shared "room" kind id
+      // (element.add's kind) - so all presets show active together while
+      // any one is armed, a small imprecision this milestone accepts
+      // rather than threading a distinct id per preset through addElement().
+      isActive: () => actions.isPlacementActive("room")
     }));
   }
   if ("paint" in item) {
@@ -184,9 +196,10 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
       id: definition.kind,
       label: definition.label,
       icon: iconFor(definition.label),
-      title: `Add ${withArticle(definition.label.toLowerCase())} - ${definition.description}`,
+      title: `Click, then click in the viewport to place ${withArticle(definition.label.toLowerCase())} - ${definition.description}`,
       group,
-      run: () => actions.addElement(definition.kind)
+      run: () => actions.addElement(definition.kind),
+      isActive: () => actions.isPlacementActive(definition.kind)
     }
   ];
 }
