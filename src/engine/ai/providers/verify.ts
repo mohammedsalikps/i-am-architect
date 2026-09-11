@@ -1167,7 +1167,7 @@ async function run(): Promise<void> {
   await check("GeminiProvider posts to <baseUrl>/<model>:generateContent with the key in x-goog-api-key, never in the URL or body", async () => {
     const { url, headers, rawBody } = await captureGeminiRequest(emptyContext, "Create a wall", "gm-test-marker");
 
-    assertTrue(url.endsWith("/gemini-2.5-flash:generateContent"), `expected the default model in the URL, got "${url}"`);
+    assertTrue(url.endsWith("/gemini-3.6-flash:generateContent"), `expected the default model in the URL, got "${url}"`);
     assertTrue(!url.includes("gm-test-marker"), "the key must never be in the URL");
     assertEqual(headers["x-goog-api-key"], "gm-test-marker", "the key is in the x-goog-api-key header");
     assertTrue(!rawBody.includes("gm-test-marker"), "the key must not appear anywhere in the body");

@@ -80,7 +80,7 @@ export interface GeminiProviderOptions {
   baseUrl?: string;
 }
 
-const DEFAULT_MODEL = "gemini-2.5-flash";
+const DEFAULT_MODEL = "gemini-3.6-flash";
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 function describeError(error: unknown): string {
