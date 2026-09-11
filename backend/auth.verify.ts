@@ -19,6 +19,7 @@
  */
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer } from "./src/createServer.ts";
 import type { CreateServerOptions } from "./src/createServer.ts";
 import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
@@ -1177,6 +1178,38 @@ async function run(): Promise<void> {
     assertEqual(isPrivilegedSupabaseKey(SERVICE_ROLE_KEY), true, "a service-role JWT is");
     assertEqual(isPrivilegedSupabaseKey("sb_secret_x"), true, "so is a secret key");
     assertEqual(isPrivilegedSupabaseKey("not.a-jwt.at-all"), false, "garbage isn't");
+  });
+
+  // --- Hosting configuration (read as text) ---
+
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image never includes a .env file", () => {
+    const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
+
+    const render = read("render.yaml");
+    assertTrue(/^\s*runtime:\s*docker\s*$/m.test(render), "Render: the Docker runtime");
+    assertTrue(/^\s*dockerfilePath:\s*\.\/Dockerfile\s*$/m.test(render), "Render: the root Dockerfile");
+    assertTrue(/^\s*dockerContext:\s*\.\s*$/m.test(render), "Render: the repository root as build context");
+    assertTrue(/^\s*healthCheckPath:\s*\/health\s*$/m.test(render), "Render: the /health check");
+    for (const key of ["OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "FRONTEND_ORIGIN"]) {
+      assertTrue(new RegExp(`-\\s*key:\\s*${key}\\s*\\n\\s*sync:\\s*false\\s*$`, "m").test(render), `render.yaml declares ${key} with sync: false`);
+    }
+    assertTrue(!/^\s*value:/m.test(render), "render.yaml sets no value at all - Render asks for each");
+    assertTrue(!/key:\s*(PORT|LOCAL_AUTH)\b/.test(render), "render.yaml leaves PORT to Render and never enables in-memory accounts");
+
+    const fly = read("fly.toml");
+    assertTrue(/dockerfile = "Dockerfile"/.test(fly), "fly.toml: the root Dockerfile");
+    assertTrue(/internal_port = 8787/.test(fly) && /path = "\/health"/.test(fly), "fly.toml: port and /health check kept");
+
+    const dockerfile = read("Dockerfile");
+    assertDeepEqual(
+      [...dockerfile.matchAll(/^COPY\s+(\S+)/gm)].map((match) => match[1]),
+      ["package.json", "backend/package.json", "backend/src", "src/engine"],
+      "the image copies only these paths"
+    );
+    assertTrue(/^ENV NODE_ENV=production\s*$/m.test(dockerfile), "the image runs in production mode");
+    assertTrue(/^CMD \["node", "backend\/src\/server\.ts"\]\s*$/m.test(dockerfile), "the image starts the server");
+    const dockerignore = read(".dockerignore");
+    assertTrue(/^\*\*\/\.env\s*$/m.test(dockerignore) && /^\*\*\/\.env\.\*\s*$/m.test(dockerignore), ".dockerignore excludes every .env file");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -280,5 +280,6 @@ they need this directory's own `npm install`.
   Supabase Auth (`/auth/v1/user`) - one extra round trip; verifying JWTs
   locally against the project's signing keys would remove it.
 - **Deployment** is described in `../DEPLOYMENT.md`: the root `Dockerfile`
-  and `fly.toml` run this backend on Fly.io (or any Docker host with
-  HTTPS), with secrets in the host's secret store.
+  runs this backend on Render (staging - `render.yaml`) or Fly.io
+  (`fly.toml`), or any Docker host with HTTPS, with secrets in the host's
+  secret store. It listens on the host's `PORT`, on all interfaces.

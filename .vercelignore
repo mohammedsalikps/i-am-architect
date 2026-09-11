@@ -18,13 +18,14 @@
 **/.env
 **/.env.*
 
-# The backend is a separate service (Fly.io), with its own local secrets.
+# The backend is a separate service (Render, or Fly.io), with its own local secrets.
 /backend
 
 # Backend container and hosting configuration, and deployment docs.
 /Dockerfile
 /.dockerignore
 /fly.toml
+/render.yaml
 /DEPLOYMENT.md
 
 # Local tool state, build output, dependencies, hosting-CLI state, logs.

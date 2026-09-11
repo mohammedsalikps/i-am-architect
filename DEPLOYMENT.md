@@ -1,15 +1,15 @@
 # Deployment
 
 How to run i am Architect outside localhost: a real Supabase project for
-accounts and projects, the backend on Fly.io, the frontend on Vercel. No
-credential appears anywhere in this repository - every value below is
-something you paste into a dashboard, a gitignored `.env` file, or a host's
-secret store.
+accounts and projects, the backend on Render (staging - Fly.io stays a
+documented alternative), the frontend on Vercel. No credential appears
+anywhere in this repository - every value below is something you paste into
+a dashboard, a gitignored `.env` file, or a host's secret store.
 
 ```
 Browser ──HTTPS──▶ Frontend (Vercel, static files)
    │
-   └──HTTPS, Bearer <user token>──▶ Backend (Fly.io, Node container) ──▶ Supabase (Auth + PostgreSQL, RLS)
+   └──HTTPS, Bearer <user token>──▶ Backend (Render or Fly.io, Node container) ──▶ Supabase (Auth + PostgreSQL, RLS)
                                           └──▶ OpenAI (OPENAI_API_KEY, server-side only)
 ```
 
@@ -21,7 +21,7 @@ host only.
 
 | | Local (mock) | Local (real) | Staging | Production |
 |---|---|---|---|---|
-| Backend | `npm run mock` | `npm start` in `backend/` | Fly.io app, e.g. `iarchitect-backend-staging` | a separate Fly.io app |
+| Backend | `npm run mock` | `npm start` in `backend/` | Render web service `iarchitect-backend-staging` (or a Fly.io app) | a separate service |
 | Accounts & projects | in memory | a **staging** Supabase project | the **staging** Supabase project | a separate **production** Supabase project |
 | AI | MockAIProvider (no key) | OpenAI | OpenAI | OpenAI |
 | Frontend | `npm run dev` | `npm run dev` | a Vercel project, e.g. `iarchitect-staging` | a separate Vercel project (or domain) |
@@ -165,6 +165,10 @@ These tests are **not** part of `npm run verify` - that stays deterministic
 and credential-free, so CI never depends on anyone's Supabase account.
 
 ## 3. Hosted deployment, in order
+
+> Staging now runs its backend on **Render** - see "4. Render staging",
+> which reuses steps 5-9 below. The Fly.io steps in this section stay valid
+> as an alternative host (`fly.toml` is kept).
 
 The backend URL is baked into the frontend at build time, and the backend
 only accepts the frontend's exact origin - so each side needs the other's
@@ -324,22 +328,85 @@ path with undo/redo, and sign-out.
 Then use the deployed site itself: sign in, build, save, reload, open, edit,
 undo/redo, AI, save, sign out, sign back in, open, delete.
 
+## 4. Render staging (current plan)
+
+Staging runs the backend as a **Render Web Service** with the **Docker**
+runtime, built from the GitHub repository. `render.yaml` (a Render
+Blueprint) records the whole service; creating the same service by hand in
+the dashboard works too.
+
+| Setting | Value |
+|---|---|
+| Service type | Web Service, runtime **Docker** |
+| Source | GitHub `mohammedsalikps/i-am-architect`, branch `master` |
+| Build | `./Dockerfile`, context = repository root (the backend imports `src/engine/`). No build or start command: the image's `CMD` runs `node backend/src/server.ts`. `.dockerignore` keeps every `.env` file out of the build. |
+| Region | **Singapore** - Render's region closest to the staging Supabase project (Sydney, `ap-southeast-2`); Render has no Sydney region |
+| Health check path | `/health` - answers `{"status":"ok"}` and nothing else |
+| Instance | Free for staging (see "Free instances" below) |
+
+**Port.** The server listens on the port in `PORT`, on all network
+interfaces. Render sets `PORT` (10000) and sends its HTTPS traffic there -
+don't set `PORT` yourself. The image's `PORT=8787` is only the default for
+other hosts and local runs. `NODE_ENV=production` comes from the image.
+
+**Environment variables** - set in Render → the service → **Environment**,
+where Render stores them encrypted. `render.yaml` only names them
+(`sync: false`, no values), so applying the Blueprint asks for each one:
+
+| Variable | Value |
+|---|---|
+| `OPENAI_API_KEY` | the backend's OpenAI key (secret) |
+| `SUPABASE_URL` | `https://<ref>.supabase.co` (the staging project) |
+| `SUPABASE_ANON_KEY` | the staging anon/publishable key - never the service-role/secret key (the server refuses it) |
+| `FRONTEND_ORIGIN` | the exact Vercel production URL, e.g. `https://iarchitect-staging.vercel.app` - explicit origins, never a wildcard |
+
+**HTTPS and CORS.** `https://<service>.onrender.com` is HTTPS, and Render
+redirects plain HTTP. The frontend (Vercel) and the backend (Render) are
+different origins: the backend answers browser requests only from the exact
+origins in `FRONTEND_ORIGIN` - 403 for any other, Vercel Preview URLs
+included.
+
+**Deployment order**
+
+1. Names: Render service `iarchitect-backend-staging` →
+   `https://iarchitect-backend-staging.onrender.com` (Render adds a suffix
+   if the name is taken - use the URL it shows); Vercel project
+   `iarchitect-staging`.
+2. Push the commits to GitHub - Render builds from the repository.
+3. Render → **New → Blueprint** → the repository (it reads `render.yaml`) -
+   or **New → Web Service** with the settings above. Enter the four
+   environment variables; `FRONTEND_ORIGIN` = the planned Vercel URL.
+4. Deploy, then check `https://<service>.onrender.com/health` →
+   `{"status":"ok"}`, and Render → **Logs** (one JSON line per request).
+5. Vercel - section 3, steps 5 and 6, with `VITE_AI_BACKEND_URL` =
+   `https://<service>.onrender.com` for Production and Preview.
+6. If Vercel's production URL differs from the planned one, update
+   `FRONTEND_ORIGIN` in Render → Environment (saving redeploys).
+7. Supabase Auth URL settings - section 3, step 8.
+8. Deployed smoke tests - section 3, step 9, with
+   `DEPLOYED_BACKEND_URL=https://<service>.onrender.com`.
+
+**Free instances** sleep after 15 minutes without traffic; the first
+request after that waits while the service starts again (up to about a
+minute). The app's own requests time out sooner (15-30 s), so that first
+request can fail - retry, or use a paid instance for demos.
+
 ## Reference
 
-### Backend environment (Fly.io)
+### Backend environment (Render or Fly.io)
 
 | Variable | Where | Example | Notes |
 |---|---|---|---|
-| `OPENAI_API_KEY` | Fly secret | - | Secret. Backend only. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
-| `SUPABASE_URL` | Fly secret | `https://abcdefgh.supabase.co` | |
-| `SUPABASE_ANON_KEY` | Fly secret | - | The anon/publishable key. A service-role/secret key is refused. |
-| `FRONTEND_ORIGIN` | Fly secret | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. No wildcards, no paths; non-local origins must be https. |
-| `NODE_ENV` | `fly.toml` / Dockerfile | `production` | In production, `LOCAL_AUTH=memory` is refused. |
-| `PORT` | `fly.toml` / Dockerfile | `8787` | |
+| `OPENAI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
+| `SUPABASE_URL` | host secret | `https://abcdefgh.supabase.co` | |
+| `SUPABASE_ANON_KEY` | host secret | - | The anon/publishable key. A service-role/secret key is refused. |
+| `FRONTEND_ORIGIN` | host secret | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. No wildcards, no paths; non-local origins must be https. |
+| `NODE_ENV` | Dockerfile (and `fly.toml`) | `production` | In production, `LOCAL_AUTH=memory` is refused. |
+| `PORT` | set by Render (10000); `fly.toml` / Dockerfile default `8787` | - | The server listens on it, on all interfaces. |
 | `LOCAL_AUTH` | local only | `memory` | In-memory accounts for development. Never on a host. |
 
-Never on Fly.io, Vercel or anywhere else: the Supabase service-role/secret
-key or the database password.
+Never on Render, Fly.io, Vercel or anywhere else: the Supabase
+service-role/secret key or the database password.
 
 ### Frontend environment (Vercel)
 
@@ -348,7 +415,7 @@ OpenAI key, anything Supabase, or `FRONTEND_ORIGIN`.
 
 ### Logs
 
-`fly logs` shows one JSON line per request - time, method, route (project
+The host's logs (Render → **Logs**, or `fly logs`) show one JSON line per request - time, method, route (project
 ids replaced by `:id`), operation (`projects.save`, `auth.signin`,
 `ai.interpret`...), status, duration, whether the caller was signed in
 (`user` / `none` / `invalid` / `unverified`), and a short failure reason.
@@ -361,8 +428,9 @@ or OpenAI are logged by error name and message.
   origins; any other `Origin` gets **403** before routing, authentication or
   storage. Requests with no `Origin` (health checks, `curl`) are not browser
   requests and still need a valid token for anything but `/health`.
-- Fly.io (`force_https`) and Vercel serve HTTPS only and redirect HTTP. The
-  backend adds `Strict-Transport-Security` when the host reports HTTPS.
+- Render, Fly.io (`force_https`) and Vercel serve HTTPS and redirect plain
+  HTTP. The backend adds `Strict-Transport-Security` when the host reports
+  HTTPS (`X-Forwarded-Proto: https`).
 - Every API response is `Cache-Control: no-store`.
 
 ## Local development
@@ -382,14 +450,16 @@ or OpenAI are logged by error name and message.
 OpenAI keys, database passwords, access tokens. Before a commit, scan the
 staged changes (`git diff --cached`) for key-shaped strings. The
 production bundle is checked by `npm run test:deployed`. `.dockerignore`
-(Fly.io) and `.vercelignore` (Vercel CLI) keep local secret files out of
-hosting uploads.
+(the Docker build on Render or Fly.io) and `.vercelignore` (Vercel CLI) keep
+local secret files out of hosting uploads, and `render.yaml` names its
+variables without values.
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Backend exits at start: "No account storage is configured" | `SUPABASE_URL`/`SUPABASE_ANON_KEY` not set as Fly secrets. |
+| Backend exits at start: "No account storage is configured" | `SUPABASE_URL`/`SUPABASE_ANON_KEY` not set on the host (Render → Environment, or Fly secrets). |
+| On Render, the first request after a quiet spell is slow or times out | A free instance was asleep (15 minutes idle) and is starting - retry, or use a paid instance. |
 | "SUPABASE_ANON_KEY holds a service-role (secret) key" | The wrong key was copied - use the anon/publishable one. |
 | Vercel build fails: "Set VITE_AI_BACKEND_URL … for the preview environment" | The variable is set for Production only - add it for Preview too (step 6). |
 | Browser console: CORS error, backend log `origin not allowed` | `FRONTEND_ORIGIN` doesn't list the exact frontend origin (scheme, host, port, no trailing path) - or it's a Preview URL (by design). |
