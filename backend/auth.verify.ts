@@ -19,7 +19,7 @@
  */
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "./src/createServer.ts";
 import type { CreateServerOptions } from "./src/createServer.ts";
 import { InMemoryAuthService } from "./src/auth/InMemoryAuthService.ts";
@@ -1182,7 +1182,7 @@ async function run(): Promise<void> {
 
   // --- Hosting configuration (read as text) ---
 
-  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; .dockerignore uses plain exclusions only, keeps every copied path and never lets a .env file in", () => {
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; .dockerignore uses plain exclusions only, excludes nothing inside a copied path and never lets a .env file in", () => {
     const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 
     const render = read("render.yaml");
@@ -1208,24 +1208,44 @@ async function run(): Promise<void> {
     );
     assertTrue(/^ENV NODE_ENV=production\s*$/m.test(dockerfile), "the image runs in production mode");
     assertTrue(/^CMD \["node", "backend\/src\/server\.ts"\]\s*$/m.test(dockerfile), "the image starts the server");
-    // .dockerignore: plain exclusions only. Render's context filter doesn't
-    // re-enter a directory a catch-all excluded, so "**" + "!src/engine"
-    // left src/engine out of the build.
+    // .dockerignore: plain exclusions only, and none may reach inside a path
+    // the Dockerfile copies - Render's context filter dropped src/engine
+    // while rules excluded files inside it.
     const ignoreRules = read(".dockerignore")
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line !== "" && !line.startsWith("#"));
     assertDeepEqual(ignoreRules.filter((rule) => rule.startsWith("!")), [], '.dockerignore has no "!" re-include rules');
-    for (const rule of ["**/.env", "**/.env.*", ".git", "**/node_modules", "dist", ".claude", ".vercel", ".fly", ".railway", "**/*.log", "**/verify.ts", "src/engine/testing"]) {
+    for (const rule of ["**/.env", "**/.env.*", ".git", "**/node_modules", "dist", ".claude", ".vercel", ".fly", ".railway", "**/*.log"]) {
       assertTrue(ignoreRules.includes(rule), `.dockerignore excludes ${rule}`);
     }
-    const copied = ["package.json", "backend/package.json", "backend/src", "src/engine"];
-    for (const rule of ignoreRules) {
-      const bare = rule.replace(/\/+$/, "");
-      assertTrue(
-        bare !== "*" && bare !== "**" && !copied.some((path) => path === bare || path.startsWith(`${bare}/`)),
-        `.dockerignore rule "${rule}" keeps every copied path in the build context`
-      );
+    // Docker's matching: a rule excludes a path when it matches the path or
+    // one of its parent directories.
+    const globParts: Record<string, string> = { "**/": "(.*/)?", "**": ".*", "*": "[^/]*", "?": "[^/]" };
+    const ruleMatchers = ignoreRules.map((rule) => {
+      const pattern = rule
+        .replace(/^\/+|\/+$/g, "")
+        .split(/(\*\*\/|\*\*|\*|\?)/)
+        .map((part) => globParts[part] ?? part.replace(/[.+^${}()|[\]\\]/g, "\\$&"))
+        .join("");
+      return { rule, regex: new RegExp(`^${pattern}$`) };
+    });
+    const excludedBy = (path: string): string | undefined => {
+      const segments = path.split("/");
+      return ruleMatchers.find(({ regex }) => segments.some((_, index) => regex.test(segments.slice(0, index + 1).join("/"))))?.rule;
+    };
+    for (const secretPath of [".env", ".env.local", "backend/.env", "backend/.env.integration", "backend/src/.env"]) {
+      assertTrue(excludedBy(secretPath) !== undefined, `.dockerignore keeps ${secretPath} out of the build context`);
+    }
+    for (const copiedPath of ["package.json", "backend/package.json", "backend/src", "src/engine"]) {
+      const url = new URL(`../${copiedPath}`, import.meta.url);
+      const inside = statSync(url).isDirectory()
+        ? readdirSync(url, { encoding: "utf8", recursive: true }).map((entry) => `${copiedPath}/${entry.replaceAll("\\", "/")}`)
+        : [];
+      for (const path of [copiedPath, ...inside]) {
+        const rule = excludedBy(path);
+        assertTrue(rule === undefined, `no .dockerignore rule excludes ${path} (it is inside a Dockerfile COPY source; rule: ${rule})`);
+      }
     }
   });
 
