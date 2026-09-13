@@ -8,6 +8,7 @@ import { reserveSlabIds } from "../slab/createSlab.ts";
 import { reserveDoorIds } from "../door/createDoor.ts";
 import { reserveWindowIds } from "../window/createWindow.ts";
 import { reserveElementIds } from "../elements/createElement.ts";
+import { reserveAssetIds } from "../assets/createAsset.ts";
 import { reserveAssemblyIds } from "../assemblies/AssemblyStore.ts";
 import type { PersistedObject, PersistedObjectType, ProjectDocument } from "./projectDocument";
 import type { AssemblyData } from "../assemblies/types";
@@ -30,6 +31,7 @@ export type PersistableProject = Pick<
   | "doorStore"
   | "windowStore"
   | "elementStore"
+  | "assetStore"
   | "assemblyStore"
   | "selectionStore"
   | "history"
@@ -43,7 +45,8 @@ function allObjects(project: PersistableProject): PersistedObject[] {
     ...project.slabStore.getAll(),
     ...project.doorStore.getAll(),
     ...project.windowStore.getAll(),
-    ...project.elementStore.getAll()
+    ...project.elementStore.getAll(),
+    ...project.assetStore.getAll()
   ];
 }
 
@@ -109,6 +112,8 @@ function addObject(project: PersistableProject, object: PersistedObject): { vali
       return project.windowStore.add(object);
     case "element":
       return project.elementStore.add(object);
+    case "asset":
+      return project.assetStore.add(object);
   }
 }
 
@@ -121,7 +126,8 @@ function replaceModel(project: PersistableProject, state: ModelState): string | 
     project.slabStore,
     project.doorStore,
     project.windowStore,
-    project.elementStore
+    project.elementStore,
+    project.assetStore
   ]) {
     for (const record of store.getAll()) {
       store.remove(record.id);
@@ -153,7 +159,8 @@ const RESERVE_IDS: Readonly<Record<PersistedObjectType, (ids: string[]) => void>
   slab: reserveSlabIds,
   door: reserveDoorIds,
   window: reserveWindowIds,
-  element: reserveElementIds
+  element: reserveElementIds,
+  asset: reserveAssetIds
 };
 
 /**

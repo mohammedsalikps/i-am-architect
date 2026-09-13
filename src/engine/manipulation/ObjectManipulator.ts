@@ -312,6 +312,8 @@ function readRecord(
       return stores.windowStore.get(id);
     case "element":
       return stores.elementStore?.get(id);
+    case "asset":
+      return stores.assetStore?.get(id);
     default:
       return undefined;
   }

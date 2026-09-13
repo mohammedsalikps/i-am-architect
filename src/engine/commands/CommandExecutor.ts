@@ -17,6 +17,9 @@ import { WindowStore } from "../window/WindowStore.ts";
 import { createElementData, duplicateElementData } from "../elements/createElement.ts";
 import { ElementStore } from "../elements/ElementStore.ts";
 import { getElementKind } from "../elements/catalog.ts";
+import { createAssetData, duplicateAssetData } from "../assets/createAsset.ts";
+import { AssetStore } from "../assets/AssetStore.ts";
+import { getAssetDefinition } from "../assets/catalog.ts";
 import { AssemblyStore, createAssemblyData } from "../assemblies/AssemblyStore.ts";
 import { validateWall } from "../wall/validateWall.ts";
 import { validateElement } from "../elements/validateElement.ts";
@@ -84,6 +87,10 @@ import type {
   UpdateElementCommand,
   DeleteElementCommand,
   DuplicateElementCommand,
+  AddAssetCommand,
+  UpdateAssetCommand,
+  DeleteAssetCommand,
+  DuplicateAssetCommand,
   CreateAssemblyCommand,
   UpdateAssemblyCommand,
   DeleteAssemblyCommand,
@@ -96,7 +103,8 @@ import type {
   SlabHistoryLike,
   DoorHistoryLike,
   WindowHistoryLike,
-  ElementHistoryLike
+  ElementHistoryLike,
+  AssetHistoryLike
 } from "./types";
 import { resolveConstructionObject } from "../objects/resolveConstructionObject.ts";
 
@@ -129,6 +137,10 @@ const KNOWN_COMMAND_TYPES = [
   "element.update",
   "element.delete",
   "element.duplicate",
+  "asset.add",
+  "asset.update",
+  "asset.delete",
+  "asset.duplicate",
   "element.connect",
   "element.disconnect",
   "object.align",
@@ -255,6 +267,8 @@ export class CommandExecutor {
   private readonly windowHistory: WindowHistoryLike;
   private readonly elementStore: ElementStore;
   private readonly elementHistory: ElementHistoryLike;
+  private readonly assetStore: AssetStore;
+  private readonly assetHistory: AssetHistoryLike;
   private readonly assemblyStore: AssemblyStore;
   private readonly historyGroups: HistoryGroupsLike | undefined;
 
@@ -298,6 +312,13 @@ export class CommandExecutor {
       update: (id, changes) => elementStore.update(id, changes),
       remove: (id) => elementStore.remove(id)
     },
+    /** assetStore/assetHistory follow the exact same defaulting idea as elementStore/elementHistory above - one store for every placed design asset, reached through the "asset.*" commands. */
+    assetStore: AssetStore = new AssetStore(),
+    assetHistory: AssetHistoryLike = {
+      add: (asset) => assetStore.add(asset),
+      update: (id, changes) => assetStore.update(id, changes),
+      remove: (id) => assetStore.remove(id)
+    },
     /**
      * The shared HistoryManager (see ProjectContext), so a change spanning
      * several objects is one undo step. Optional: without it each object's
@@ -321,6 +342,8 @@ export class CommandExecutor {
     this.windowHistory = windowHistory;
     this.elementStore = elementStore;
     this.elementHistory = elementHistory;
+    this.assetStore = assetStore;
+    this.assetHistory = assetHistory;
   }
 
   /** Accepts `unknown` on purpose - this is the boundary where not-yet-trusted structured data (e.g. AI output) enters. */
@@ -386,6 +409,14 @@ export class CommandExecutor {
         return this.executeDeleteElement(input);
       case "element.duplicate":
         return this.executeDuplicateElement(input);
+      case "asset.add":
+        return this.executeAddAsset(input);
+      case "asset.update":
+        return this.executeUpdateAsset(input);
+      case "asset.delete":
+        return this.executeDeleteAsset(input);
+      case "asset.duplicate":
+        return this.executeDuplicateAsset(input);
       case "element.connect":
         return this.executeConnect(input);
       case "element.disconnect":
@@ -468,6 +499,8 @@ export class CommandExecutor {
         return this.windowStore.get(id);
       case "element":
         return this.elementStore.get(id);
+      case "asset":
+        return this.assetStore.get(id);
       default:
         return undefined;
     }
@@ -571,7 +604,7 @@ export class CommandExecutor {
           }
           break;
         case "label":
-          if (type !== "element") {
+          if (type !== "element" && type !== "asset") {
             errors.push({ field: "changes.label", message: '"label" is not an editable property.' });
           } else if (typeof value !== "string" || value.trim().length === 0) {
             errors.push({ field: "changes.label", message: "label must be a non-empty string." });
@@ -1669,7 +1702,8 @@ export class CommandExecutor {
       slabStore: this.slabStore,
       doorStore: this.doorStore,
       windowStore: this.windowStore,
-      elementStore: this.elementStore
+      elementStore: this.elementStore,
+      assetStore: this.assetStore
     };
   }
 
@@ -1722,6 +1756,76 @@ export class CommandExecutor {
       };
     }
     return { success: true, objectId: duplicate.id, message: "Element duplicated." };
+  }
+
+  // --- Design assets ---
+  // A placed asset is a real, standalone selectable/undoable object -
+  // exactly like a wall or an element - but structurally simpler (no
+  // hosted-opening cascade, no joint/connection network to keep in sync),
+  // so these four mirror the plain wall/pillar/beam/slab handlers rather
+  // than element's connection-aware ones.
+
+  private executeAddAsset(command: AddAssetCommand): CommandResult {
+    const options: unknown = command.asset;
+    if (!isPlainObject(options)) {
+      return { success: false, message: "asset.add command is missing its asset." };
+    }
+    const definition = getAssetDefinition(options.assetId as string);
+    if (!definition) {
+      return { success: false, message: `Unknown asset "${String(options.assetId)}".` };
+    }
+
+    const asset = createAssetData(command.asset);
+    const result = this.assetHistory.add(asset);
+    if (!result.valid) {
+      return { success: false, errors: result.errors, message: `Could not add ${definition.label.toLowerCase()}: validation failed.` };
+    }
+    return { success: true, objectId: asset.id, message: `${definition.label} added.` };
+  }
+
+  private executeUpdateAsset(command: UpdateAssetCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "asset.update command is missing an id." };
+    }
+
+    const result = this.assetHistory.update(command.id, command.changes ?? {});
+    if (!result.valid) {
+      return { success: false, objectId: command.id, errors: result.errors, message: "Could not update asset: validation failed." };
+    }
+    return { success: true, objectId: command.id, message: "Asset updated." };
+  }
+
+  private executeDeleteAsset(command: DeleteAssetCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "asset.delete command is missing an id." };
+    }
+
+    const existing = this.assetStore.get(command.id);
+    if (!existing) {
+      return { success: false, objectId: command.id, message: `No asset found with id "${command.id}".` };
+    }
+
+    this.assetHistory.remove(command.id);
+    return { success: true, objectId: command.id, message: "Asset deleted." };
+  }
+
+  private executeDuplicateAsset(command: DuplicateAssetCommand): CommandResult {
+    if (!command.id) {
+      return { success: false, message: "asset.duplicate command is missing an id." };
+    }
+
+    const source = this.assetStore.get(command.id);
+    if (!source) {
+      return { success: false, objectId: command.id, message: `No asset found with id "${command.id}".` };
+    }
+
+    const duplicate = duplicateAssetData(source);
+    const result = this.assetHistory.add(duplicate);
+    if (!result.valid) {
+      // duplicateAssetData() always produces valid data from a valid source - stay defensive.
+      return { success: false, objectId: command.id, errors: result.errors, message: "Could not duplicate asset: validation failed." };
+    }
+    return { success: true, objectId: duplicate.id, message: "Asset duplicated." };
   }
 
   private executeCreateAssembly(command: CreateAssemblyCommand): CommandResult {

@@ -1,24 +1,90 @@
 /* Professional dark CAD-style theme for the application shell. */
 
 :root {
-  --color-bg: #1a1a1a;
-  --color-surface: #212121;
-  --color-surface-raised: #262626;
-  --color-surface-sunken: #191919;
-  --color-border: #333333;
-  --color-text: #e6e6e6;
-  --color-text-muted: #8a8a8a;
+  --color-bg: #14151a;
+  --color-surface: #1b1d23;
+  --color-surface-raised: #23252d;
+  --color-surface-sunken: #101116;
+  --color-border: #2b2e36;
+  --color-text: #eceef1;
+  --color-text-muted: #8d93a1;
   --color-accent: #4f8ef7;
+  --color-accent-soft: rgba(79, 142, 247, 0.14);
   --color-accent-text: #ffffff;
   --color-success: #4caf7d;
+  /* The EAVARA mark's own quiet warm accent - used sparingly (the brand
+     mark, the empty state's eyebrow, the AI result card) so it reads as
+     the school's identity, not a second UI accent color competing with
+     the tool-blue used for every interactive state. */
+  --color-brand: #c9a769;
+  /* One named danger color, replacing five slightly different reds
+     (#ff8a80, #e5746b, #a83c38, and one inline rgba(216,76,68,...)) that
+     had drifted into separate rules over time - the AI error card, the
+     delete/danger button, the save-status error line, and a relationship
+     warning were each their own shade. All now read from this one family,
+     the same soft/solid pairing --color-accent already uses. */
+  --color-danger: #ff8a80;
+  --color-danger-soft: rgba(255, 138, 128, 0.14);
+  --color-danger-border: #a83c38;
+  --shadow-panel: 0 12px 32px rgba(0, 0, 0, 0.4);
+  /* A dialog sits above a dimming scrim, so it earns a slightly heavier
+     shadow than an in-page panel - project-chooser and auth-dialog each
+     hand-wrote this identical value independently; named once here. */
+  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.5);
+  /* A light lift for small chrome that floats over other content without
+     becoming a dialog: the viewport's view-controls overlay, the AI
+     result card, a pressed ribbon tool - present, not heavy. */
+  --shadow-elevation-1: 0 2px 6px rgba(0, 0, 0, 0.3);
+  /* The floating viewport overlays' (view-controls, the manipulation
+     readout) own translucent chrome - distinct from --color-surface,
+     which is opaque, because these sit over the 3D scene and stay
+     slightly see-through on purpose. */
+  --overlay-bg: rgba(26, 26, 26, 0.85);
+
+  /* A small, consistent radius scale - already the range this file used
+     ad hoc (2-6px controls, one 10px outlier, a couple of pill shapes);
+     naming it stops a future rule from picking its own number. Deliberately
+     restrained per the brand's own "no giant rounded cards" rule. */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-pill: 999px;
+
+  /* A small spacing scale for the chrome this milestone touches (top bar,
+     ribbon, sidebars, inspector, AI panel) - not a file-wide rewrite, so
+     it's introduced where it's actually used rather than imposed
+     everywhere at once. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* The recurring small-caps "eyebrow" label - a ribbon group name, a
+     sidebar section title, the AI panel's own title - had five different
+     letter-spacing values for what is visually one pattern. One shared
+     value now; each rule keeps its own font-size, since those genuinely
+     differ by role. */
+  --letter-spacing-label: 0.06em;
 
   --topbar-height: 52px;
-  --mainnav-height: 38px;
-  --ribbon-height: 76px;
-  --rail-width: 64px;
-  --sidebar-left-width: 220px;
+  --mainnav-height: 36px;
+  --ribbon-height: 72px;
+  --rail-width: 56px;
+  --sidebar-left-width: 208px;
   --sidebar-right-width: 260px;
-  --bottomworkspace-height: 118px;
+  /* Tall enough that the AI panel's own header + input row + a "Design
+     Complete" result card's heading and summary line are all visible at
+     once without scrolling - a plain input row only needs a fraction of
+     this, but the result card (see commandBar.ts's buildAiResultCard())
+     is the centerpiece of the AI experience (task sections 18-20) and
+     was, at a shorter height, invisible until the user scrolled a
+     tiny internal window with no visible cue to do so. The action
+     buttons at the very bottom of a long card can still need a short
+     internal scroll (.tab-strip__panel already handles that) - only the
+     headline feedback is guaranteed on-screen. */
+  --bottomworkspace-height: 190px;
   --statusbar-height: 26px;
 
   font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
@@ -93,13 +159,36 @@ button {
   z-index: 1;
 }
 
+/* The running gesture's compact value readout ("Length 5.80 m") - shown
+   only while dragging (see SceneManager.ts/ManipulationController.ts),
+   bottom-left so it never competes with the view controls or handles. */
+.manipulation-readout {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 1;
+  padding: 5px 10px;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(2px);
+  color: var(--color-text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.manipulation-readout[hidden] {
+  display: none;
+}
+
 /* ---------- Top bar ---------- */
 
 .app-header {
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 16px;
+  gap: var(--space-5);
+  padding: 0 var(--space-4);
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   overflow-x: auto;
@@ -116,14 +205,23 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 4px;
-  background: var(--color-accent);
-  color: var(--color-accent-text);
-  font-weight: 600;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: var(--color-brand);
+  color: #221a0c;
+  font-weight: 700;
   font-size: 12px;
+  letter-spacing: 0.02em;
   flex-shrink: 0;
+}
+
+/* The EAVARA pine mark (brandMark.ts) fills the badge with a little
+   margin; its fill is currentColor, so it takes the badge's own #221a0c
+   text color above for free. */
+.app-header__brand-mark svg {
+  width: 14px;
+  height: 20px;
 }
 
 .app-header__brand-text {
@@ -142,16 +240,25 @@ button {
 /* The Eavara lockup: quiet attribution under the product name, not a second logo. */
 .app-header__brand-eavara {
   font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.6px;
-  color: var(--color-text-muted);
+  font-weight: 600;
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-brand);
+  opacity: 0.85;
   white-space: nowrap;
 }
 
 .app-header__actions {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: var(--space-2);
   flex-shrink: 0;
+  /* A hairline group boundary, matching the one before .app-header__project
+     and .app-header__account below - New/Open/Save/Undo/Redo now reads as
+     one cluster between the brand and the project identity, not a run of
+     loose buttons (task: "action grouping"). */
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--color-border);
 }
 
 /* The one header area that gives way when space runs short: the save
@@ -159,9 +266,11 @@ button {
 .app-header__project {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: var(--space-2);
   flex-shrink: 1;
   min-width: 0;
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--color-border);
 }
 
 .app-header__project-label {
@@ -177,8 +286,8 @@ button {
   color: var(--color-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
 }
 
 .app-header__project-name:hover {
@@ -209,7 +318,7 @@ button {
 }
 
 .app-header__save-status--error {
-  color: #e5746b;
+  color: var(--color-danger);
 }
 
 /* ---------- Project chooser ("Open…") ---------- */
@@ -236,8 +345,8 @@ button {
   flex-direction: column;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
 }
 
 .project-chooser__header {
@@ -327,8 +436,8 @@ button {
   width: min(380px, calc(100vw - 32px));
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: 6px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-modal);
 }
 
 .auth-dialog__header {
@@ -374,7 +483,7 @@ button {
   color: var(--color-text);
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
 }
 
@@ -428,7 +537,7 @@ button {
   margin-left: auto;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 6px 12px;
   color: var(--color-text);
 }
@@ -441,18 +550,14 @@ button {
   cursor: not-allowed;
 }
 
-.app-header__icons {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
 /* Account: "Sign in", or the signed-in email and "Sign out". */
 .app-header__account {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-shrink: 0;
+  padding-left: var(--space-4);
+  border-left: 1px solid var(--color-border);
 }
 
 .app-header__account-name {
@@ -464,12 +569,11 @@ button {
   color: var(--color-text-muted);
 }
 
-/* Narrower desktops (1024-1365 px): the inert search field and icon
-   cluster, and the brand's wordmark, give way so New/Open/Save, the
-   project name and the account control all stay on screen. */
+/* Narrower desktops (1024-1365 px): the inert search field and the
+   brand's wordmark give way so New/Open/Save, the project name and the
+   account control all stay on screen. */
 @media (max-width: 1365px) {
   .app-header__search,
-  .app-header__icons,
   .app-header__brand-text {
     display: none;
   }
@@ -498,8 +602,8 @@ button {
 .toolbar-button {
   background: transparent;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -514,12 +618,7 @@ button {
 }
 
 .toolbar-button--icon {
-  padding: 6px 10px;
-}
-
-.toolbar-button--danger:hover:not(:disabled) {
-  border-color: #e5746b;
-  color: #e5746b;
+  padding: var(--space-2) 10px;
 }
 
 .toolbar-button--primary {
@@ -535,12 +634,14 @@ button {
 }
 
 .toolbar-button--danger {
-  border-color: #a83c38;
-  color: #ff8a80;
+  border-color: var(--color-danger-border);
+  color: var(--color-danger);
 }
 
 .toolbar-button--danger:hover:not(:disabled) {
-  background: rgba(216, 76, 68, 0.15);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
 }
 
 /* ---------- Main nav ---------- */
@@ -549,7 +650,7 @@ button {
   display: flex;
   align-items: stretch;
   gap: 2px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   overflow-x: auto;
@@ -559,11 +660,12 @@ button {
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   cursor: pointer;
   color: var(--color-text-muted);
   white-space: nowrap;
   font-weight: 500;
+  letter-spacing: 0.01em;
 }
 
 .app-mainnav__item:hover:not(:disabled) {
@@ -586,19 +688,22 @@ button {
   display: flex;
   align-items: stretch;
   gap: 0;
-  padding: 4px 12px;
+  padding: var(--space-1) var(--space-3);
   background: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
   overflow-x: auto;
   overflow-y: hidden;
 }
 
-/* One labelled cluster of tools (e.g. "Pipes", "Fixtures"). */
+/* One labelled cluster of tools (e.g. "Pipes", "Fixtures") - a little
+   more breathing room between clusters than between tools inside one,
+   so the ribbon reads as a row of small component groups, not one long
+   run of buttons. */
 .app-ribbon__group {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  padding: 0 8px;
+  padding: 0 var(--space-3);
   border-right: 1px solid var(--color-border);
 }
 
@@ -624,29 +729,38 @@ button {
   color: var(--color-text-muted);
   text-align: center;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--letter-spacing-label);
   white-space: nowrap;
 }
 
+/* Each tool renders as a small visual card - an icon tile over a label,
+   not a bare labelled button - so the ribbon reads as a component
+   palette rather than a row of tiny controls (task section 1: "Do not
+   simply show a long row of tiny buttons"). Kept inside the ribbon's
+   existing fixed row height (see --ribbon-height, Shell layout) rather
+   than growing it, so the shell's one-viewport-tall layout guarantee
+   (src/ui/verify.ts) is untouched. */
 .app-ribbon__item {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  min-width: 56px;
+  gap: 4px;
+  min-width: 60px;
   flex-shrink: 0;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
-  padding: 2px 6px;
+  border-radius: var(--radius-md);
+  padding: 3px 6px;
   cursor: pointer;
   color: var(--color-text);
+  transition: background-color 0.12s ease, border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
 }
 
 .app-ribbon__item:hover:not(:disabled) {
-  background: var(--color-surface-raised);
+  background: var(--color-accent-soft);
   border-color: var(--color-border);
+  transform: translateY(-1px);
 }
 
 .app-ribbon__item:disabled {
@@ -654,10 +768,13 @@ button {
   cursor: not-allowed;
 }
 
-/* A tool armed for pick-and-place - see PlacementController/RibbonTool.isActive. */
+/* A tool armed for pick-and-place - see PlacementController/RibbonTool.isActive.
+   The small lift (shadow-elevation-1) gives the armed state a touch more
+   presence than color alone, without turning it into a glow. */
 .app-ribbon__item--active {
   background: var(--color-accent);
   border-color: var(--color-accent);
+  box-shadow: var(--shadow-elevation-1);
 }
 
 .app-ribbon__item--active .app-ribbon__label {
@@ -674,13 +791,25 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  background: var(--color-surface-sunken);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
   border: 1px solid var(--color-border);
   font-size: 11px;
   font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+/* A drawn SVG icon (constructionIconSvg()/assetIconSvg()) fills the tile
+   with a little breathing room; its strokes use currentColor, so it
+   recolors for free with the box's own color rules above/below. A
+   not-yet-drawn tool's plain-text iconFor() letters are untouched by
+   this - it only targets an actual injected <svg>. */
+.app-ribbon__icon svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
 }
 
 .app-ribbon__item:not(:disabled) .app-ribbon__icon {
@@ -702,26 +831,38 @@ button {
   flex-shrink: 0;
   padding: 0;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   cursor: pointer;
 }
 
 /* ---------- Materials tab ---------- */
+/* Each material is a small visual swatch card (task section 15: "provide
+   visual swatches/cards", not a plain text list) - a real color chip
+   sized to actually read as a material sample, on a quiet card
+   background that lifts slightly on hover. */
 
 .material-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 3px 0;
+  gap: 10px;
+  padding: var(--space-2);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+}
+
+.material-row:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
 }
 
 .material-row__swatch {
-  width: 16px;
-  height: 16px;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
-  border-radius: 3px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
 }
 
 .material-row__label {
@@ -733,7 +874,7 @@ button {
 }
 
 .material-row__apply {
-  padding: 2px 8px;
+  padding: 3px 10px;
   font-size: 11px;
 }
 
@@ -792,7 +933,7 @@ button {
   margin: 4px 0 0;
   min-height: 0;
   font-size: 11px;
-  color: #ff8a80;
+  color: var(--color-danger);
 }
 
 .relation-note:empty {
@@ -810,16 +951,19 @@ button {
   display: flex;
   gap: 2px;
   padding: 2px;
-  background: rgba(26, 26, 26, 0.85);
+  background: var(--overlay-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   backdrop-filter: blur(2px);
+  /* A light lift so this reads as chrome floating over the 3D scene,
+     not a flat sticker on top of it - restrained, no glow. */
+  box-shadow: var(--shadow-elevation-1);
 }
 
 .view-controls__button {
   background: transparent;
   border: none;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 5px 10px;
   cursor: pointer;
   color: var(--color-text-muted);
@@ -840,6 +984,72 @@ button {
   align-self: stretch;
   margin: 2px 2px;
   background: var(--color-border);
+}
+
+/* ---------- Viewport empty state ---------- */
+/* Sits over the bare grid until the first object exists (see
+   ui/layout.ts's isProjectEmpty()/buildEmptyState()). The overlay itself
+   ignores pointer events so the grid stays orbitable behind it; only its
+   panel is interactive. A quiet call to action, not a marketing splash -
+   task section 16. */
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.empty-state[hidden] {
+  display: none;
+}
+
+.empty-state__panel {
+  pointer-events: auto;
+  width: min(380px, calc(100% - 48px));
+  padding: 28px 28px 24px;
+  text-align: center;
+  background: rgba(27, 29, 35, 0.82);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-panel);
+}
+
+.empty-state__eyebrow {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-brand);
+}
+
+.empty-state__title {
+  margin: 0 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--color-text);
+}
+
+.empty-state__hint {
+  margin: 0 0 20px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.empty-state__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.empty-state__button {
+  padding: 8px 16px;
 }
 
 /* ---------- Sidebars (shared) ---------- */
@@ -873,16 +1083,16 @@ button {
 }
 
 .sidebar__section {
-  padding: 12px;
+  padding: var(--space-3);
   border-bottom: 1px solid var(--color-border);
 }
 
 .sidebar__section-title {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--letter-spacing-label);
   color: var(--color-text-muted);
 }
 
@@ -890,6 +1100,93 @@ button {
   margin: 0;
   color: var(--color-text-muted);
   font-style: italic;
+}
+
+/* ---------- Asset library (left sidebar "Assets" tab) ---------- */
+/* Real visual thumbnails (assetIcons.ts) in a compact grid, grouped by
+   category, with a search field that filters the same catalog - task
+   sections 3-4. Cards stay small (see .asset-card) so the panel doesn't
+   compete with the viewport for attention. */
+
+.asset-library {
+  padding: 10px;
+}
+
+.asset-library__search {
+  display: block;
+  width: 100%;
+  margin-bottom: 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  color: var(--color-text);
+}
+
+.asset-library__search::placeholder {
+  color: var(--color-text-muted);
+}
+
+.asset-library__category {
+  margin-bottom: 6px;
+}
+
+.asset-library__category-title {
+  margin: 10px 0 6px;
+}
+
+.asset-library__category:first-child .asset-library__category-title {
+  margin-top: 0;
+}
+
+.asset-library__grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.asset-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-1);
+  cursor: pointer;
+  color: var(--color-text);
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+
+.asset-card:hover {
+  border-color: var(--color-accent);
+  transform: translateY(-1px);
+}
+
+.asset-card__icon {
+  width: 32px;
+  height: 32px;
+  color: var(--color-text-muted);
+}
+
+.asset-card:hover .asset-card__icon {
+  color: var(--color-accent);
+}
+
+.asset-card__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.asset-card__name {
+  font-size: 11px;
+  text-align: center;
+  line-height: 1.2;
+}
+
+.asset-library__empty {
+  padding: 4px 0;
 }
 
 /* ---------- Left rail + hierarchy ---------- */
@@ -909,7 +1206,7 @@ button {
 .sidebar-rail__item {
   background: transparent;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 8px 2px;
   cursor: pointer;
   color: var(--color-text-muted);
@@ -944,7 +1241,7 @@ button {
 
 .hierarchy-list__item {
   padding: 6px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--color-text);
 }
 
@@ -960,7 +1257,7 @@ button {
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 4px 8px;
   cursor: pointer;
   color: var(--color-text);
@@ -992,12 +1289,21 @@ button {
   font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: var(--letter-spacing-label);
   color: var(--color-text-muted);
 }
 
 .hierarchy-objects__group-title:first-child {
   margin-top: 0;
+}
+
+/* "Rooms" is the one group title that should read as a destination, not
+   a plain list header - the brand accent (also used for the AI panel and
+   the empty state's eyebrow) ties it to the same "this is a real place
+   in the building" idea Isolate/Focus already give it, without adding a
+   second interactive color. See leftSidebar.ts's buildProjectHierarchy(). */
+.hierarchy-objects__group-title--rooms {
+  color: var(--color-brand);
 }
 
 /* One object row: the select button plus its own visibility (eye) toggle. */
@@ -1021,7 +1327,7 @@ button {
   justify-content: center;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   cursor: pointer;
   font-size: 12px;
@@ -1038,7 +1344,7 @@ button {
 .hierarchy-room {
   margin-bottom: 4px;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -1069,7 +1375,7 @@ button {
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 3px 6px;
   color: var(--color-text);
   font-weight: 500;
@@ -1086,7 +1392,7 @@ button {
   font-size: 10.5px;
   background: transparent;
   border: 1px solid var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   color: var(--color-text-muted);
   cursor: pointer;
 }
@@ -1149,6 +1455,18 @@ button {
   border-bottom-color: var(--color-accent);
 }
 
+/* Nothing selected: a quiet project-stats line above the usual hint -
+   see rightSidebar.ts's buildEmptyState(). */
+.empty-inspector__stat {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  font-style: normal;
+}
+
 /* ---------- Property panel (right sidebar, Properties tab) ---------- */
 
 .property-panel__actions {
@@ -1192,7 +1510,7 @@ button {
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 6px 8px;
   cursor: pointer;
   color: var(--color-text);
@@ -1249,7 +1567,7 @@ button {
   min-width: 0;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 3px 6px;
   color: var(--color-text);
   font-weight: 500;
@@ -1284,7 +1602,7 @@ button {
   width: 100%;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   padding: 4px 8px;
   cursor: pointer;
   color: var(--color-text);
@@ -1311,11 +1629,20 @@ button {
 
 /* ---------- Property rows (right sidebar) ---------- */
 
+/* Each row reads as one line of a spec sheet - a quiet hairline between
+   rows (not around every row) is enough to keep a dense property list
+   scannable without turning every row into its own bordered card. */
 .property-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 0;
+  gap: var(--space-2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.property-row:last-child {
+  border-bottom: none;
 }
 
 .property-row__label {
@@ -1330,7 +1657,7 @@ button {
 .color-swatch {
   width: 16px;
   height: 16px;
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   border: 1px solid var(--color-border);
 }
 
@@ -1348,7 +1675,7 @@ button {
   width: 72px;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   padding: 3px 6px;
   color: var(--color-text);
   text-align: right;
@@ -1376,7 +1703,7 @@ button {
   height: 20px;
   padding: 0;
   border: 1px solid var(--color-border);
-  border-radius: 3px;
+  border-radius: var(--radius-xs);
   background: var(--color-bg);
   cursor: pointer;
 }
@@ -1422,6 +1749,16 @@ button {
   border-bottom-color: var(--color-accent);
 }
 
+/* AI Prompt's own tab content: the input row, plus the result card below
+   it once a build creates something (see ui/commandBar.ts). A plain
+   column - the fixed-height command bar row scrolls internally
+   (.tab-strip__panel) if the card makes it taller than the chrome's
+   own --bottomworkspace-height. */
+.command-bar__column {
+  display: flex;
+  flex-direction: column;
+}
+
 .command-bar__row {
   display: flex;
   align-items: center;
@@ -1433,9 +1770,14 @@ button {
   flex: 1;
   background: var(--color-bg);
   border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
   color: var(--color-text);
+}
+
+.command-bar__input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
 }
 
 .command-bar__input::placeholder {
@@ -1447,15 +1789,19 @@ button {
 }
 
 .command-bar__ai-button {
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  padding: 8px 16px;
+  background: var(--color-accent);
+  color: var(--color-accent-text);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-4);
+  font-weight: 600;
   flex-shrink: 0;
 }
 
 .command-bar__ai-button:disabled {
+  background: var(--color-surface-raised);
   color: var(--color-text-muted);
+  border-color: var(--color-border);
   cursor: not-allowed;
 }
 
@@ -1464,15 +1810,167 @@ button {
   font-size: 12px;
   flex-shrink: 1;
   min-width: 0;
+  padding: 0 16px 8px;
+}
+
+/* ---------- EAVARA AI panel (the AI Prompt tab's own chrome) ---------- */
+/* A quiet identity for the AI Prompt tab - task section 18: "should feel
+   like a design assistant", not a bare text form indistinguishable from
+   any other input row. The mark reuses the same brand accent color as
+   the header's EAVARA lockup (--color-brand) so it reads as the same
+   product identity, not a second competing accent. */
+.ai-panel__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.ai-panel__mark {
+  color: var(--color-brand);
+  font-size: 14px;
+}
+
+/* Slightly stronger than the ordinary sidebar/ribbon eyebrow (bolder,
+   wider tracking, the brand color instead of muted gray) - this is the
+   one line that should read "EAVARA, your design assistant," not just
+   another section label. */
+.ai-panel__title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-brand);
+}
+
+/* Example instructions (task section 20) - a starting point shown only
+   while the input is empty and idle (see commandBar.ts's
+   updateExamplesVisibility()), never a fixed row of decoration. Each is
+   a real button that fills the input, not a static hint. */
+.ai-panel__examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-2);
+}
+
+.ai-panel__examples[hidden] {
+  display: none;
+}
+
+.ai-panel__example {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ai-panel__example:hover {
+  color: var(--color-text);
+  border-color: var(--color-accent);
 }
 
 /* AI Prompt tab result states - same danger/success colors already used elsewhere (toolbar-button--danger, --color-success). */
 .command-bar__note--error {
-  color: #ff8a80;
+  color: var(--color-danger);
 }
 
 .command-bar__note--success {
   color: var(--color-success);
+}
+
+/* ---------- AI result card ---------- */
+/* "AI BUILD COMPLETE" - a compact architectural action summary (task
+   section 13), not a plain "Success." line - shown under the AI Prompt
+   row once a response creates something (see AiPromptController.summary /
+   ui/commandBar.ts's buildAiResultCard()). Kept small and quiet: a thin
+   brand-colored left rule, not a big card competing with the viewport. */
+.ai-result-container:empty {
+  display: none;
+}
+
+.ai-result {
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-brand);
+  border-radius: var(--radius-md);
+  /* A quiet lift so the result reads as its own surface handed back by
+     the assistant, not just another paragraph in the panel. */
+  box-shadow: var(--shadow-elevation-1);
+}
+
+.ai-result__heading {
+  margin: 0 0 3px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-brand);
+}
+
+.ai-result__line {
+  margin: 0;
+  color: var(--color-text);
+}
+
+/* The rich, human-readable design summary (summarizeHouseDesign(), or an
+   ordinary response's own notes) - slightly muted relative to the plain
+   object-count line beneath it, since it reads as the "why", not the
+   headline. */
+.ai-result__line--notes {
+  color: var(--color-text-muted);
+  margin-bottom: 4px;
+}
+
+.ai-result__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-result__action {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* "AI Could Not Complete Request" - buildAiErrorCard()'s failure
+   counterpart to the success card above, same shape/weight but in the
+   danger color already used elsewhere (command-bar__note--error). */
+.ai-result--error {
+  border-left-color: var(--color-danger);
+}
+
+.ai-result__heading--error {
+  color: var(--color-danger);
+}
+
+.ai-result__details-toggle {
+  margin-top: 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 11px;
+  text-decoration: underline;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.ai-result__details {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* ---------- Status bar ---------- */
@@ -1525,6 +2023,25 @@ button {
 
 .status-bar__item--placing .status-bar__dot {
   background: var(--color-accent);
+}
+
+/* The Cancel button that appears alongside the placing banner - a real,
+   always-visible way out of placement mode, not Escape-or-nothing. */
+.status-bar__cancel {
+  margin-left: 4px;
+  padding: 1px 8px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: transparent;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+}
+
+.status-bar__cancel:hover {
+  background: var(--color-accent);
+  color: var(--color-surface);
 }
 
 /* ---------- Responsive: collapse the 3-column body below 1024px ---------- */

@@ -3,6 +3,7 @@
 // verify.ts scripts both do. Harmless for Vite.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
 import { getElementKind } from "../elements/catalog.ts";
+import { getAssetDefinition } from "../assets/catalog.ts";
 import type { ObjectType } from "../objects/types";
 import type { AIContextAssembly, AIContextObject, AIProjectSnapshot } from "./types";
 
@@ -129,6 +130,20 @@ function parseObject(raw: unknown, path: string): Parsed<AIContextObject> {
     elementFields = { kind, label };
   }
 
+  // Likewise, a design asset names its catalog assetId and label.
+  let assetFields: { assetId: string; label: string } | null = null;
+  if (type === "asset") {
+    const assetId = raw.assetId;
+    if (typeof assetId !== "string" || !getAssetDefinition(assetId)) {
+      return { ok: false, error: `"${path}.assetId" must be a known asset.` };
+    }
+    const label = raw.label;
+    if (typeof label !== "string") {
+      return { ok: false, error: `"${path}.label" must be a string.` };
+    }
+    assetFields = { assetId, label };
+  }
+
   // A hosted door or window names its wall.
   let hostFields: { hostId: string } | null = null;
   if (raw.hostId !== undefined) {
@@ -165,6 +180,7 @@ function parseObject(raw: unknown, path: string): Parsed<AIContextObject> {
       id,
       type: type as ObjectType,
       ...(elementFields ?? {}),
+      ...(assetFields ?? {}),
       ...(hostFields ?? {}),
       ...(connectionFields ?? {}),
       position: { x, y, z },

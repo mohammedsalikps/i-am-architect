@@ -35,6 +35,17 @@ export const LOCAL_AXIS_DIMENSIONS: Readonly<Record<string, Readonly<LocalAxisDi
 });
 
 /**
+ * A design asset's axes are fixed (width/height/depth - see
+ * engine/assets/types.ts's AssetDimensions), not read from a single
+ * literal THREE.BoxGeometry(...) call the way the table above is (an
+ * asset's mesh is a loaded GLTF group, not one box - see
+ * scene/assets/AssetLayer.ts) - so, like an element's per-kind axes,
+ * this is its own branch in localAxesFor() below rather than a table
+ * entry geometry/verify.ts's source-matching check would look for.
+ */
+export const ASSET_AXES: Readonly<LocalAxisDimensions> = Object.freeze({ x: "width", y: "height", z: "depth" });
+
+/**
  * Every derived number is rounded to this many decimal places (a
  * nanometre). Without it, rotating a 0.2 m thick wall by exactly 90
  * degrees gives an X extent of 0.20000000000000024 - cos(pi/2) isn't
@@ -70,6 +81,9 @@ function capitalize(text: string): string {
 export function localAxesFor(type: string, kind?: string): Readonly<LocalAxisDimensions> | undefined {
   if (type === "element") {
     return kind === undefined ? undefined : getElementKind(kind)?.axes;
+  }
+  if (type === "asset") {
+    return ASSET_AXES;
   }
   return Object.prototype.hasOwnProperty.call(LOCAL_AXIS_DIMENSIONS, type) ? LOCAL_AXIS_DIMENSIONS[type] : undefined;
 }

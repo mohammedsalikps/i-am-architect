@@ -252,15 +252,37 @@ function run(): void {
     const ring = layout.rotate;
     assertTrue(ring, "a pillar gets a rotation ring");
     assertEqual(ring.y, -1.5, "ring at the base");
-    assertClose(ring.radius, Math.hypot(0.2, 0.4) + 0.8, "ring clears the corners");
+    assertClose(ring.radius, Math.max(0.2, 0.4) + 0.95, "ring clears the farther side handle, measured from that handle's own reach");
     assertSameJson(layout.endpoints, [], "no endpoint handles - it isn't a linear element");
     for (const handle of layout.resize.slice(0, 4)) {
       const reach = Math.hypot(handle.position.x, handle.position.z);
-      // 0.2 m handle hit sphere + 0.25 m ring hit band (src/scene/manipulation/ManipulationHandles.ts) never overlap.
-      assertTrue(ring.radius - reach >= 0.2 + 0.25, `side handle ${handle.axis}${handle.side} stays clear of the ring`);
+      // 0.2 m handle hit sphere + 0.25 m ring hit band + 0.15 m real
+      // clearance (src/scene/manipulation/ManipulationHandles.ts) never
+      // overlap, and never come closer than 0.15 m - see
+      // ROTATE_RING_MARGIN's own comment for why "never overlap" alone
+      // (the old >= 0.45 threshold) wasn't a strong enough guarantee.
+      assertTrue(ring.radius - reach >= 0.2 + 0.25 + 0.15, `side handle ${handle.axis}${handle.side} stays comfortably clear of the ring`);
     }
     assertEqual(layoutHandles({ type: "roof", dimensions: { length: 4 } }), null, "no handles for an unknown type");
     assertEqual(layoutHandles({ type: "wall", dimensions: { height: 2.7, length: 0, thickness: 0.2 } }), null, "no handles on a degenerate shape");
+  });
+
+  check("B2. regression: an elongated object's ring stays clear of its length handle by a real margin, not a near-zero one", () => {
+    // A typical wall: length 4 m, thickness 0.2 m - the exact shape that,
+    // with the ring radius measured from the diagonal (Math.hypot) instead
+    // of the longer half-dimension (Math.max), left only ~2.5 mm of real
+    // clearance between the length handle's hit sphere and the ring's hit
+    // torus - confirmed by hand: a drag aimed at the handle repeatedly
+    // grabbed the ring instead.
+    const layout = layoutHandles({ type: "wall", dimensions: { length: 4, height: 2.7, thickness: 0.2 } });
+    assertTrue(layout, "a wall gets handles");
+    const ring = layout.rotate;
+    assertTrue(ring, "a wall gets a rotation ring");
+    const lengthHandle = layout.resize.find((handle) => handle.axis === "x" && handle.side === 1);
+    assertTrue(lengthHandle, "a +X length handle exists");
+    const reach = Math.hypot(lengthHandle.position.x, lengthHandle.position.z);
+    const clearance = ring.radius - reach - 0.2 - 0.25;
+    assertTrue(clearance >= 0.15 - 1e-9, `expected at least 0.15 m real clearance for an elongated object, got ${clearance} m`);
   });
 
   // --- C. Rotation ---

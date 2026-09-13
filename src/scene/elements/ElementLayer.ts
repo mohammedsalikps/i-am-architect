@@ -43,9 +43,16 @@ export class ElementLayer {
     this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
-  /** Every element part, for the shared SelectionRaycaster to raycast against. */
+  /**
+   * Every element part, for the shared SelectionRaycaster/
+   * ManipulationController to raycast against - hidden elements excluded.
+   * See WallLayer.getMeshes()'s own comment for why this filtering has
+   * to happen here: THREE.Raycaster doesn't consult `.visible` itself.
+   */
   getMeshes(): THREE.Object3D[] {
-    return Array.from(this.entries.values()).flatMap((entry) => entry.visual.meshes);
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.visual.group.visible)
+      .flatMap((entry) => entry.visual.meshes);
   }
 
   private syncElements(elements: ElementData[]): void {

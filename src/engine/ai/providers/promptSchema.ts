@@ -4,6 +4,7 @@ import type { ConstructionGeometryAnalysis, GeometryVector } from "../geometry/t
 // directly (providers/verify.ts, the backend). Harmless for Vite. Both are
 // pure data: the element catalog and the material library.
 import { ELEMENT_KINDS } from "../../elements/catalog.ts";
+import { ASSET_DEFINITIONS } from "../../assets/catalog.ts";
 import { MATERIAL_LIBRARY } from "../../materials/materialLibrary.ts";
 
 /**
@@ -40,6 +41,7 @@ export const COMMAND_TYPES = [
   "window.add",
   "element.add",
   "element.connect",
+  "asset.add",
   "update_object"
 ] as const;
 
@@ -102,6 +104,32 @@ const ELEMENT_OPTION_SCHEMA = {
     color: { type: "string" }
   },
   required: ["kind"]
+};
+
+/**
+ * "asset.add"'s options - the same CreateAssetOptions CommandExecutor
+ * takes (see assets/createAsset.ts). The assetId and material enums come
+ * straight from the asset catalog and the material library, so the model
+ * can only name assets and materials the engine has; everything else is
+ * still validated by AssetStore before anything is created.
+ */
+const ASSET_OPTION_SCHEMA = {
+  type: "object",
+  description: 'Only when type is "asset.add" - places one design asset (furniture, a fixture, lighting, decor). "assetId" is required; every other field is optional - omit it to use the asset\'s own default.',
+  properties: {
+    assetId: { type: "string", enum: ASSET_DEFINITIONS.map((definition) => definition.id) },
+    label: { type: "string", description: "The name people see, e.g. \"Sofa\"." },
+    position: POSITION_SCHEMA,
+    rotation: { type: "number" },
+    dimensions: {
+      type: "object",
+      description: "The asset's real-world box, in meters. Any of width/height/depth - omitted ones use the asset's own default size.",
+      properties: { width: { type: "number" }, height: { type: "number" }, depth: { type: "number" } }
+    },
+    material: { type: "string", enum: MATERIAL_LIBRARY.map((material) => material.id) },
+    color: { type: "string" }
+  },
+  required: ["assetId"]
 };
 
 /**
@@ -239,6 +267,7 @@ export const RESPONSE_JSON_SCHEMA = {
               }
             },
             element: ELEMENT_OPTION_SCHEMA,
+            asset: ASSET_OPTION_SCHEMA,
             from: ENDPOINT_REFERENCE_SCHEMA("first"),
             to: ENDPOINT_REFERENCE_SCHEMA("second")
           },
@@ -366,6 +395,8 @@ function toModelContext(snapshot: AIProviderRequest["projectContext"]): AIProvid
       // An element also names its catalog kind and label; the six original
       // types have neither, so their projection is unchanged.
       ...(object.kind !== undefined ? { kind: object.kind, label: object.label ?? "" } : {}),
+      // Likewise, a design asset names its catalog assetId and label.
+      ...(object.assetId !== undefined ? { assetId: object.assetId, label: object.label ?? "" } : {}),
       ...(object.hostId !== undefined ? { hostId: object.hostId } : {}),
       ...(object.connections !== undefined
         ? {
@@ -430,6 +461,23 @@ function elementPromptLines(): string[] {
   ];
 }
 
+/**
+ * The design-asset catalog as a model reads it: every asset with its
+ * category and real-world default size, plus the material library ids.
+ * Generated from the registry, so the prompt can never offer an asset or
+ * material the engine doesn't have.
+ */
+function assetPromptLines(): string[] {
+  const assets = ASSET_DEFINITIONS.map(
+    (definition) =>
+      `${definition.id} (${definition.category}; default ${definition.defaultDimensions.width}x${definition.defaultDimensions.height}x${definition.defaultDimensions.depth} m)`
+  ).join(", ");
+  return [
+    `"asset.add" places one design asset (furniture, a fixture, lighting, decor - NOT a construction element): "asset.assetId" is required and must be one of these (category; default width x height x depth in meters): ${assets}. Omit "dimensions" to use the asset's own default size, or give any of width/height/depth to resize it. "position" rests it on the floor by default (omit position.y).`,
+    `Some element kinds (e.g. "bed", "sofa", "chair", "table") share a name with a design asset above. For furniture, fixtures, lighting, or decor, ALWAYS use asset.add with the matching assetId, never the element kind of the same name - the asset is a real placed model with its own real-world size; the similarly-named element kind is a legacy construction-catalog entry kept only for existing projects. Use element.add only for what has no asset equivalent above: rooms, flooring, ceilings, plumbing, electrical, structural/site elements.`
+  ];
+}
+
 /** How a model expresses relationships: an opening in a wall, and connected endpoints. */
 const RELATIONSHIP_PROMPT_LINES: readonly string[] = [
   `A door or window can go INTO an existing wall: in "door.add" / "window.add" give "hostId" (that wall's id from the current construction state) and optionally "offset" (meters along the wall from its center) and "sill" (meters above the wall's base), and leave out position and rotation - the application places it in the wall, and it then moves and turns with the wall. To move a hosted opening, "update_object" its position: it slides along its wall.`,
@@ -486,6 +534,9 @@ export function buildSystemPrompt(request: AIProviderRequest): string {
   ];
   if (request.availableObjectTypes.includes("element")) {
     lines.push(...elementPromptLines());
+  }
+  if (request.availableObjectTypes.includes("asset")) {
+    lines.push(...assetPromptLines());
   }
   lines.push(...RELATIONSHIP_PROMPT_LINES);
   return lines.join("\n");

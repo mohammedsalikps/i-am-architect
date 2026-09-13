@@ -24,7 +24,7 @@
 // of an @types/node dependency.
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { analyzeConstructionGeometry, GEOMETRY_DECIMALS, LOCAL_AXIS_DIMENSIONS, localAxesFor } from "./analyzeConstructionGeometry.ts";
+import { analyzeConstructionGeometry, ASSET_AXES, GEOMETRY_DECIMALS, LOCAL_AXIS_DIMENSIONS, localAxesFor } from "./analyzeConstructionGeometry.ts";
 import { ELEMENT_KINDS } from "../../elements/catalog.ts";
 import type { ConstructionGeometryAnalysis, DirectionalRelation, GeometryError, ObjectGeometry } from "./types.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, compareIds } from "../types.ts";
@@ -293,10 +293,12 @@ function run(): void {
   });
 
   check("the table covers exactly the AI-supported types, and exactly the dimensions each validator checks", () => {
-    // Elements take their axes from the element catalog, per kind - see the next check.
+    // Elements take their axes from the element catalog, per kind, and
+    // assets from ASSET_AXES (a fixed width/height/depth, not one mesh
+    // builder's BoxGeometry call) - see the next two checks.
     assertSameJson(
       Object.keys(LOCAL_AXIS_DIMENSIONS).sort(),
-      AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "element").sort(),
+      AI_SUPPORTED_OBJECT_TYPES.filter((type) => type !== "element" && type !== "asset").sort(),
       "table types"
     );
     for (const type of Object.keys(FILE_NAMES)) {
@@ -313,6 +315,11 @@ function run(): void {
     assertEqual(localAxesFor("element", "spaceship"), undefined, "unknown kind");
     assertEqual(localAxesFor("element"), undefined, "no kind");
     assertSameJson(localAxesFor("wall"), LOCAL_AXIS_DIMENSIONS.wall, "the six original types still use the table");
+  });
+
+  check("an asset's axes are always width/height/depth, regardless of which asset", () => {
+    assertSameJson(localAxesFor("asset"), ASSET_AXES, "asset axes");
+    assertSameJson(localAxesFor("asset", "sofa"), ASSET_AXES, "an assetId doesn't change the axes - every asset uses the same three");
   });
 
   // --- A. Unrotated wall ---

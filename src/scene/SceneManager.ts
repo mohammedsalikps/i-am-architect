@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
+import { createHorizonBackground, HORIZON_FOG_COLOR } from "./environment";
 import { WallLayer } from "./wall/WallLayer";
 import { PillarLayer } from "./pillar/PillarLayer";
 import { BeamLayer } from "./beam/BeamLayer";
@@ -9,6 +10,8 @@ import { SlabLayer } from "./slab/SlabLayer";
 import { DoorLayer } from "./door/DoorLayer";
 import { WindowLayer } from "./window/WindowLayer";
 import { ElementLayer } from "./elements/ElementLayer";
+import { AssetLayer } from "./assets/AssetLayer";
+import { AssetLoader } from "./assets/AssetLoader";
 import { SelectionRaycaster } from "./SelectionRaycaster";
 import { ManipulationHandles } from "./manipulation/ManipulationHandles";
 import { ManipulationController } from "./manipulation/ManipulationController";
@@ -27,6 +30,7 @@ import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
+import type { AssetStore } from "../engine/assets/AssetStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 
 /** Camera view presets the UI's view-control buttons can request. */
@@ -69,6 +73,7 @@ export class SceneManager {
     doorStore: DoorStore,
     windowStore: WindowStore,
     elementStore: ElementStore,
+    assetStore: AssetStore,
     selectionStore: SelectionStore,
     /** The shared CommandExecutor and HistoryManager - mouse manipulation edits the model only through these. */
     commandExecutor: { execute(input: unknown): CommandResult },
@@ -81,7 +86,14 @@ export class SceneManager {
     this.container = container;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a1a);
+    // A soft vertical gradient (see environment.ts) rather than a flat
+    // fill - a lighter "horizon" band gives the viewport depth, the
+    // single biggest lever on "does this look like an empty void" short
+    // of a full sky/landscape (left for a later milestone) - plus a
+    // matching fog so distant geometry softens into that same tone
+    // instead of clipping hard at the camera's far plane.
+    this.scene.background = createHorizonBackground();
+    this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, 30, 80);
 
     this.camera = new THREE.PerspectiveCamera(
       60,
@@ -93,12 +105,39 @@ export class SceneManager {
     this.camera.lookAt(0, 0, 0);
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    // Capped at 2x: a real quality/perf tradeoff - uncapped device pixel
+    // ratio on a 3x display quadruples fragment-shader cost for a gain
+    // no one can see, and this app is judged on interaction smoothness.
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(container.clientWidth, container.clientHeight);
+    // Soft shadows (see lights.ts's shadow-casting sun) and filmic tone
+    // mapping are what actually make MeshStandardMaterial read as real
+    // materials instead of flat-shaded primitives - this is the
+    // renderer-level half of "materials should look like materials"
+    // (the other half is resolveSurfaceAppearance() feeding each mesh's
+    // material from engine/materials/materialLibrary.ts).
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true; // smoother pan/rotate/zoom feel
+    this.controls.dampingFactor = 0.08;
+    // Close enough to inspect a room from the inside (section 18's
+    // "interior view" - no separate first-person system, just letting
+    // OrbitControls get close), far enough out that "Fit House" on a
+    // large project never asks for more distance than this allows.
+    this.controls.minDistance = 1.2;
+    this.controls.maxDistance = 80;
+    // Stops just short of the horizon rather than letting the camera dip
+    // underneath the ground plane and look up at the building's
+    // underside - a small but real "does this feel like a professional
+    // viewport" detail. Comfortably above the tightest interior angle
+    // minDistance already allows.
+    this.controls.maxPolarAngle = Math.PI * 0.49;
 
     addLights(this.scene);
     addGround(this.scene);
@@ -114,6 +153,8 @@ export class SceneManager {
     const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore, visibilityStore);
     const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore, visibilityStore);
     const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore, visibilityStore);
+    const assetLoader = new AssetLoader();
+    const assetLayer = new AssetLayer(this.scene, assetStore, selectionStore, visibilityStore, assetLoader);
     this.getAllMeshes = () => [
       ...wallLayer.getMeshes(),
       ...pillarLayer.getMeshes(),
@@ -121,7 +162,8 @@ export class SceneManager {
       ...slabLayer.getMeshes(),
       ...doorLayer.getMeshes(),
       ...windowLayer.getMeshes(),
-      ...elementLayer.getMeshes()
+      ...elementLayer.getMeshes(),
+      ...assetLayer.getMeshes()
     ];
 
     // One shared raycaster combines every layer's meshes into a single
@@ -135,20 +177,35 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
     selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
     selectionRaycaster.registerLayer(() => elementLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => assetLayer.getMeshes());
 
     // Mouse manipulation of the selected object: handles render from the
     // stores like any layer, and every drag becomes update_object commands
     // through the shared CommandExecutor, one history entry per gesture.
     // See engine/manipulation/ObjectManipulator.ts. Kept alive by their
     // own listeners, like the layers above.
-    const stores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore };
+    const stores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore, assetStore };
     const readObject = createStoreObjectReader(stores);
     const handles = new ManipulationHandles({
       scene: this.scene,
       selectionStore,
-      stores: [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore],
-      readObject
+      stores: [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore, assetStore],
+      readObject,
+      isHidden: (id) => visibilityStore.isHidden(id),
+      subscribeVisibility: (listener) => visibilityStore.subscribe(listener)
     });
+    // A small, compact readout for the gesture currently in progress
+    // ("X 4.20 m   Z -1.30 m", "Length 5.80 m", "Rotation 90°") - shown
+    // only while dragging, gone the instant it ends. Purely a display of
+    // the same value the Properties panel already shows live during a
+    // drag (confirmed by hand: dragging a wall's endpoint updates its
+    // Length field in real time) - this doesn't compute or store
+    // anything of its own, see ManipulationController's formatReadout().
+    const readout = document.createElement("div");
+    readout.className = "manipulation-readout";
+    readout.hidden = true;
+    container.appendChild(readout);
+
     new ManipulationController({
       container,
       canvas: this.renderer.domElement,
@@ -162,8 +219,14 @@ export class SceneManager {
         ...slabLayer.getMeshes(),
         ...doorLayer.getMeshes(),
         ...windowLayer.getMeshes(),
-        ...elementLayer.getMeshes()
+        ...elementLayer.getMeshes(),
+        ...assetLayer.getMeshes()
       ],
+      readObject,
+      onReadout: (text) => {
+        readout.hidden = text === null;
+        readout.textContent = text ?? "";
+      },
       manipulator: new ObjectManipulator({
         commandExecutor,
         history,

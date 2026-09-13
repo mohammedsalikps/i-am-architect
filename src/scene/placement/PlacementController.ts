@@ -13,6 +13,15 @@ export interface PlacementTool {
   label: string;
   /** The new object's rough footprint, for the ghost preview - world meters, before rotation. */
   ghostSize: { x: number; y: number; z: number };
+  /**
+   * Whether a successful placement should leave the tool armed for
+   * another one, instead of returning to normal selection mode. Defaults
+   * to false (single-shot) when omitted - see main.ts's armPlacement()
+   * for the per-tool decision. Only Wall currently opts into true: walls
+   * are naturally placed end-to-end in a run, while a pillar/door/window/
+   * room/asset is normally placed once per click of its own tool.
+   */
+  repeat?: boolean;
   /** Executes the real construction command at the clicked ground point - the same command path a ribbon click used to run instantly. */
   place(point: GroundPoint): void;
 }
@@ -101,7 +110,13 @@ export class PlacementController {
     this.onDeselect = onDeselect;
   }
 
-  /** Loads a tool: the next click in the viewport places it. Stays armed for repeated placement until disarm()/Escape/arming a different tool. */
+  /**
+   * Loads a tool: the next click in the viewport places it. Unless
+   * `tool.repeat` is true, one successful placement disarms automatically
+   * and returns to normal selection mode - see handlePointerUp(). A
+   * repeating tool (or one placement still pending) can always be left
+   * early with disarm()/Escape/arming a different tool.
+   */
   arm(tool: PlacementTool): void {
     this.tool = tool;
     sizeGhost(this.ghost, tool.ghostSize);
@@ -169,7 +184,11 @@ export class PlacementController {
     // A genuine placement click - keep it from OrbitControls and click-to-select, exactly like a manipulation press.
     event.stopPropagation();
     event.preventDefault();
-    this.tool.place({ x: point.x, z: point.z });
+    const tool = this.tool;
+    tool.place({ x: point.x, z: point.z });
+    if (!tool.repeat) {
+      this.disarm();
+    }
   };
 
   private readonly handlePointerMove = (event: PointerEvent): void => {

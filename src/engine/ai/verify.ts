@@ -1199,7 +1199,7 @@ async function run(): Promise<void> {
 
   await check("AiPromptController starts idle", () => {
     const controller = new AiPromptController(async () => makeResult());
-    assertDeepEqual(controller.getState(), { status: "idle", message: null, notes: null }, "initial state");
+    assertDeepEqual(controller.getState(), { status: "idle", message: null, notes: null, summary: null, details: null }, "initial state");
   });
 
   await check("AiPromptController transitions submitting -> success and reports a summary message", async () => {
@@ -1316,9 +1316,59 @@ async function run(): Promise<void> {
 
     assertDeepEqual(
       ownProperties,
-      ["listeners", "state", "submitInstruction"],
+      ["listeners", "onCreated", "state", "submitInstruction"],
       "AiPromptController's own instance properties"
     );
+  });
+
+  await check("AiPromptController's result summary counts only objects actually created, and reports them to onCreated", async () => {
+    const created: string[][] = [];
+    const controller = new AiPromptController(
+      async () =>
+        makeResult({
+          outcomes: [
+            { command: { type: "wall.add", wall: {} }, result: { success: true, objectId: "wall-1" } },
+            { command: { type: "wall.add", wall: {} }, result: { success: true, objectId: "wall-2" } },
+            { command: { type: "element.add", element: { kind: "room" } }, result: { success: true, objectId: "element-1" } },
+            // A door.update never created anything - it must not be counted, even though it succeeded.
+            { command: { type: "door.update", id: "door-1", changes: {} }, result: { success: true } }
+          ]
+        }),
+      (objectIds) => created.push([...objectIds])
+    );
+
+    await controller.submit("Create a room with two walls");
+
+    const summary = controller.getState().summary;
+    assertTrue(summary !== null, "a build that created objects should report a summary");
+    assertEqual(summary?.total, 3, "total created (the update is excluded)");
+    assertDeepEqual(summary?.byType, [{ label: "room", count: 1 }, { label: "walls", count: 2 }], "grouped by type, rooms first");
+    assertDeepEqual(summary?.objectIds, ["wall-1", "wall-2", "element-1"], "every created object's id, in outcome order");
+    assertDeepEqual(created, [["wall-1", "wall-2", "element-1"]], "onCreated is called once, with the same ids");
+  });
+
+  await check("AiPromptController reports no summary when nothing was created (an edit-only instruction, or a failure)", async () => {
+    const created: string[][] = [];
+    const editOnly = new AiPromptController(
+      async () =>
+        makeResult({
+          outcomes: [{ command: { type: "wall.update", id: "wall-1", changes: {} }, result: { success: true } }]
+        }),
+      (objectIds) => created.push([...objectIds])
+    );
+    await editOnly.submit("Make the wall longer");
+    assertEqual(editOnly.getState().summary, null, "an edit-only success has nothing to summarize");
+    assertEqual(created.length, 0, "onCreated should not fire when nothing was created");
+
+    const failed = new AiPromptController(async () =>
+      makeResult({
+        success: false,
+        outcomes: [{ command: { type: "wall.add", wall: {} }, result: { success: false } }],
+        errors: [{ stage: "validation", message: "validation failed" }]
+      })
+    );
+    await failed.submit("Create a wall");
+    assertEqual(failed.getState().summary, null, "a failed build has nothing to summarize");
   });
 
   // --- AI Prompt submit key ---

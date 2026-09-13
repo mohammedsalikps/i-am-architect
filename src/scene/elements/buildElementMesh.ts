@@ -351,10 +351,16 @@ export function buildElementVisual(element: ElementData): ElementVisual {
   group.userData.objectId = element.id;
 
   const meshes = buildParts(definition?.shape ?? "box", size, element, surfaceMaterial(element));
+  // A room's floor plate is deliberately click-through and depth-write-off
+  // (see the "room" case in buildParts) - it stays out of the shadow pass
+  // too, so it never casts a faint shadow onto whatever is below it.
+  const isRoomFloor = definition?.shape === "room";
   for (const mesh of meshes) {
     // objectId on every part: SelectionRaycaster reads this same field on
     // whatever it hits, regardless of construction-object type.
     mesh.userData.objectId = element.id;
+    mesh.castShadow = !isRoomFloor;
+    mesh.receiveShadow = true;
     group.add(mesh);
   }
   if (definition?.shape === "room") {

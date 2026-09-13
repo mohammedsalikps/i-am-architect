@@ -7,7 +7,7 @@ import { createLeftSidebar } from "./leftSidebar";
 import { createRightSidebar } from "./rightSidebar";
 import { createCommandBar } from "./commandBar";
 import type { AiInstructionSubmitter } from "../engine/ai/AiPromptController";
-import { createStatusBar } from "./statusBar";
+import { createStatusBar, type PlacementStatusInfo } from "./statusBar";
 import { createViewControls, type ViewPreset } from "./viewControls";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -16,6 +16,7 @@ import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
+import type { AssetStore } from "../engine/assets/AssetStore";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { HistoryManager } from "../engine/history/HistoryManager";
@@ -67,12 +68,15 @@ export type AppShellOptions = {
   doorStore: DoorStore;
   windowStore: WindowStore;
   elementStore: ElementStore;
+  assetStore: AssetStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
   commandExecutor: CommandExecutor;
   /** Whether drags snap - shown and toggled by the viewport's Snap button. */
   snapSettings: SnapSettings;
+  /** Arms pick-and-place for one catalog design asset - see ui/assetLibrary.ts and main.ts's addAsset(). */
+  onAddAsset: (assetId: string) => void;
 };
 
 /** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
@@ -90,6 +94,61 @@ function createSnapToggle(snapSettings: SnapSettings): HTMLElement {
   return el("div", { className: "view-controls" }, [button]);
 }
 
+/** True once every construction store is empty - a fresh "New Project" or a signed-out reset, before the first wall exists. */
+function isProjectEmpty(options: AppShellOptions): boolean {
+  return (
+    options.wallStore.getAll().length === 0 &&
+    options.pillarStore.getAll().length === 0 &&
+    options.beamStore.getAll().length === 0 &&
+    options.slabStore.getAll().length === 0 &&
+    options.doorStore.getAll().length === 0 &&
+    options.windowStore.getAll().length === 0 &&
+    options.elementStore.getAll().length === 0 &&
+    options.assetStore.getAll().length === 0
+  );
+}
+
+/**
+ * The viewport's own empty state (task section 16): shown over the bare
+ * grid until the first object exists, hidden the moment one does (see
+ * updateEmptyState() in createAppShell). Three real actions, not a
+ * marketing splash: "Build Manually" arms the Wall tool exactly like the
+ * ribbon's own Wall button (the same armPlacement() path - one click,
+ * then click the grid), "Ask AI to Design" focuses the AI Prompt tab's
+ * input, "Open Project" opens the same project chooser the header's
+ * "Open…" button does.
+ */
+function buildEmptyState(options: AppShellOptions, focusAiInput: () => void): HTMLElement {
+  const buildButton = el("button", {
+    className: "toolbar-button toolbar-button--primary empty-state__button",
+    text: "Build Manually",
+    attrs: { type: "button" }
+  });
+  buildButton.addEventListener("click", () => options.ribbonActions.addWall());
+
+  const aiButton = el("button", {
+    className: "toolbar-button empty-state__button",
+    text: "Ask AI to Design",
+    attrs: { type: "button" }
+  });
+  aiButton.addEventListener("click", focusAiInput);
+
+  const openButton = el("button", { className: "toolbar-button empty-state__button", text: "Open Project", attrs: { type: "button" } });
+  openButton.addEventListener("click", options.onOpenProject);
+
+  return el("div", { className: "empty-state" }, [
+    el("div", { className: "empty-state__panel" }, [
+      el("p", { className: "empty-state__eyebrow", text: "EAVARA · THE SCHOOL OF ARCHITECTURE" }),
+      el("h2", { className: "empty-state__title", text: "Start Building" }),
+      el("p", {
+        className: "empty-state__hint",
+        text: "Place your first wall, or describe the house you want and let AI lay it out."
+      }),
+      el("div", { className: "empty-state__actions" }, [buildButton, aiButton, openButton])
+    ])
+  ]);
+}
+
 export type AppShell = {
   /** Root element to mount into #app. */
   root: HTMLElement;
@@ -97,8 +156,8 @@ export type AppShell = {
   viewportContainer: HTMLElement;
   /** Re-checks every ribbon tool's enabled/active state - call after anything that could change one (e.g. PlacementController arming/disarming). */
   refreshRibbon: () => void;
-  /** Shows/clears the status bar's pick-and-place indicator - see PlacementController. */
-  setPlacementStatus: (text: string | null) => void;
+  /** Shows/clears the status bar's pick-and-place banner and Cancel button - see PlacementController. */
+  setPlacementStatus: (info: PlacementStatusInfo | null) => void;
 };
 
 /**
@@ -157,8 +216,10 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.doorStore,
     options.windowStore,
     options.elementStore,
+    options.assetStore,
     options.visibilityStore,
-    options.onFocusObjects
+    options.onFocusObjects,
+    options.onAddAsset
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
@@ -168,6 +229,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
     doorStore: options.doorStore,
     windowStore: options.windowStore,
     elementStore: options.elementStore,
+    assetStore: options.assetStore,
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,
@@ -180,11 +242,40 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // viewport itself instead of competing for header space.
   const viewControls = createViewControls(options.onViewChange, options.onFitToScene, options.onFocusSelected);
   const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings)]);
-  const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay]);
+
+  const commandBar = createCommandBar(
+    options.ribbonActions.addWall,
+    options.onSubmitAiInstruction,
+    options.onFocusObjects,
+    (objectId) => options.selectionStore.select(objectId)
+  );
+
+  // The viewport's own "nothing built yet" state (task: don't leave an
+  // empty scene looking dull) - a quiet call to action over the grid,
+  // not a heavy splash screen. Its own panel captures clicks
+  // (pointer-events) so the grid behind it stays orbitable even while
+  // it's showing.
+  const emptyState = buildEmptyState(options, commandBar.focusAiInput);
+  const updateEmptyState = (): void => {
+    emptyState.hidden = !isProjectEmpty(options);
+  };
+  updateEmptyState();
+  for (const store of [
+    options.wallStore,
+    options.pillarStore,
+    options.beamStore,
+    options.slabStore,
+    options.doorStore,
+    options.windowStore,
+    options.elementStore,
+    options.assetStore
+  ]) {
+    store.subscribe(updateEmptyState);
+  }
+
+  const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay, emptyState]);
 
   const body = el("div", { className: "app-body" }, [leftSidebar, viewportArea, rightSidebar]);
-
-  const commandBar = createCommandBar(options.ribbonActions.addWall, options.onSubmitAiInstruction);
 
   const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore });
 
@@ -193,7 +284,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
     mainNav,
     ribbon,
     body,
-    commandBar,
+    commandBar.element,
     statusBar.element
   ]);
 

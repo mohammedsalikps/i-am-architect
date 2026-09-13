@@ -19,6 +19,9 @@ import type { WindowValidationResult } from "../window/validateWindow";
 import type { CreateElementOptions } from "../elements/createElement";
 import type { ElementData, ElementId, Endpoint } from "../elements/types";
 import type { ElementValidationResult } from "../elements/validateElement";
+import type { CreateAssetOptions } from "../assets/createAsset";
+import type { AssetData, AssetId } from "../assets/types";
+import type { AssetValidationResult } from "../assets/validateAsset";
 import type { AssemblyData, AssemblyId } from "../assemblies/types";
 import type { ObjectId } from "../objects/types";
 
@@ -254,6 +257,29 @@ export interface DuplicateElementCommand {
   id: ElementId;
 }
 
+export interface AddAssetCommand {
+  type: "asset.add";
+  /** createAssetData()'s options: an assetId (assets/catalog.ts), plus any of its label, position, rotation, dimensions, material, color. */
+  asset: CreateAssetOptions;
+}
+
+export interface UpdateAssetCommand {
+  type: "asset.update";
+  id: AssetId;
+  /** Same shape AssetStore.update() takes - nested fields are complete replacements, and the assetId can't change. */
+  changes: Partial<Omit<AssetData, "id" | "type" | "assetId">>;
+}
+
+export interface DeleteAssetCommand {
+  type: "asset.delete";
+  id: AssetId;
+}
+
+export interface DuplicateAssetCommand {
+  type: "asset.duplicate";
+  id: AssetId;
+}
+
 export interface CreateAssemblyCommand {
   type: "assembly.create";
   /** Same shape as createAssemblyData()'s options - id/createdAt/updatedAt are always generated, never caller-supplied. */
@@ -313,6 +339,10 @@ export type Command =
   | UpdateElementCommand
   | DeleteElementCommand
   | DuplicateElementCommand
+  | AddAssetCommand
+  | UpdateAssetCommand
+  | DeleteAssetCommand
+  | DuplicateAssetCommand
   | ConnectElementsCommand
   | DisconnectElementsCommand
   | AlignObjectsCommand
@@ -347,7 +377,7 @@ export interface ObjectChanges {
   rotation?: number | { y: number };
   material?: string;
   color?: string;
-  /** Elements only: the name people see. */
+  /** Elements and assets only: the name people see. */
   label?: string;
   /** Elements only: any of the kind's parameters. */
   params?: Record<string, number | string>;
@@ -447,4 +477,11 @@ export interface ElementHistoryLike {
   add(element: ElementData): ElementValidationResult;
   update(id: ElementId, changes: Partial<Omit<ElementData, "id" | "type" | "kind">>): ElementValidationResult;
   remove(id: ElementId): void;
+}
+
+/** The asset equivalent of WallHistoryLike/ElementHistoryLike - one controller for every design asset. */
+export interface AssetHistoryLike {
+  add(asset: AssetData): AssetValidationResult;
+  update(id: AssetId, changes: Partial<Omit<AssetData, "id" | "type" | "assetId">>): AssetValidationResult;
+  remove(id: AssetId): void;
 }

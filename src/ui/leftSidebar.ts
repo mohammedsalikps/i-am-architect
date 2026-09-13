@@ -1,7 +1,9 @@
 import { el } from "./dom";
 import { createAssemblyPanel } from "./assemblyPanel";
+import { createAssetLibrary } from "./assetLibrary";
 import { createTabStrip, comingSoon } from "./tabStrip";
 import { ELEMENT_KINDS } from "../engine/elements/catalog";
+import { ASSET_DEFINITIONS } from "../engine/assets/catalog";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
@@ -13,11 +15,14 @@ import type { SlabStore } from "../engine/slab/SlabStore";
 import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
+import type { AssetStore } from "../engine/assets/AssetStore";
 import type { VisibilityStore } from "../scene/visibility/VisibilityStore";
 
 interface HierarchyObject {
   id: string;
   kind?: string;
+  /** Assets only: which catalog asset (assets/catalog.ts) - the asset equivalent of `kind`. */
+  assetId?: string;
   label?: string;
   hostId?: string | null;
   connections?: readonly unknown[];
@@ -58,6 +63,17 @@ function elementLabel(object: HierarchyObject): string {
   const name = object.label ?? object.kind ?? "Element";
   const count = object.connections?.length ?? 0;
   return count === 0 ? name : `${name} (${count} connection${count === 1 ? "" : "s"})`;
+}
+
+/** A placed asset's name, falling back to its label if for some reason it's missing. */
+function assetLabel(object: HierarchyObject): string {
+  return object.label ?? "Asset";
+}
+
+/** Assets list after every catalog element (elementOrder's own length), in catalog order, then by id number - keeps the hierarchy's existing "catalog order, then id" convention without needing assets interleaved into the element catalog itself. */
+function assetOrder(object: HierarchyObject): number {
+  const index = ASSET_DEFINITIONS.findIndex((definition) => definition.id === object.assetId);
+  return (ELEMENT_KINDS.length + 1) * 1_000_000 + (index < 0 ? ASSET_DEFINITIONS.length : index) * 1_000_000 + idNumber(object.id);
 }
 
 /** One clickable object row - selects it, and toggles its own visibility without affecting anything else. */
@@ -105,7 +121,9 @@ function roomSection(
   selectionStore: SelectionStore,
   visibilityStore: VisibilityStore,
   onFocusObjects: (objectIds: string[]) => void,
-  expanded: Set<string>
+  expanded: Set<string>,
+  /** Every object id in the project - what Isolate hides everything else among (see VisibilityStore.isolate()'s own docs). */
+  allObjectIds: readonly string[]
 ): HTMLElement {
   const roomLabel = `${room.label} (${memberItems.length} object${memberItems.length === 1 ? "" : "s"})`;
   const isExpanded = expanded.has(room.id);
@@ -144,14 +162,19 @@ function roomSection(
 
   const isolateButton = el("button", {
     className: `hierarchy-room__action${isolating ? " hierarchy-room__action--active" : ""}`,
-    text: isolating ? "Exit isolation" : "Isolate",
-    attrs: { type: "button", title: isolating ? "Show everything hidden before isolating" : "Hide everything except this room and its contents" }
+    text: isolating ? "Back to House" : "Isolate",
+    attrs: { type: "button", title: isolating ? "Show the whole building again" : "Make this room the visual hero - hide everything else in the building" }
   });
   isolateButton.addEventListener("click", (event) => {
     event.stopPropagation();
     if (visibilityStore.isIsolating()) {
       visibilityStore.exitIsolation();
     } else {
+      // Hides every OTHER object in the project - the room becomes a
+      // real destination on its own (task section 9), not just a camera
+      // move. Framing it too (onFocusObjects) means "Isolate" reads as
+      // one continuous "go to this room" action, not two unrelated ones.
+      visibilityStore.isolate([room.id, ...memberItems.map((item) => item.id)], allObjectIds);
       onFocusObjects([room.id, ...memberItems.map((item) => item.id)]);
     }
   });
@@ -229,6 +252,7 @@ function buildProjectHierarchy(
     });
     const roomIds = new Set(rooms.map((room) => room.id));
     const otherItems = items.filter((item) => !roomMemberIds.has(item.id) && !roomIds.has(item.id));
+    const allObjectIds = allObjects.map((object) => object.id);
 
     // Only rebuild when something that changes the RENDERED OUTPUT changed
     // - not on every edit to some object's size or position. Rebuilding
@@ -249,9 +273,15 @@ function buildProjectHierarchy(
 
     const sections: HTMLElement[] = [];
     if (roomEntries.length > 0) {
-      sections.push(el("h4", { className: "hierarchy-objects__group-title", text: "Rooms" }));
+      // The one group title styled distinctly (see styles.css's
+      // hierarchy-objects__group-title--rooms) - Phase 1A's "clearly
+      // distinguish rooms" ask, a label-only change with no effect on
+      // what's rendered underneath.
+      sections.push(el("h4", { className: "hierarchy-objects__group-title hierarchy-objects__group-title--rooms", text: "Rooms" }));
       sections.push(
-        ...roomEntries.map(({ room, memberItems }) => roomSection(room, memberItems, selectedId, selectionStore, visibilityStore, onFocusObjects, expandedRooms))
+        ...roomEntries.map(({ room, memberItems }) =>
+          roomSection(room, memberItems, selectedId, selectionStore, visibilityStore, onFocusObjects, expandedRooms, allObjectIds)
+        )
       );
     }
     sections.push(el("h4", { className: "hierarchy-objects__group-title", text: roomEntries.length > 0 ? "Other Objects" : "Objects" }));
@@ -274,14 +304,15 @@ function buildProjectHierarchy(
 }
 
 /**
- * Left workspace: a narrow icon rail (Project/Assets/Assemblies/Layers/
+ * Left workspace: a narrow icon rail (Project/Assemblies/Assets/Layers/
  * Views/Measurements/Documents) that switches a single panel below it.
  * "Project" shows the live building hierarchy (see buildProjectHierarchy) -
  * every "room" element with the objects standing in it, then everything
- * else; "Assemblies" shows the assembly panel (assemblyPanel.ts); the
- * rest are "Coming soon" placeholders - this milestone doesn't add real
- * asset/layer/view/measurement/document management, only somewhere for
- * it to eventually live.
+ * else; "Assemblies" shows the assembly panel (assemblyPanel.ts); "Assets"
+ * shows the real visual design-asset browser (assetLibrary.ts) - clicking
+ * a card arms pick-and-place for that asset, same as any construction
+ * tool; the rest are still "Coming soon" placeholders, only somewhere for
+ * layer/view/measurement/document management to eventually live.
  *
  * The object stores are threaded straight through to the assembly
  * panel, which resolves a member id against all of them (see
@@ -299,8 +330,10 @@ export function createLeftSidebar(
   doorStore: DoorStore,
   windowStore: WindowStore,
   elementStore: ElementStore,
+  assetStore: AssetStore,
   visibilityStore: VisibilityStore,
-  onFocusObjects: (objectIds: string[]) => void
+  onFocusObjects: (objectIds: string[]) => void,
+  onAddAsset: (assetId: string) => void
 ): HTMLElement {
   const objectSources: ObjectSource[] = [
     originalSource("Wall", wallStore),
@@ -309,7 +342,8 @@ export function createLeftSidebar(
     originalSource("Slab", slabStore),
     originalSource("Door", doorStore),
     originalSource("Window", windowStore),
-    { store: elementStore, labelOf: elementLabel, orderOf: elementOrder }
+    { store: elementStore, labelOf: elementLabel, orderOf: elementOrder },
+    { store: assetStore, labelOf: assetLabel, orderOf: assetOrder }
   ];
 
   const { strip, panel } = createTabStrip(
@@ -336,7 +370,7 @@ export function createLeftSidebar(
             elementStore
           )
       },
-      { id: "assets", label: "Assets", build: () => comingSoon("Asset management"), disabled: true },
+      { id: "assets", label: "Assets", build: () => createAssetLibrary({ onPlaceAsset: onAddAsset }) },
       { id: "layers", label: "Layers", build: () => comingSoon("Layer management"), disabled: true },
       { id: "views", label: "Views", build: () => comingSoon("Saved views"), disabled: true },
       { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },

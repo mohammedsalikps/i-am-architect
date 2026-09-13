@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import type { ManipulationGesture, ObjectManipulator } from "../../engine/manipulation/ObjectManipulator";
+import type { ManipulatedObject, ManipulationGesture, ObjectManipulator } from "../../engine/manipulation/ObjectManipulator";
+import { dimensionForAxis } from "../../engine/manipulation/manipulationMath";
 import type { HandleTarget, ManipulationHandles } from "./ManipulationHandles";
 
 export interface ManipulationControllerOptions {
@@ -12,6 +13,39 @@ export interface ManipulationControllerOptions {
   /** Every construction-object mesh (the layers' getMeshes()), for picking the selected object's body. */
   getObjectMeshes: () => THREE.Object3D[];
   manipulator: ObjectManipulator;
+  /** Reads an object's current state, for the compact readout below - the same reader ObjectManipulator itself uses. */
+  readObject(id: string): ManipulatedObject | undefined;
+  /**
+   * A short, human-readable line describing the running gesture's current
+   * value ("X 4.20 m   Z -1.30 m", "Length 5.80 m", "Rotation 90°") -
+   * null once the gesture ends. Purely a display concern: the Properties
+   * panel already reflects every change live from the same store update
+   * this reads after (see ai/README's "one source of truth" pattern) -
+   * this is a compact, close-to-the-viewport echo of the same data, not
+   * a second copy that could drift from it.
+   */
+  onReadout?: (text: string | null) => void;
+}
+
+/** "length" -> "Length", "thickness" -> "Thickness". */
+function capitalize(word: string): string {
+  return word.length === 0 ? word : word[0].toUpperCase() + word.slice(1);
+}
+
+/** The compact readout line for a running gesture's CURRENT value, read fresh from the object after each update. */
+function formatReadout(gesture: ManipulationGesture, object: ManipulatedObject): string | null {
+  switch (gesture.kind) {
+    case "move":
+    case "endpoint":
+      return `X ${object.position.x.toFixed(2)} m   Z ${object.position.z.toFixed(2)} m`;
+    case "rotate":
+      return `Rotation ${Math.round((object.rotation * 180) / Math.PI)}°`;
+    case "resize": {
+      const dimension = dimensionForAxis(object.type, gesture.axis, object.kind);
+      const value = dimension ? object.dimensions[dimension] : undefined;
+      return dimension && value !== undefined ? `${capitalize(dimension)} ${value.toFixed(2)} m` : null;
+    }
+  }
 }
 
 interface Drag {
@@ -82,6 +116,8 @@ export class ManipulationController {
   private readonly handles: ManipulationHandles;
   private readonly getObjectMeshes: () => THREE.Object3D[];
   private readonly manipulator: ObjectManipulator;
+  private readonly readObject: ManipulationControllerOptions["readObject"];
+  private readonly onReadout: (text: string | null) => void;
 
   // Reused for every pointer event - no per-move allocations.
   private readonly raycaster = new THREE.Raycaster();
@@ -99,6 +135,8 @@ export class ManipulationController {
     this.handles = options.handles;
     this.getObjectMeshes = options.getObjectMeshes;
     this.manipulator = options.manipulator;
+    this.readObject = options.readObject;
+    this.onReadout = options.onReadout ?? (() => {});
 
     options.container.addEventListener("pointerdown", this.handlePointerDown, { capture: true });
     this.canvas.addEventListener("pointermove", this.handleHover);
@@ -133,6 +171,7 @@ export class ManipulationController {
     event.preventDefault();
     this.drag = { pointerId: event.pointerId, plane: start.plane };
     this.canvas.style.cursor = cursorFor(start.gesture, true);
+    this.reportReadout(); // the gesture's starting value, before the pointer has moved at all
     try {
       // Keeps moves and the release coming here even off the canvas.
       this.canvas.setPointerCapture(event.pointerId);
@@ -152,8 +191,17 @@ export class ManipulationController {
     const point = this.raycaster.ray.intersectPlane(this.drag.plane, this.hitPoint);
     if (point) {
       this.manipulator.update(point);
+      this.reportReadout();
     }
   };
+
+  /** The running gesture's current value, as a compact line - see ManipulationControllerOptions.onReadout. */
+  private reportReadout(): void {
+    const gesture = this.manipulator.activeGesture();
+    const selectedId = this.selection.get();
+    const object = gesture && selectedId ? this.readObject(selectedId) : undefined;
+    this.onReadout(gesture && object ? formatReadout(gesture, object) : null);
+  }
 
   /** Hover feedback over the canvas while no button is pressed. */
   private readonly handleHover = (event: PointerEvent): void => {
@@ -192,6 +240,7 @@ export class ManipulationController {
     }
     this.drag = null;
     this.canvas.style.cursor = "";
+    this.onReadout(null);
   }
 
   /** Points the raycaster through the pointer's position on the canvas. */

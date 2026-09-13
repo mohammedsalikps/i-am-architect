@@ -66,6 +66,8 @@ export function buildAIProjectContext(snapshot: AIProjectSnapshot): AIProjectCon
       // sanitizer requires the kind); the six original types have
       // neither, so their copy is unchanged.
       ...(object.kind !== undefined ? { kind: object.kind, label: object.label ?? "" } : {}),
+      // Likewise, a design asset carries its catalog assetId and label.
+      ...(object.assetId !== undefined ? { assetId: object.assetId, label: object.label ?? "" } : {}),
       // Relationships: a hosted opening's wall, a linear element's connections.
       ...(object.hostId !== undefined ? { hostId: object.hostId } : {}),
       ...(object.connections !== undefined

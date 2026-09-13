@@ -9,10 +9,16 @@ export type StatusBarOptions = {
   selectionStore: SelectionStore;
 };
 
+/** One armed placement tool's label plus a way to end it - see PlacementController.disarm(). */
+export interface PlacementStatusInfo {
+  label: string;
+  onCancel: () => void;
+}
+
 export interface StatusBar {
   element: HTMLElement;
-  /** Shows the pick-and-place state ("Placing: Wall — click..."), or clears it (null) when nothing is armed - see PlacementController. */
-  setPlacementStatus(text: string | null): void;
+  /** Shows the pick-and-place banner and its Cancel button, or clears it (null) when nothing is armed - see PlacementController. */
+  setPlacementStatus(info: PlacementStatusInfo | null): void;
 }
 
 function statusItem(label: string, value: string): HTMLElement {
@@ -40,14 +46,22 @@ function statusItem(label: string, value: string): HTMLElement {
  *
  * Also shows the pick-and-place state (set by setPlacementStatus(), from
  * main.ts's PlacementController subscription) in the same state slot -
- * "Placing: Wall — click to place, Esc to cancel" replaces "Ready"/"N
- * selected" while a tool is armed, and the selection text returns the
- * moment it's disarmed.
+ * "Placement mode: Wall — click to place, Esc or Cancel to exit" replaces
+ * "Ready"/"N selected" while a tool is armed, together with a real Cancel
+ * button (wired to PlacementController.disarm()) so leaving placement
+ * mode is never Escape-or-nothing. The selection text returns the moment
+ * it's disarmed, by any of the three ways: Escape, this button, or
+ * clicking the same ribbon tool again.
  */
 export function createStatusBar(options: StatusBarOptions): StatusBar {
+  const stateText = el("span", { className: "status-bar__state-text", text: "Ready" });
+  const cancelButton = el("button", { className: "status-bar__cancel", text: "Cancel", attrs: { type: "button", title: "Exit placement mode" } });
+  cancelButton.hidden = true;
+
   const state = el("span", { className: "status-bar__item status-bar__item--state" }, [
     el("span", { className: "status-bar__dot" }),
-    el("span", { className: "status-bar__state-text", text: "Ready" })
+    stateText,
+    cancelButton
   ]);
 
   const gridSize = GROUND_SIZE / GRID_DIVISIONS;
@@ -62,17 +76,19 @@ export function createStatusBar(options: StatusBarOptions): StatusBar {
     statusItem("Zoom", "100%")
   ]);
 
-  const stateText = state.querySelector(".status-bar__state-text") as HTMLElement;
-  let placementText: string | null = null;
+  let placementInfo: PlacementStatusInfo | null = null;
   const renderState = (): void => {
-    if (placementText) {
-      stateText.textContent = placementText;
+    if (placementInfo) {
+      stateText.textContent = `Placement mode: ${placementInfo.label} — click to place, Esc or Cancel to exit`;
       state.classList.add("status-bar__item--placing");
+      cancelButton.hidden = false;
       return;
     }
     state.classList.remove("status-bar__item--placing");
+    cancelButton.hidden = true;
     stateText.textContent = options.selectionStore.get() ? "1 object selected" : "Ready";
   };
+  cancelButton.addEventListener("click", () => placementInfo?.onCancel());
   options.selectionStore.subscribe(renderState);
 
   const projectName = projectItem.querySelector(".status-bar__item-value") as HTMLElement;
@@ -82,8 +98,8 @@ export function createStatusBar(options: StatusBarOptions): StatusBar {
 
   return {
     element: bar,
-    setPlacementStatus(text: string | null): void {
-      placementText = text;
+    setPlacementStatus(info: PlacementStatusInfo | null): void {
+      placementInfo = info;
       renderState();
     }
   };

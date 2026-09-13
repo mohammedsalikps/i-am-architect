@@ -40,10 +40,10 @@ import type { BackendFetch, BackendHttpResponse } from "./BackendAIProvider.ts";
 import { AICommandPipeline } from "../AICommandPipeline.ts";
 import type { CommandExecutorLike } from "../AICommandPipeline.ts";
 import { AI_SUPPORTED_OBJECT_TYPES } from "../types.ts";
-import { buildSimpleHousePlan } from "../housePlan.ts";
 import type { AIProjectContext, AIProjectSnapshot } from "../types.ts";
 import { buildAIProjectContext } from "../aiProjectContext.ts";
 import { ELEMENT_KINDS } from "../../elements/catalog.ts";
+import { ASSET_DEFINITIONS } from "../../assets/catalog.ts";
 import { MATERIAL_LIBRARY } from "../../materials/materialLibrary.ts";
 
 /**
@@ -62,6 +62,22 @@ function expectedElementPromptLines(): string[] {
   return [
     `"element.add" creates one element: "element.kind" is required and must be one of these kinds (category; the dimension along local X, Y, Z before rotation): ${kinds}.`,
     `In "element.add", give only that kind's own dimension names in "dimensions" (omitted ones take the kind's default), and omit position.y to rest the element at its kind's usual height (a ceiling light at the ceiling, a switch at switch height). Parameters ("params"): ${params}. An element's "material" must be one of these material library ids: ${materials}.`
+  ];
+}
+
+/**
+ * The two prompt lines describing the design-asset catalog, in the exact
+ * format promptSchema.ts generates them from the registry - so the pinned
+ * prompt below still shows any change to their wording as a diff.
+ */
+function expectedAssetPromptLines(): string[] {
+  const assets = ASSET_DEFINITIONS.map(
+    (definition) =>
+      `${definition.id} (${definition.category}; default ${definition.defaultDimensions.width}x${definition.defaultDimensions.height}x${definition.defaultDimensions.depth} m)`
+  ).join(", ");
+  return [
+    `"asset.add" places one design asset (furniture, a fixture, lighting, decor - NOT a construction element): "asset.assetId" is required and must be one of these (category; default width x height x depth in meters): ${assets}. Omit "dimensions" to use the asset's own default size, or give any of width/height/depth to resize it. "position" rests it on the floor by default (omit position.y).`,
+    `Some element kinds (e.g. "bed", "sofa", "chair", "table") share a name with a design asset above. For furniture, fixtures, lighting, or decor, ALWAYS use asset.add with the matching assetId, never the element kind of the same name - the asset is a real placed model with its own real-world size; the similarly-named element kind is a legacy construction-catalog entry kept only for existing projects. Use element.add only for what has no asset equivalent above: rooms, flooring, ceilings, plumbing, electrical, structural/site elements.`
   ];
 }
 import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
@@ -189,6 +205,30 @@ function makeExecutorSpy(
     execute(input: unknown): CommandResult {
       calls.push(input);
       return resultFor(input);
+    }
+  };
+}
+
+/**
+ * A CommandExecutorLike spy that assigns realistic-looking sequential
+ * ids per object type ("wall-1", "wall-2", "door-1", ...), the way the
+ * real stores do - unlike makeExecutorSpy()'s flat "ok" result, this is
+ * needed by anything that reads `result.objectId` back to build further
+ * commands (e.g. hosting a door in a wall this same run just created) -
+ * see houseDesign.ts's buildHouseDesign().
+ */
+function makeSequentialIdExecutor(): CommandExecutorLike & { calls: unknown[] } {
+  const calls: unknown[] = [];
+  const nextByKind = new Map<string, number>();
+  return {
+    calls,
+    execute(input: unknown): CommandResult {
+      calls.push(input);
+      const type = typeof input === "object" && input !== null ? (input as { type?: unknown }).type : undefined;
+      const kind = typeof type === "string" ? type.split(".")[0] : "object";
+      const next = (nextByKind.get(kind) ?? 1);
+      nextByKind.set(kind, next + 1);
+      return { success: true, objectId: `${kind}-${next}`, message: "ok" };
     }
   };
 }
@@ -461,12 +501,14 @@ async function run(): Promise<void> {
     // element catalog added "element" to line 3, an element's kind and
     // label to line 8, reworded the house line's last sentence (rooms used
     // to be "not objects"), and appended the two element-catalog lines.
+    // The design-asset system added "asset" to line 3 and appended the two
+    // asset-catalog lines after the element ones.
     assertDeepEqual(
       lines,
       [
         "You are the AI command interpreter for i am Architect, a 3D construction design tool.",
         "Translate the user's natural-language construction instruction into structured construction commands.",
-        "Only these object types are currently available: wall, pillar, beam, slab, door, window, element.",
+        "Only these object types are currently available: wall, pillar, beam, slab, door, window, element, asset.",
         'Supported commands: "<type>.add" creates a new object; "update_object" edits an existing one. Never produce delete or duplicate commands.',
         "Every dimension/color/material/rotation/position field is optional - omit a field entirely to use the application's default for it.",
         'Produce one command per distinct object the user asked for, in the order they were mentioned. A request for a whole structure, such as a house, asks for every object that structure needs: return all of them in one response. If the instruction asks for something outside the available object types or commands, omit it and explain why in "notes" instead of guessing.',
@@ -485,6 +527,7 @@ async function run(): Promise<void> {
         `Build coherent geometry: size and place every new object so the parts fit together - walls meet at corners, and everything rests on the ground or on the slab - and never place a new object inside another new or existing object; the geometry section shows what is already occupied. Doors and windows are separate objects: put each flush against the outside face of its wall, not inside the wall.`,
         `A simple house on an L x W footprint (L along X, W along Z) is: one L x W slab, 0.2 m thick, on the ground; four 0.4 x 0.4 m corner pillars on the slab, flush with its corners; four 0.2 m thick perimeter walls on the slab, running pillar to pillar with their outer faces flush with the slab's edges; one door on the outside face of the front (+Z) wall; and windows on the outside faces of other walls. Center it on the origin unless existing objects are in the way; then move it clear of them. Rooms, finishes, services, furniture, and exterior works are element kinds: add them only when the instruction asks for them.`,
         ...expectedElementPromptLines(),
+        ...expectedAssetPromptLines(),
         // Relationships (wall hosting, endpoint connections) added these two, and hostId/connections to line 8.
         `A door or window can go INTO an existing wall: in "door.add" / "window.add" give "hostId" (that wall's id from the current construction state) and optionally "offset" (meters along the wall from its center) and "sill" (meters above the wall's base), and leave out position and rotation - the application places it in the wall, and it then moves and turns with the wall. To move a hosted opening, "update_object" its position: it slides along its wall.`,
         `"element.connect" joins two endpoints ("start" or "end") of compatible linear elements - water pipe to water pipe, drain pipe to drain pipe, conduit to conduit, cable to cable - named in "from" and "to" ({ "id", "endpoint" }; leave endpoint out for the nearest pair). The endpoints must already be within 0.3 m of each other. The geometry section also has "hosts" (every hosted door and window: its wall, offset, sill, and whether it fits) and "connections" (every connected endpoint pair, the gap between the endpoints, and whether it's valid).`
@@ -493,18 +536,33 @@ async function run(): Promise<void> {
     );
   });
 
-  await check("a complete house plan from the model passes through OpenAIProvider unchanged, and AICommandPipeline runs all of it as one batch", async () => {
-    const plan = buildSimpleHousePlan({ length: 10, width: 8 });
-    const mockFetch = makeMockFetch(() => okChatResponse({ commands: plan, notes: "Interior rooms were not modeled." }));
-    const executor = makeExecutorSpy();
+  // Superseded by the AI Architectural Design Intent milestone: a
+  // whole-house instruction is no longer sent to the model at all (see
+  // AICommandPipeline's class doc comment and houseIntent.ts/
+  // houseDesign.ts) - letting a real provider freehand a dozen-plus
+  // objects' geometry from a one-line prompt was exactly what produced
+  // an incoherent, incomplete house. This check now proves the opposite
+  // of what its old name said: the (mocked) OpenAI transport is NEVER
+  // called for this instruction, and AICommandPipeline builds a real,
+  // room-aware house locally instead. buildHouseDesign's own correctness
+  // (room count, wall closure, hosted doors/windows, atomic undo) is
+  // covered in ai/houseDesign.verify.ts, not here - this file only needs
+  // to prove provider-independence still holds.
+  await check("a whole-house instruction is resolved deterministically by AICommandPipeline itself, and never reaches OpenAIProvider", async () => {
+    const mockFetch = makeMockFetch(() => okChatResponse({ commands: [], notes: "should never be requested" }));
+    const executor = makeSequentialIdExecutor();
     const pipeline = new AICommandPipeline(new OpenAIProvider({ apiKey: "sk-test", fetch: mockFetch }), executor);
 
     const result = await pipeline.run("Build a simple 2-bedroom house on a 10m × 8m footprint.", emptySnapshot);
 
     assertTrue(result.success, "result.success");
-    assertEqual(mockFetch.calls.length, 1, "exactly one (mocked) OpenAI request");
-    assertDeepEqual(executor.calls, plan, "all 12 commands reach CommandExecutor unchanged, in order");
-    assertEqual(result.notes, "Interior rooms were not modeled.", "the model's notes");
+    assertEqual(mockFetch.calls.length, 0, "the provider is never called for a whole-house instruction - it's resolved locally");
+    assertTrue(executor.calls.length > 10, "a real, multi-object house was actually built through CommandExecutor");
+    assertTrue((result.notes ?? "").includes("10 m × 8 m"), `the design summary names the requested footprint - got ${JSON.stringify(result.notes)}`);
+    assertTrue(
+      (result.notes ?? "").includes("Bedroom 1") && (result.notes ?? "").includes("Bedroom 2"),
+      `the design summary names both requested bedrooms - got ${JSON.stringify(result.notes)}`
+    );
   });
 
   // --- The geometry section in the OpenAI request ---
@@ -761,7 +819,18 @@ async function run(): Promise<void> {
                 properties: {
                   type: {
                     type: "string",
-                    enum: ["wall.add", "pillar.add", "beam.add", "slab.add", "door.add", "window.add", "element.add", "element.connect", "update_object"]
+                    enum: [
+                      "wall.add",
+                      "pillar.add",
+                      "beam.add",
+                      "slab.add",
+                      "door.add",
+                      "window.add",
+                      "element.add",
+                      "element.connect",
+                      "asset.add",
+                      "update_object"
+                    ]
                   },
                   objectId: {
                     type: "string",
@@ -819,6 +888,26 @@ async function run(): Promise<void> {
                       color: { type: "string" }
                     },
                     required: ["kind"]
+                  },
+                  // The design-asset system added "asset.add": assetIds and materials are enums taken from the registries.
+                  asset: {
+                    type: "object",
+                    description:
+                      'Only when type is "asset.add" - places one design asset (furniture, a fixture, lighting, decor). "assetId" is required; every other field is optional - omit it to use the asset\'s own default.',
+                    properties: {
+                      assetId: { type: "string", enum: ASSET_DEFINITIONS.map((definition) => definition.id) },
+                      label: { type: "string", description: 'The name people see, e.g. "Sofa".' },
+                      position,
+                      rotation: { type: "number" },
+                      dimensions: {
+                        type: "object",
+                        description: "The asset's real-world box, in meters. Any of width/height/depth - omitted ones use the asset's own default size.",
+                        properties: { width: { type: "number" }, height: { type: "number" }, depth: { type: "number" } }
+                      },
+                      material: { type: "string", enum: MATERIAL_LIBRARY.map((material) => material.id) },
+                      color: { type: "string" }
+                    },
+                    required: ["assetId"]
                   },
                   // Endpoint connections added element.connect's two endpoint references.
                   from: endpointReference("first"),

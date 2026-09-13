@@ -14,6 +14,8 @@ export type TabStrip = {
   strip: HTMLElement;
   /** The content container - swaps its single child as the active tab changes. */
   panel: HTMLElement;
+  /** Activates a tab by id programmatically - same effect as clicking its button. A no-op for an unknown or disabled id. */
+  activate: (id: string) => void;
 };
 
 /**
@@ -68,7 +70,16 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
   const initial = tabs.find((t) => !t.disabled) ?? tabs[0];
   activate(initial.id);
 
-  return { strip, panel };
+  return {
+    strip,
+    panel,
+    activate: (id: string) => {
+      const tab = tabs.find((t) => t.id === id);
+      if (tab && !tab.disabled) {
+        activate(id);
+      }
+    }
+  };
 }
 
 /** Shared "not built yet" panel content for a disabled/placeholder tab or rail item. */

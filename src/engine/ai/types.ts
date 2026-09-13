@@ -24,7 +24,8 @@ export const AI_SUPPORTED_OBJECT_TYPES: readonly ObjectType[] = [
   "slab",
   "door",
   "window",
-  "element"
+  "element",
+  "asset"
 ];
 
 /**
@@ -72,7 +73,9 @@ export interface AIContextObject {
   type: ObjectType;
   /** Elements only: the catalog kind (e.g. "water-pipe") - absent for the six original types. */
   kind?: string;
-  /** Elements only: the name people see (a room's name). */
+  /** Assets only: which catalog design asset (assets/catalog.ts) this is (e.g. "sofa"). */
+  assetId?: string;
+  /** Elements and assets only: the name people see (a room's name, a placed sofa's name). */
   label?: string;
   /** Doors and windows in a wall only: that wall's id. Absent for a free-standing one. */
   hostId?: string;
@@ -140,6 +143,12 @@ export interface AIElementSourceRecord extends AIObjectSourceRecord {
   connections?: readonly AIContextConnection[];
 }
 
+/** An asset store record - an AIObjectSourceRecord with its assetId and label. */
+export interface AIAssetSourceRecord extends AIObjectSourceRecord {
+  assetId: string;
+  label: string;
+}
+
 /** The fields buildAIProjectSnapshot() reads from each assembly record. */
 export interface AIAssemblySourceRecord {
   id: string;
@@ -170,6 +179,8 @@ export interface AIProjectSnapshotSource {
   windowStore: { getAll(): readonly AIObjectSourceRecord[] };
   /** Every element kind - optional so a source built for the six original types keeps working. */
   elementStore?: { getAll(): readonly AIElementSourceRecord[] };
+  /** Every placed design asset - optional for the same reason elementStore is. */
+  assetStore?: { getAll(): readonly AIAssetSourceRecord[] };
   assemblyStore: { getAll(): readonly AIAssemblySourceRecord[] };
   selectionStore: { get(): string | null };
 }
@@ -229,6 +240,7 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
   const doors = source.doorStore.getAll();
   const windows = source.windowStore.getAll();
   const elements = source.elementStore?.getAll() ?? [];
+  const assets = source.assetStore?.getAll() ?? [];
   const assemblyRecords = source.assemblyStore.getAll();
 
   const assemblies: AIContextAssembly[] = assemblyRecords
@@ -288,7 +300,20 @@ export function buildAIProjectSnapshot(source: AIProjectSnapshotSource): AIProje
     assemblyIds: [...(membership.get(record.id) ?? [])]
   }));
 
-  const objects = [...originals, ...elementObjects].sort((a, b) => compareIds(a.id, b.id) || compareIds(a.type, b.type));
+  const assetObjects: AIContextObject[] = assets.map((record) => ({
+    id: record.id,
+    type: record.type,
+    assetId: record.assetId,
+    label: record.label,
+    position: { x: record.position.x, y: record.position.y, z: record.position.z },
+    rotation: record.rotation,
+    dimensions: copyDimensions(record.dimensions),
+    material: record.material,
+    color: record.color,
+    assemblyIds: [...(membership.get(record.id) ?? [])]
+  }));
+
+  const objects = [...originals, ...elementObjects, ...assetObjects].sort((a, b) => compareIds(a.id, b.id) || compareIds(a.type, b.type));
 
   return {
     wallCount: walls.length,
@@ -350,8 +375,8 @@ export interface AICommandOutcome {
   result: CommandResult;
 }
 
-/** Where in the pipeline a failure happened - lets a caller distinguish "the provider produced garbage" from "CommandExecutor rejected a well-formed command". */
-export type AIPipelineStage = "input" | "provider" | "validation" | "execution";
+/** Where in the pipeline a failure happened - lets a caller distinguish "the provider produced garbage" from "CommandExecutor rejected a well-formed command". "design" is a whole-house/design-intent request (see houseIntent.ts/houseDesign.ts) that AICommandPipeline recognized and resolved deterministically, entirely BEFORE the provider was ever called - its failures (an unsupported footprint, too many rooms, a design the construction engine couldn't build) are its own stage, distinct from "provider" (which only ever means the AI provider itself). */
+export type AIPipelineStage = "input" | "design" | "provider" | "validation" | "execution";
 
 export interface AIPipelineError {
   stage: AIPipelineStage;

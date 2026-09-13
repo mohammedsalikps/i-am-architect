@@ -54,14 +54,20 @@ export const DEFAULT_HOUSE_FOOTPRINT: HouseFootprint = { length: 10, width: 8 };
 /** Accepted footprint sides, in meters. Below 4 m the door and windows no longer fit their walls. */
 export const HOUSE_FOOTPRINT_LIMITS = { min: 4, max: 40 } as const;
 
-const SLAB_THICKNESS = 0.2;
-const WALL_HEIGHT = 2.7;
-const WALL_THICKNESS = 0.2;
-const PILLAR_SIZE = 0.4;
-const DOOR = { width: 0.9, height: 2.1, thickness: 0.05 };
-const WINDOW = { width: 1.2, height: 1.2, thickness: 0.05 };
-const WINDOW_SILL = 0.9;
-const QUARTER_TURN = Math.PI / 2;
+// Exported (not just module-local) so houseDesign.ts's room-aware planner
+// can build exterior walls/openings sized and positioned exactly like
+// this shell's, without a second, potentially-drifting copy of these
+// numbers - see houseDesign.ts's own header for why it can't simply call
+// buildSimpleHousePlan() itself (it needs each wall's real id, to host
+// doors/windows in it, which a plain Command list can't carry).
+export const SLAB_THICKNESS = 0.2;
+export const WALL_HEIGHT = 2.7;
+export const WALL_THICKNESS = 0.2;
+export const PILLAR_SIZE = 0.4;
+export const DOOR = { width: 0.9, height: 2.1, thickness: 0.05 };
+export const WINDOW = { width: 1.2, height: 1.2, thickness: 0.05 };
+export const WINDOW_SILL = 0.9;
+export const QUARTER_TURN = Math.PI / 2;
 
 /** Gap kept, in plan, between a house and existing objects when it has to move aside. */
 const SITE_CLEARANCE = 1;

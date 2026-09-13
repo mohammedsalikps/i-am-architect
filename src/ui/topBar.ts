@@ -1,4 +1,5 @@
 import { el } from "./dom";
+import { eavaraMarkSvg } from "./brandMark";
 import { MAX_PROJECT_NAME_LENGTH } from "../engine/project/projectDocument";
 import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
@@ -22,8 +23,8 @@ export type TopBarOptions = {
 
 /**
  * Title bar: branding, a quick-access cluster (New Project/Open/Save/
- * Undo/Redo), the project's name and save status, a search field, a
- * notifications/settings icon cluster, and the account control.
+ * Undo/Redo), the project's name and save status, a search field, and
+ * the account control.
  *
  * "New Project" starts an empty project (see main.ts's newProject), "Open…"
  * shows the project chooser (ui/projectChooser.ts), and "Save" saves the
@@ -31,18 +32,25 @@ export type TopBarOptions = {
  * text field: it renames the project on Enter or blur, and a blank name
  * is reverted. Neither renaming nor saving is an undo step. The account
  * control shows "Sign in" when signed out, and the user's email with
- * "Sign out" when signed in. Search and the icon cluster stay disabled
- * (styled-but-inert, the same pattern used elsewhere) rather than
- * clickable no-ops.
+ * "Sign out" when signed in. Search stays disabled (styled-but-inert,
+ * the same pattern used elsewhere, with an honest "Coming soon" tooltip)
+ * rather than a clickable no-op; the old bell/gear icon cluster next to
+ * it was removed outright rather than left as two more unexplained
+ * disabled buttons (task section 4).
  */
 export function createTopBar(options: TopBarOptions): HTMLElement {
-  // The product identity (i am Architect) plus a small, understated Eavara
-  // lockup - the school of architecture this product is associated with.
-  // Not a splash screen: two quiet text lines, no logo graphic, so it
-  // reads as attribution/identity rather than competing with the
-  // workspace for attention - see UI milestone notes.
+  // The product identity: the EAVARA mark (the same pine glyph the
+  // startup splash draws - see brandMark.ts), "i am Architect" as the
+  // product name, and a small, understated "EAVARA · THE SCHOOL OF
+  // ARCHITECTURE" lockup underneath - never the old "Eavara Estates"
+  // (guarded by this file's own verify.ts). Quiet by design, not a
+  // second splash screen: a small mark and two text lines, so it reads
+  // as identity/attribution rather than competing with the workspace
+  // for attention.
+  const brandMark = el("span", { className: "app-header__brand-mark", attrs: { "aria-hidden": "true" } });
+  brandMark.innerHTML = eavaraMarkSvg();
   const branding = el("div", { className: "app-header__brand" }, [
-    el("span", { className: "app-header__brand-mark", text: "iA" }),
+    brandMark,
     el("div", { className: "app-header__brand-text" }, [
       el("span", { className: "app-header__brand-name", text: "i am Architect" }),
       el("span", { className: "app-header__brand-eavara", text: "EAVARA · THE SCHOOL OF ARCHITECTURE" })
@@ -139,23 +147,17 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     saveStatus
   ]);
 
+  // A real, working search would need an actual command/object index to
+  // search - not yet built, so rather than an emoji-adjacent bell/gear
+  // cluster with nothing behind either button (task section 4: hide an
+  // unavailable feature from the primary toolbar rather than leave an
+  // unexplained disabled button), only the search field stays - visibly
+  // present (the header layout the task asks for), but honestly
+  // labelled as not live yet.
   const search = el("input", {
     className: "app-header__search",
-    attrs: { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true" }
+    attrs: { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true", title: "Coming soon" }
   });
-
-  const iconCluster = el("div", { className: "app-header__icons" }, [
-    el("button", {
-      className: "toolbar-button toolbar-button--icon",
-      text: "\u{1F514}", // bell
-      attrs: { type: "button", disabled: "true", title: "Coming soon", "aria-label": "Notifications" }
-    }),
-    el("button", {
-      className: "toolbar-button toolbar-button--icon",
-      text: "⚙", // gear
-      attrs: { type: "button", disabled: "true", title: "Coming soon", "aria-label": "Settings" }
-    })
-  ]);
 
   const accountName = el("span", { className: "app-header__account-name" });
   const signInButton = el("button", {
@@ -181,12 +183,5 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     signOutButton.hidden = state.status !== "signed-in";
   });
 
-  return el("header", { className: "app-header" }, [
-    branding,
-    quickAccess,
-    projectArea,
-    search,
-    iconCluster,
-    account
-  ]);
+  return el("header", { className: "app-header" }, [branding, quickAccess, projectArea, search, account]);
 }

@@ -9,6 +9,8 @@ import { validateDoor } from "../door/validateDoor.ts";
 import { validateWindow } from "../window/validateWindow.ts";
 import { validateElement } from "../elements/validateElement.ts";
 import { getElementKind } from "../elements/catalog.ts";
+import { validateAsset } from "../assets/validateAsset.ts";
+import { getAssetDefinition } from "../assets/catalog.ts";
 import { validateAssembly } from "../assemblies/AssemblyStore.ts";
 import { hostedTransform, hostingProblems, placementFromWorld } from "../openings/hostOpening.ts";
 import { connectionProblems } from "../connections/connections.ts";
@@ -19,6 +21,7 @@ import type { SlabData } from "../slab/types";
 import type { DoorData } from "../door/types";
 import type { WindowData } from "../window/types";
 import type { ElementConnection, ElementData, Endpoint } from "../elements/types";
+import type { AssetData } from "../assets/types";
 import type { AssemblyData } from "../assemblies/types";
 import type { HostPlacement } from "../openings/hostOpening";
 
@@ -45,13 +48,13 @@ import type { HostPlacement } from "../openings/hostOpening";
 
 export const PROJECT_DOCUMENT_VERSION = 1;
 
-/** Every persisted object type: the six original types, and "element" for every catalog kind (elements/catalog.ts). */
-export const PERSISTED_OBJECT_TYPES = ["wall", "pillar", "beam", "slab", "door", "window", "element"] as const;
+/** Every persisted object type: the six original types, "element" for every catalog kind (elements/catalog.ts), and "asset" for every placed design asset (assets/catalog.ts). */
+export const PERSISTED_OBJECT_TYPES = ["wall", "pillar", "beam", "slab", "door", "window", "element", "asset"] as const;
 export type PersistedObjectType = (typeof PERSISTED_OBJECT_TYPES)[number];
-type OriginalObjectType = Exclude<PersistedObjectType, "element">;
+type OriginalObjectType = Exclude<PersistedObjectType, "element" | "asset">;
 
 /** A construction object exactly as its store holds it. */
-export type PersistedObject = WallData | PillarData | BeamData | SlabData | DoorData | WindowData | ElementData;
+export type PersistedObject = WallData | PillarData | BeamData | SlabData | DoorData | WindowData | ElementData | AssetData;
 
 export interface ProjectDocument {
   version: typeof PROJECT_DOCUMENT_VERSION;
@@ -79,7 +82,8 @@ const VALIDATORS: Readonly<Record<PersistedObjectType, (object: PersistedObject)
   slab: (object) => validateSlab(object as SlabData),
   door: (object) => validateDoor(object as DoorData),
   window: (object) => validateWindow(object as WindowData),
-  element: (object) => validateElement(object as ElementData)
+  element: (object) => validateElement(object as ElementData),
+  asset: (object) => validateAsset(object as AssetData)
 };
 
 export const MAX_PROJECT_NAME_LENGTH = 120;
@@ -161,6 +165,20 @@ export function toPersistedObject(record: PersistedObject): PersistedObject {
       color: record.color,
       assemblyId: record.assemblyId,
       connections: copyConnections(record.connections)
+    } as unknown as PersistedObject;
+  }
+  if (record.type === "asset") {
+    return {
+      id: record.id,
+      type: record.type,
+      assetId: record.assetId,
+      label: record.label,
+      position,
+      rotation: record.rotation,
+      dimensions: { width: record.dimensions.width, height: record.dimensions.height, depth: record.dimensions.depth },
+      material: record.material,
+      color: record.color,
+      assemblyId: record.assemblyId
     } as unknown as PersistedObject;
   }
 
@@ -345,6 +363,9 @@ function parseObject(raw: unknown, path: string, derivePlacement: Set<string>): 
   if (type === "element") {
     return parseElement(raw, path);
   }
+  if (type === "asset") {
+    return parseAsset(raw, path);
+  }
   const objectType = type as OriginalObjectType;
 
   const id = raw.id;
@@ -406,6 +427,54 @@ function parseObject(raw: unknown, path: string, derivePlacement: Set<string>): 
   }
 
   return { ok: true, value: object };
+}
+
+/** A design asset - the same "kind"-shaped id, common fields, then its own dimensions - as parseElement(), minus params/connections (an asset has neither). */
+function parseAsset(raw: Record<string, unknown>, path: string): Parsed<PersistedObject> {
+  const assetId = raw.assetId;
+  const definition = typeof assetId === "string" ? getAssetDefinition(assetId) : undefined;
+  if (!definition) {
+    return fail(`${path}: ${JSON.stringify(assetId)} is not a known asset.`);
+  }
+
+  const id = raw.id;
+  const idMatch = typeof id === "string" ? ELEMENT_ID.exec(id) : null; // same "<name>-<number>" id shape as an element's
+  if (typeof id !== "string" || !idMatch || idMatch[1] !== definition.id) {
+    return fail(`${path}: the id must look like "${definition.id}-<number>", got ${JSON.stringify(id)}.`);
+  }
+  const where = `${path} (${id})`;
+
+  const label = raw.label;
+  if (!isNonEmptyString(label)) {
+    return fail(`${where}: label must be a non-empty string.`);
+  }
+
+  const common = parseCommonFields(raw, where);
+  if (!common.ok) {
+    return common;
+  }
+  const dimensions = parseDimensions(raw.dimensions, ["width", "height", "depth"], "asset", where);
+  if (!dimensions.ok) {
+    return dimensions;
+  }
+
+  const asset: AssetData = {
+    id,
+    type: "asset",
+    assetId: definition.id,
+    label,
+    position: common.value.position,
+    rotation: common.value.rotation,
+    dimensions: { width: dimensions.value.width, height: dimensions.value.height, depth: dimensions.value.depth },
+    material: common.value.material,
+    color: common.value.color,
+    assemblyId: common.value.assemblyId
+  };
+  const validation = validateAsset(asset);
+  if (!validation.valid) {
+    return fail(`${where}: ${validation.errors[0]?.message ?? "invalid asset."}`);
+  }
+  return { ok: true, value: asset as unknown as PersistedObject };
 }
 
 function parseAssembly(raw: unknown, path: string): Parsed<AssemblyData> {

@@ -28,6 +28,10 @@ export interface ManipulationHandlesOptions {
   /** Every construction-object store - any of them changing can move or resize the selected object. */
   stores: readonly { subscribe(listener: () => void): unknown }[];
   readObject(id: string): ManipulatedObject | undefined;
+  /** Whether the selected object is currently hidden - its handles hide too, so a hidden object can't be dragged by them. */
+  isHidden(id: string): boolean;
+  /** So handles hide/reappear the moment visibility is toggled, not just on the next selection/store change. */
+  subscribeVisibility(listener: () => void): unknown;
 }
 
 /**
@@ -59,10 +63,12 @@ export class ManipulationHandles {
   private ringRadius = 0;
   private readonly selectionStore: ManipulationHandlesOptions["selectionStore"];
   private readonly readObject: ManipulationHandlesOptions["readObject"];
+  private readonly isHidden: ManipulationHandlesOptions["isHidden"];
 
   constructor(options: ManipulationHandlesOptions) {
     this.selectionStore = options.selectionStore;
     this.readObject = options.readObject;
+    this.isHidden = options.isHidden;
 
     const handleMaterial = new THREE.MeshBasicMaterial({ color: HANDLE_COLOR });
     const endpointMaterial = new THREE.MeshBasicMaterial({ color: ENDPOINT_COLOR });
@@ -104,6 +110,7 @@ export class ManipulationHandles {
     for (const store of options.stores) {
       store.subscribe(sync);
     }
+    options.subscribeVisibility(sync);
   }
 
   /** The hit meshes of the handles in use, to raycast - empty while nothing is selected. */
@@ -118,7 +125,7 @@ export class ManipulationHandles {
     const selectedId = this.selectionStore.get();
     const object = selectedId ? this.readObject(selectedId) : undefined;
     const layout = object ? layoutHandles(object) : null;
-    if (!object || !layout) {
+    if (!object || !layout || this.isHidden(selectedId as string)) {
       this.group.visible = false;
       return;
     }

@@ -1,52 +1,40 @@
-/**
- * Foundation for a future GLB/GLTF asset system (furniture, fixtures,
- * lights, appliances, architectural components) - see UI milestone
- * notes for the exact scope of this milestone.
- *
- * THIS MILESTONE DELIBERATELY STOPS HERE: an asset definition and a real
- * loader (see src/scene/assets/AssetLoader.ts) exist, but nothing wires
- * a GLB into a placeable, selectable, persistable construction object
- * yet - there is no "asset" ConstructionObjectBase, no "asset.add"
- * command, and no ribbon button for it. Adding all of that is real
- * engine/command/persistence/AI-schema surface (a new object type
- * touches CommandExecutor, ObjectRegistry, resolveConstructionObject,
- * persistence, and AI_SUPPORTED_OBJECT_TYPES) - disproportionate to,
- * and outside the scope of, a UX/interaction milestone that must not
- * rewrite the construction engine. A visible "place a GLB" control with
- * nothing real behind it would be exactly the fake/demo control this
- * milestone is required not to introduce.
- *
- * When that future milestone happens, an asset instance should follow
- * the SAME shape every other construction object already does - never
- * a Three.js mesh/Object3D as the persisted representation:
- *   - id: string (like every ConstructionObjectBase)
- *   - transform: position/rotation, meters and radians, +Y up
- *   - visibility: through VisibilityStore, exactly like every other type
- *   - selection: through the shared SelectionStore
- *   - hierarchy presence: listed in the left sidebar like any object
- *   - persistence: a plain data record (this AssetDefinition/
- *     AssetInstance shape - an asset id + transform), never a THREE.Group
- */
+import type { ConstructionObjectBase, ObjectId } from "../objects/types";
 
-/** Where one asset's GLB/GLTF file lives, and what it's called and grouped under - pure data, no Three.js import here (this stays importable from anywhere src/engine/ already is, including the backend). */
-export interface AssetDefinition {
-  id: string;
-  label: string;
-  /** Reuses the same category vocabulary as elements/catalog.ts's ElementCategory, so a future ribbon tab needs no second grouping scheme. */
-  category: "structure" | "openings" | "rooms" | "finish" | "plumbing" | "electrical" | "interior" | "exterior";
-  description: string;
-  /** Relative to src/assets/ (see AssetLoader.ts) - never an absolute filesystem path or a remote URL committed into this repository. */
-  url: string;
-  /** A reasonable default footprint, in meters, for placement/ghost-preview sizing - the same role ElementKindDefinition.dimensions plays for catalog elements. */
-  defaultScale: { x: number; y: number; z: number };
+export type AssetId = ObjectId;
+
+/** A placed design asset's real-world bounding box, in meters - see AssetInstance's own docs for how this drives its Three.js scale. */
+export interface AssetDimensions {
+  width: number;
+  height: number;
+  depth: number;
 }
 
-/** A local, hand-authored, non-copyrighted test fixture proving the loader works end to end - not a real furniture library. See AssetLoader.ts's own docs. */
-export const PLACEHOLDER_ASSET: AssetDefinition = {
-  id: "placeholder-box",
-  label: "Placeholder Box",
-  category: "interior",
-  description: "A minimal hand-authored glTF test fixture (a single unit cube) - proves the GLB/GLTF loading path works. Not a real furniture asset.",
-  url: "placeholder-box.gltf",
-  defaultScale: { x: 1, y: 1, z: 1 }
-};
+/**
+ * One placed design asset (a sofa, a bed, a lamp, ...) - an ordinary
+ * ConstructionObjectBase (id, position, rotation, dimensions, material,
+ * color, assemblyId) exactly like a wall or a catalog element, so every
+ * generic system that already operates on that shape (selection,
+ * manipulation, the Properties inspector, hierarchy, visibility,
+ * persistence) needs no special case for it - see AssetStore.ts's own
+ * docs for why this stays a SEPARATE store from ElementStore rather than
+ * reusing it.
+ *
+ * `dimensions` (width/height/depth, in real meters) is deliberately in
+ * the same "a real box size" units every other type's dimensions already
+ * are - not a unitless Three.js scale factor. AssetLayer derives the
+ * actual THREE.Group scale by dividing this by the loaded model's own
+ * measured bounding box (see scene/assets/AssetLoader.ts), so dragging a
+ * resize handle changes a real, meaningful size (a wider sofa, a taller
+ * lamp) through the exact same manipulation math every other type uses -
+ * this is what lets task section 8's "assets may use transform scaling"
+ * reuse the existing resize-handle system instead of inventing a second,
+ * scale-specific one.
+ *
+ * `assetId` names which AssetDefinition (catalog.ts) this instance is -
+ * the asset equivalent of an ElementData's `kind`.
+ */
+export interface AssetData extends ConstructionObjectBase<"asset", AssetDimensions> {
+  assetId: string;
+  /** The name people see; defaults to the definition's label. */
+  label: string;
+}

@@ -51,9 +51,19 @@ export class WallLayer {
     this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
-  /** Current wall meshes, for the shared SelectionRaycaster to raycast against. */
+  /**
+   * Current wall meshes, for the shared SelectionRaycaster/
+   * ManipulationController to raycast against - hidden walls excluded.
+   * THREE.Raycaster does NOT consult an object's own `.visible` flag on
+   * its own (that's a rendering-only concern) - a mesh handed to
+   * `intersectObjects()` is picked whether or not it's actually drawn, so
+   * this method (not the raycasters) is what keeps a hidden object from
+   * being selected or manipulated through its invisible mesh.
+   */
   getMeshes(): THREE.Object3D[] {
-    return Array.from(this.entries.values(), (entry) => entry.mesh);
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.mesh.visible)
+      .map((entry) => entry.mesh);
   }
 
   /** Each wall's hosted openings, in the wall's frame. */

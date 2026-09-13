@@ -6,6 +6,7 @@ import type { SlabStore } from "../slab/SlabStore";
 import type { DoorStore } from "../door/DoorStore";
 import type { WindowStore } from "../window/WindowStore";
 import type { ElementStore } from "../elements/ElementStore";
+import type { AssetStore } from "../assets/AssetStore";
 
 /** The stores this resolver knows how to check - extend alongside a new object type's store. */
 export interface ConstructionObjectStores {
@@ -17,6 +18,8 @@ export interface ConstructionObjectStores {
   windowStore: WindowStore;
   /** Every catalog element kind - optional so callers built for the six original types keep working. */
   elementStore?: ElementStore;
+  /** Every placed design asset - optional for the same reason elementStore is. */
+  assetStore?: AssetStore;
 }
 
 export interface ResolvedConstructionObjectRef {
@@ -61,6 +64,9 @@ export function resolveConstructionObject(
   }
   if (stores.elementStore?.get(id)) {
     return { type: "element", id };
+  }
+  if (stores.assetStore?.get(id)) {
+    return { type: "asset", id };
   }
   return undefined;
 }

@@ -37,11 +37,16 @@ export function createConstructionRibbon(tabs: readonly RibbonTab[], initialTabI
   };
 
   const renderTool = (tool: RibbonTool): HTMLElement[] => {
-    const button = el(
-      "button",
-      { className: "app-ribbon__item", attrs: { type: "button", "data-tool": tool.id } },
-      [el("span", { className: "app-ribbon__icon", text: tool.icon }), el("span", { className: "app-ribbon__label", text: tool.label })]
-    );
+    // tool.icon is either real SVG markup (constructionIconSvg()) or a
+    // plain 1-2 letter iconFor() fallback - innerHTML renders both
+    // correctly (plain text with no markup characters displays exactly
+    // as textContent would), so every tool goes through the same path.
+    const icon = el("span", { className: "app-ribbon__icon" });
+    icon.innerHTML = tool.icon;
+    const button = el("button", { className: "app-ribbon__item", attrs: { type: "button", "data-tool": tool.id } }, [
+      icon,
+      el("span", { className: "app-ribbon__label", text: tool.label })
+    ]);
     rendered.push({ tool, button });
 
     if (!tool.colorInput) {

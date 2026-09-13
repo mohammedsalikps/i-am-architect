@@ -4,6 +4,7 @@
 // renders it).
 import { ELEMENT_CATEGORIES, getElementKind } from "../engine/elements/catalog.ts";
 import { ROOM_PRESETS } from "../engine/elements/roomPresets.ts";
+import { constructionIconSvg } from "./constructionIcons.ts";
 import type { ElementCategory } from "../engine/elements/catalog";
 import type { RoomPreset } from "../engine/elements/roomPresets";
 
@@ -11,7 +12,13 @@ import type { RoomPreset } from "../engine/elements/roomPresets";
 export interface RibbonTool {
   id: string;
   label: string;
-  /** One or two letters shown in the button's icon square. */
+  /**
+   * The button's icon square content, injected via `.innerHTML` (see
+   * constructionRibbon.ts's renderTool()) - real SVG markup for a tool
+   * constructionIconSvg() has an icon for, or a plain 1-2 letter
+   * `iconFor()` fallback otherwise (renders identically to plain text
+   * through innerHTML, so nothing regresses for a not-yet-drawn tool).
+   */
   icon: string;
   /** Tooltip and accessible name: what the button does. */
   title: string;
@@ -143,7 +150,7 @@ function originalTool(type: OriginalType, group: string, actions: RibbonActions)
   return {
     id: type,
     label,
-    icon: iconFor(label),
+    icon: constructionIconSvg(type) ?? iconFor(label),
     title: hosted
       ? `Add ${withArticle(type)} - placed in the selected wall when a wall is selected, otherwise click to place it in the viewport`
       : `Click, then click in the viewport to place ${withArticle(type)}`,
@@ -177,7 +184,7 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
       {
         id: "paint",
         label: "Paint",
-        icon: "Pa",
+        icon: constructionIconSvg("paint") ?? "Pa",
         title: "Paint the selected object with the chosen color - it stays the same object",
         disabledTitle: "Select a wall or another object to paint it",
         group,
@@ -195,7 +202,7 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
     {
       id: definition.kind,
       label: definition.label,
-      icon: iconFor(definition.label),
+      icon: constructionIconSvg(definition.kind) ?? iconFor(definition.label),
       title: `Click, then click in the viewport to place ${withArticle(definition.label.toLowerCase())} - ${definition.description}`,
       group,
       run: () => actions.addElement(definition.kind),
@@ -204,9 +211,16 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
   ];
 }
 
-/** Home, then one tab per catalog category, each with its grouped tools wired to `actions`. */
+/**
+ * "Build", then one tab per catalog category, each with its grouped
+ * tools wired to `actions`. The id stays "home" - it still selects
+ * RIBBON_LAYOUT.home below and is never shown - only the visible label
+ * changes (Phase 1A: main nav reads as a workflow, not a literal "Home"
+ * screen), so nothing about tab selection, the ribbon's own data source,
+ * or main-nav wiring (mainNav.ts) changes.
+ */
 export function buildRibbonTabs(actions: RibbonActions): RibbonTab[] {
-  const tabs: { id: "home" | ElementCategory; label: string }[] = [{ id: "home", label: "Home" }, ...ELEMENT_CATEGORIES];
+  const tabs: { id: "home" | ElementCategory; label: string }[] = [{ id: "home", label: "Build" }, ...ELEMENT_CATEGORIES];
   return tabs.map(({ id, label }) => ({
     id,
     label,

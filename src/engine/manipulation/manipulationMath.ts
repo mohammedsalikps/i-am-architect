@@ -40,8 +40,21 @@ export const ROTATE_STEP = Math.PI / 180;
 export const HANDLE_OFFSET = 0.35;
 /** How far above the object's base the side handles sit, so a grounded object's handles clear the ground. */
 export const HANDLE_LIFT = 0.15;
-/** How far the rotation ring sits beyond the object's corners, in meters - clear of the side handles. */
-export const ROTATE_RING_MARGIN = 0.8;
+/**
+ * How far the rotation ring sits beyond the farthest X/Z resize handle's
+ * own reach from center, in meters. Chosen so the ring's hit torus never
+ * comes closer than 0.15 m to a resize handle's hit sphere, regardless of
+ * the object's aspect ratio: HANDLE_OFFSET (0.35, the handle's own offset)
+ * + 0.2 (ManipulationHandles.ts's HANDLE_HIT_RADIUS) + 0.25 (its
+ * RING_HIT_TUBE) + 0.15 real clearance = 0.95. See layoutHandles()'s own
+ * comment for why this must be measured from the LARGER of halfX/halfZ,
+ * not their hypotenuse - a previous version used the hypotenuse and left
+ * only ~2.5 mm of clearance for an elongated object like a typical wall
+ * (length 4 m, thickness 0.2 m), well inside ordinary pointer imprecision -
+ * confirmed by hand-testing in the browser, where a drag aimed at the
+ * length handle repeatedly grabbed the rotation ring instead.
+ */
+export const ROTATE_RING_MARGIN = 0.95;
 
 const PRECISION = 1e9;
 
@@ -196,10 +209,15 @@ export interface HandleLayout {
  * outside each face along local X and Z, placed on the object's base
  * plane (its footprint) so the faces themselves stay free for grabbing
  * the body to move it; one on top for the vertical dimension; and a
- * rotation ring around the base, outside the side handles. Every resize
- * handle is tied to a dimension the object really has (see
- * dimensionForAxis) - returns null for a type or shape it can't place
- * handles on. An element passes its `kind`.
+ * rotation ring around the base, outside the side handles - its radius
+ * measured from the FARTHER of the two side handles' own reach
+ * (max(halfX, halfZ) + HANDLE_OFFSET), not their hypotenuse: for an
+ * elongated object (a typical wall) the hypotenuse is barely larger than
+ * the longer half-dimension alone, which left almost no real clearance
+ * between the ring and the length handle - see ROTATE_RING_MARGIN's own
+ * comment. Every resize handle is tied to a dimension the object really
+ * has (see dimensionForAxis) - returns null for a type or shape it can't
+ * place handles on. An element passes its `kind`.
  *
  * A linear element (pipe, conduit, cable) gets a handle ON each endpoint
  * instead of its two lengthwise handles: dragging one moves that end and
@@ -239,7 +257,7 @@ export function layoutHandles(object: {
       { axis: "z", side: -1, dimension: z, position: { x: 0, y: base, z: -(halfZ + HANDLE_OFFSET) } },
       { axis: "y", side: 1, dimension: y, position: { x: 0, y: halfY + HANDLE_OFFSET, z: 0 } }
     ],
-    rotate: hosted ? null : { radius: roundValue(Math.hypot(halfX, halfZ) + ROTATE_RING_MARGIN), y: -halfY },
+    rotate: hosted ? null : { radius: roundValue(Math.max(halfX, halfZ) + ROTATE_RING_MARGIN), y: -halfY },
     endpoints: linear
       ? [
           { endpoint: "start", position: { x: -halfX, y: 0, z: 0 } },

@@ -196,17 +196,36 @@ export function createAssemblyPanel(
     );
   }
 
+  // Every disabled reason below is shown as the button's own tooltip -
+  // task: a disabled control needs a visible reason, not a mystery -
+  // mirroring the pattern constructionRibbon.ts already uses for Paint.
   function updateMembershipButtons(): void {
     const assembly = getSelectedAssembly();
     const selectedObjectId = selectionStore.get();
     const isMember = !!assembly && !!selectedObjectId && assembly.objectIds.includes(selectedObjectId);
 
     addObjectButton.disabled = !assembly || !selectedObjectId || isMember;
+    addObjectButton.title = !assembly
+      ? "Select an assembly first"
+      : !selectedObjectId
+        ? "Select an object in the viewport or hierarchy first"
+        : isMember
+          ? "Already a member of this assembly"
+          : "Add the selected object to this assembly";
+
     removeObjectButton.disabled = !assembly || !selectedObjectId || !isMember;
+    removeObjectButton.title = !assembly
+      ? "Select an assembly first"
+      : !selectedObjectId
+        ? "Select an object in the viewport or hierarchy first"
+        : !isMember
+          ? "The selected object isn't a member of this assembly"
+          : "Remove the selected object from this assembly";
   }
 
   assemblySelection.subscribe((selectedId) => {
     deleteButton.disabled = selectedId === null;
+    deleteButton.title = selectedId === null ? "Select an assembly first" : "Delete this assembly (its objects are kept)";
   });
   assemblyStore.subscribe(updateMembershipButtons);
   assemblySelection.subscribe(updateMembershipButtons);

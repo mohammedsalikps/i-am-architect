@@ -5,9 +5,11 @@ import type { AIProvider } from "./AIProvider";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
 import { buildAIProjectContext } from "./aiProjectContext.ts";
+import { parseHouseIntent } from "./houseIntent.ts";
+import { buildHouseDesign, planHouseDesign, summarizeHouseDesign } from "./houseDesign.ts";
 import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
 import type { HistoryGroupLike } from "../commands/executeCommandBatch";
-import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectSnapshot } from "./types";
+import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectContext, AIProjectSnapshot } from "./types";
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
 
@@ -143,6 +145,21 @@ function validateCommandShape(
  * response is ONE undo entry, so one Undo removes everything it built and
  * one Redo brings it back. Without one - only unit tests do this - the
  * batch still stops at the first failure, but nothing can be rolled back.
+ *
+ * A WHOLE-HOUSE DESIGN REQUEST ("build a house", "build a 10m x 8m house
+ * with 3 bedrooms", ...) is recognized locally, by parseHouseIntent()
+ * (houseIntent.ts), before any of the above - the provider is never
+ * called for one. Its parameters (footprint, room list, size, bedroom
+ * count) are resolved into a real, room-partitioned house by
+ * houseDesign.ts's deterministic planner, executed inside the exact same
+ * kind of history group as an ordinary provider response, so it is just
+ * as atomic (one failure rolls back everything already built; success is
+ * one undo entry). This exists because letting a real AI provider
+ * freehand the geometry for a dozen-plus objects at once was exactly
+ * what produced an incoherent, incomplete house - see this milestone's
+ * own report. Everything that ISN'T a whole-house request (an ordinary
+ * "build a wall", "add a door", or an edit) falls straight through to
+ * the provider path below, completely unchanged.
  */
 export class AICommandPipeline {
   // Plain field declarations + assignment in the constructor body,
@@ -191,6 +208,11 @@ export class AICommandPipeline {
     // geometry that matches the objects beside it. Any `geometry` already
     // on the argument is ignored (see buildAIProjectContext).
     const projectContext = buildAIProjectContext(snapshot);
+
+    const houseIntent = parseHouseIntent(trimmedInstruction);
+    if (houseIntent.kind !== "none") {
+      return this.runHouseDesign(instruction, houseIntent, projectContext, availableObjectTypes);
+    }
 
     let response;
     try {
@@ -320,5 +342,72 @@ export class AICommandPipeline {
       errors: [{ stage: "execution", message: failed.message ?? "Command execution failed.", commandIndex: failedIndex }],
       notes
     };
+  }
+
+  /**
+   * The whole-house design path (see the class doc comment and
+   * houseIntent.ts/houseDesign.ts). Mirrors run()'s own shape - one
+   * all-or-nothing history group, the same AIPipelineResult contract -
+   * so a caller (AiPromptController, ai/verify.ts) can't tell which path
+   * produced a given result except by its `errors[].stage`.
+   */
+  private runHouseDesign(
+    instruction: string,
+    houseIntent: Extract<ReturnType<typeof parseHouseIntent>, { kind: "unsupported" | "house" }>,
+    projectContext: AIProjectContext,
+    availableObjectTypes: readonly ObjectType[]
+  ): AIPipelineResult {
+    if (houseIntent.kind === "unsupported") {
+      return { success: false, instruction, outcomes: [], errors: [{ stage: "design", message: houseIntent.reason }] };
+    }
+
+    const required: readonly ObjectType[] = ["slab", "wall", "pillar", "door", "window", "element"];
+    const missing = required.filter((type) => !availableObjectTypes.includes(type));
+    if (missing.length > 0) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "design", message: `A house needs ${missing.join(", ")}, which ${missing.length === 1 ? "isn't" : "aren't"} available in this context.` }]
+      };
+    }
+
+    const occupied = projectContext.geometry.objects.map((object) => object.aabb);
+    const planned = planHouseDesign(houseIntent.request, occupied);
+    if (!planned.ok) {
+      return { success: false, instruction, outcomes: [], errors: [{ stage: "design", message: planned.error }] };
+    }
+
+    if (this.history?.isGrouping()) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "execution", message: "Another edit (such as a drag) is still in progress, so nothing was changed. Try again once it finishes." }]
+      };
+    }
+
+    this.history?.beginGroup();
+    let built;
+    try {
+      built = buildHouseDesign(planned.layout, (command) => this.commandExecutor.execute(command));
+    } catch (error) {
+      this.history?.cancelGroup();
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "execution", message: `Command threw an error: ${error instanceof Error ? error.message : String(error)}` }]
+      };
+    }
+
+    const outcomes: AICommandOutcome[] = built.outcomes.map(({ command, result }) => ({ command, result }));
+    if (!built.success) {
+      this.history?.cancelGroup();
+      return { success: false, instruction, outcomes, errors: [{ stage: "execution", message: built.error }] };
+    }
+
+    this.history?.endGroup();
+    return { success: true, instruction, outcomes, errors: [], notes: summarizeHouseDesign(built.summary) };
   }
 }

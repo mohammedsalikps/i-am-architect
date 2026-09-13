@@ -19,6 +19,8 @@ import type { BackendFetch } from "./engine/ai/providers/BackendAIProvider";
 import { AIService } from "./engine/ai/AIService";
 import { getElementKind } from "./engine/elements/catalog";
 import type { ElementKindDefinition } from "./engine/elements/catalog";
+import { getAssetDefinition } from "./engine/assets/catalog";
+import type { AssetDefinition } from "./engine/assets/catalog";
 import type { PlacementTool } from "./scene/placement/PlacementController";
 import { roomPresetOptions } from "./engine/elements/roomPresets";
 import type { CreateElementOptions } from "./engine/elements/createElement";
@@ -55,6 +57,7 @@ const {
   doorStore,
   windowStore,
   elementStore,
+  assetStore,
   assemblyStore,
   selectionStore,
   history,
@@ -135,6 +138,7 @@ const aiService = new AIService({
     doorStore,
     windowStore,
     elementStore,
+    assetStore,
     assemblyStore,
     selectionStore
   }
@@ -165,7 +169,7 @@ const projectRepository = new HttpProjectRepository({
 const persistence = new ProjectPersistenceController({ repository: projectRepository, project });
 
 /** Every object store, for resolving a selected id to whatever it is. */
-const objectStores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore };
+const objectStores = { wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore, assetStore };
 
 // Each type has a row of default slots; a new object takes the first slot
 // no existing object of that type sits on (see engine/project/placement.ts) -
@@ -196,13 +200,43 @@ function addStartupWall(): void {
  * every other creation path (AI included) already uses - only the
  * position source changes, from a computed slot to the clicked ground
  * point. See scene/placement/PlacementController.ts.
+ *
+ * The placed object is selected immediately - manipulation handles and
+ * its Properties panel appear without an extra click, so "pick a tool,
+ * place it, then drag/edit it" is one continuous motion. Unless `repeat`
+ * is true, that one placement also disarms the tool and returns to
+ * normal selection mode (PlacementController.handlePointerUp()) - the
+ * user is never left in an invisible, unbounded "keeps building forever"
+ * state. Clicking the same tool's ribbon button again while it's already
+ * armed toggles it off instead of re-arming, so there is always an
+ * obvious way back to selection mode beyond Escape alone.
  */
-function armPlacement(id: string, label: string, ghostSize: PlacementTool["ghostSize"], buildCommand: (point: { x: number; z: number }) => unknown): void {
-  sceneManager.current?.placementController.arm({
+function armPlacement(
+  id: string,
+  label: string,
+  ghostSize: PlacementTool["ghostSize"],
+  buildCommand: (point: { x: number; z: number }) => unknown,
+  options: { repeat?: boolean } = {}
+): void {
+  const controller = sceneManager.current?.placementController;
+  if (!controller) {
+    return;
+  }
+  if (controller.activeToolId() === id) {
+    controller.disarm(); // same tool clicked again - toggle off, mirroring Escape
+    return;
+  }
+  controller.arm({
     id,
     label,
     ghostSize,
-    place: (point) => commandExecutor.execute(buildCommand(point))
+    repeat: options.repeat ?? false,
+    place: (point) => {
+      const result = commandExecutor.execute(buildCommand(point));
+      if (result.success && result.objectId) {
+        selectionStore.select(result.objectId);
+      }
+    }
   });
 }
 
@@ -222,7 +256,12 @@ const ORIGINAL_GHOST_SIZES: Record<"wall" | "pillar" | "beam" | "slab" | "door" 
 };
 
 function addWall(): void {
-  armPlacement("wall", "Wall", ORIGINAL_GHOST_SIZES.wall, (point) => ({ type: "wall.add", wall: { position: { x: point.x, z: point.z } } }) satisfies AddWallCommand);
+  // Walls are naturally placed end-to-end in a run, so this is the one
+  // tool that stays armed after a successful placement - Escape, the
+  // status bar's Cancel button, or clicking Wall again all end it.
+  armPlacement("wall", "Wall", ORIGINAL_GHOST_SIZES.wall, (point) => ({ type: "wall.add", wall: { position: { x: point.x, z: point.z } } }) satisfies AddWallCommand, {
+    repeat: true
+  });
 }
 
 function addPillar(): void {
@@ -301,6 +340,35 @@ function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = 
   }));
 }
 
+/**
+ * A design asset's ghost footprint, read from the SAME catalog data its
+ * real placed size comes from (AssetDefinition.defaultDimensions) - never
+ * a second, hand-maintained size list. Mirrors elementGhostSize() above.
+ */
+function assetGhostSize(definition: AssetDefinition): PlacementTool["ghostSize"] {
+  return { x: definition.defaultDimensions.width, y: definition.defaultDimensions.height, z: definition.defaultDimensions.depth };
+}
+
+/**
+ * Arms pick-and-place for one catalog design asset - an asset.add command
+ * once placed, so it validates, loads its real model, and undoes exactly
+ * like any other add (see AssetLayer.ts). This is the manual half of
+ * "AI + manual parity" (task section 17): ui/assetLibrary.ts's card click
+ * calls this exact function, and AICommandPipeline's asset.add commands
+ * (see engine/ai/types.ts) go through the identical commandExecutor path,
+ * so a manually placed and an AI-placed sofa are the same kind of object.
+ */
+function addAsset(assetId: string): void {
+  const definition = getAssetDefinition(assetId);
+  if (!definition) {
+    return;
+  }
+  armPlacement(`asset:${assetId}`, definition.label, assetGhostSize(definition), (point) => ({
+    type: "asset.add",
+    asset: { assetId, position: { x: point.x, z: point.z } }
+  }));
+}
+
 /** Whether the selection is an object Paint can repaint - any construction object. */
 function canPaintSelection(): boolean {
   const selectedId = selectionStore.get();
@@ -348,7 +416,7 @@ history.clearHistory(); // the startup wall isn't a user action - start with a c
 /** True when discarding the model would lose something: any object or assembly. */
 function modelHasContent(): boolean {
   return (
-    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore].some((store) => store.getAll().length > 0) ||
+    [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore, assetStore].some((store) => store.getAll().length > 0) ||
     assemblyStore.getAll().length > 0
   );
 }
@@ -486,6 +554,8 @@ function deleteSelected(): void {
     commandExecutor.execute({ type: "window.delete", id: selectedId });
   } else if (elementStore.get(selectedId)) {
     commandExecutor.execute({ type: "element.delete", id: selectedId });
+  } else if (assetStore.get(selectedId)) {
+    commandExecutor.execute({ type: "asset.delete", id: selectedId });
   }
 }
 
@@ -509,6 +579,8 @@ function duplicateSelected(): void {
     result = commandExecutor.execute({ type: "window.duplicate", id: selectedId });
   } else if (elementStore.get(selectedId)) {
     result = commandExecutor.execute({ type: "element.duplicate", id: selectedId });
+  } else if (assetStore.get(selectedId)) {
+    result = commandExecutor.execute({ type: "asset.duplicate", id: selectedId });
   }
   if (result?.success && result.objectId) {
     selectionStore.select(result.objectId);
@@ -561,11 +633,13 @@ const shell = createAppShell({
   doorStore,
   windowStore,
   elementStore,
+  assetStore,
   assemblyStore,
   selectionStore,
   history,
   commandExecutor,
-  snapSettings
+  snapSettings,
+  onAddAsset: addAsset
 });
 
 appRoot.append(shell.root);
@@ -581,6 +655,7 @@ sceneManager.current = new SceneManager(
   doorStore,
   windowStore,
   elementStore,
+  assetStore,
   selectionStore,
   commandExecutor,
   history,
@@ -588,13 +663,28 @@ sceneManager.current = new SceneManager(
   visibilityStore
 );
 sceneManager.current.start();
+// The startup wall (or a restored project's whole model, once loaded)
+// framed on first paint, rather than the camera's fixed default
+// position - which, for anything bigger than the single startup wall,
+// left the building looking like a small object adrift in a mostly
+// empty viewport. See SceneManager.fitToScene().
+sceneManager.current.fitToScene();
+// Same reasoning for a project that gets replaced after startup: opening
+// a saved project (or an AI response building a whole house - see
+// AiPromptController's onCreated wiring in ui/commandBar.ts) should show
+// the result, not leave the camera wherever it happened to be.
+persistence.subscribe((state) => {
+  if (state.status === "opened") {
+    sceneManager.current?.fitToScene();
+  }
+});
 
 // The ribbon shows which tool is armed (RibbonTool.isActive), and the
-// status bar shows the plain-text placement state - both re-derived from
-// PlacementController, not duplicated state of their own.
+// status bar shows the placement banner and its Cancel button - both
+// re-derived from PlacementController, not duplicated state of their own.
 sceneManager.current.placementController.subscribe((tool) => {
   shell.refreshRibbon();
-  shell.setPlacementStatus(tool ? `Placing: ${tool.label} — click in the viewport to place, Esc to cancel` : null);
+  shell.setPlacementStatus(tool ? { label: tool.label, onCancel: () => sceneManager.current?.placementController.disarm() } : null);
 });
 
 // Restore a stored session, if any, and confirm it with the backend.

@@ -11,6 +11,7 @@ import { SlabStore } from "../slab/SlabStore.ts";
 import { DoorStore } from "../door/DoorStore.ts";
 import { WindowStore } from "../window/WindowStore.ts";
 import { ElementStore } from "../elements/ElementStore.ts";
+import { AssetStore } from "../assets/AssetStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
 import { SelectionStore } from "../selection/SelectionStore.ts";
 import { HistoryManager } from "../history/HistoryManager.ts";
@@ -21,6 +22,7 @@ import { SlabHistoryController } from "../history/slabHistory.ts";
 import { DoorHistoryController } from "../history/doorHistory.ts";
 import { WindowHistoryController } from "../history/windowHistory.ts";
 import { ElementHistoryController } from "../history/elementHistory.ts";
+import { AssetHistoryController } from "../history/assetHistory.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { ProjectMetaStore } from "./ProjectMetaStore.ts";
 
@@ -71,6 +73,7 @@ export interface ProjectContext {
   doorStore: DoorStore;
   windowStore: WindowStore;
   elementStore: ElementStore;
+  assetStore: AssetStore;
   assemblyStore: AssemblyStore;
   selectionStore: SelectionStore;
   history: HistoryManager;
@@ -81,6 +84,7 @@ export interface ProjectContext {
   doorHistory: DoorHistoryController;
   windowHistory: WindowHistoryController;
   elementHistory: ElementHistoryController;
+  assetHistory: AssetHistoryController;
   commandExecutor: CommandExecutor;
   projectMeta: ProjectMetaStore;
 }
@@ -102,6 +106,7 @@ export function clearProject(context: ProjectContext): void {
     ...context.doorStore.getAll().map((object) => ({ type: "door.delete", id: object.id })),
     ...context.windowStore.getAll().map((object) => ({ type: "window.delete", id: object.id })),
     ...context.elementStore.getAll().map((object) => ({ type: "element.delete", id: object.id })),
+    ...context.assetStore.getAll().map((object) => ({ type: "asset.delete", id: object.id })),
     ...context.assemblyStore.getAll().map((assembly) => ({ type: "assembly.delete", id: assembly.id }))
   ];
   for (const command of deletions) {
@@ -121,6 +126,7 @@ export function createProjectContext(): ProjectContext {
   const doorStore = new DoorStore();
   const windowStore = new WindowStore();
   const elementStore = new ElementStore();
+  const assetStore = new AssetStore();
   const assemblyStore = new AssemblyStore();
   const selectionStore = new SelectionStore();
   const history = new HistoryManager();
@@ -131,6 +137,7 @@ export function createProjectContext(): ProjectContext {
   const doorHistory = new DoorHistoryController(doorStore, selectionStore, history);
   const windowHistory = new WindowHistoryController(windowStore, selectionStore, history);
   const elementHistory = new ElementHistoryController(elementStore, selectionStore, history);
+  const assetHistory = new AssetHistoryController(assetStore, selectionStore, history);
   const commandExecutor = new CommandExecutor(
     wallStore,
     wallHistory,
@@ -147,6 +154,8 @@ export function createProjectContext(): ProjectContext {
     windowHistory,
     elementStore,
     elementHistory,
+    assetStore,
+    assetHistory,
     // The same HistoryManager every controller records into: a change that
     // spans several objects (a wall and its openings, joined pipes) is one
     // undo step.
@@ -162,6 +171,7 @@ export function createProjectContext(): ProjectContext {
     doorStore,
     windowStore,
     elementStore,
+    assetStore,
     assemblyStore,
     selectionStore,
     history,
@@ -172,6 +182,7 @@ export function createProjectContext(): ProjectContext {
     doorHistory,
     windowHistory,
     elementHistory,
+    assetHistory,
     commandExecutor,
     projectMeta
   };

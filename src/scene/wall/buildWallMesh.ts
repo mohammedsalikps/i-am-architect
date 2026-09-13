@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { WallData } from "../../engine/wall/types";
 import type { WallOpeningRect } from "../../engine/openings/hostOpening";
+import { resolveSurfaceAppearance } from "../materials/surfaceAppearance";
 
 /**
  * A wall's geometry: a plain box - or, when doors or windows are hosted in
@@ -62,11 +63,24 @@ function geometryKey(wall: WallData, openings: readonly WallOpeningRect[]): stri
 /** Converts wall data - and the openings hosted in it - into a real Three.js mesh. */
 export function buildWallMesh(wall: WallData, openings: readonly WallOpeningRect[] = []): THREE.Mesh {
   const geometry = buildWallGeometry(wall, openings);
-  const material = new THREE.MeshStandardMaterial({ color: wall.color, roughness: 0.9 });
+  const appearance = resolveSurfaceAppearance(wall.material, { roughness: 0.9 });
+  const material = new THREE.MeshStandardMaterial({
+    color: wall.color,
+    roughness: appearance.roughness,
+    metalness: appearance.metalness,
+    transparent: appearance.opacity < 1,
+    opacity: appearance.opacity,
+    depthWrite: appearance.opacity >= 1
+  });
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(wall.position.x, wall.position.y, wall.position.z);
   mesh.rotation.y = wall.rotation;
+  // A wall both casts a shadow (onto the floor and other walls) and
+  // receives one (from a roof, a beam, another wall) - see lights.ts for
+  // the shadow-casting sun.
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   // objectId (not wallId): SelectionRaycaster reads this same field on
   // every selectable mesh regardless of construction-object type, so it
   // can raycast walls and pillars together without type-specific cases.
@@ -103,6 +117,12 @@ export function applyWallDataToMesh(
 
   const material = mesh.material as THREE.MeshStandardMaterial;
   material.color.set(wall.color);
+  const appearance = resolveSurfaceAppearance(wall.material, { roughness: 0.9 });
+  material.roughness = appearance.roughness;
+  material.metalness = appearance.metalness;
+  material.opacity = appearance.opacity;
+  material.transparent = appearance.opacity < 1;
+  material.depthWrite = appearance.opacity >= 1;
 
   return { dimensionsChanged };
 }

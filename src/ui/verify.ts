@@ -193,8 +193,10 @@ function run(): void {
   });
 
   check("the command bar and status bar are the last two shell rows, both fixed-height", () => {
-    assertEqual(fromEnd(shellChildren, 2), "commandBar", "second-to-last shell child");
-    // statusBar is now { element, setPlacementStatus } (see StatusBar in statusBar.ts) - the mounted child is its .element.
+    // commandBar is now { element, focusAiInput } (see CommandBar in commandBar.ts,
+    // the same shape statusBar already has below) - the mounted child is its .element.
+    assertEqual(fromEnd(shellChildren, 2), "commandBar.element", "second-to-last shell child");
+    // statusBar is { element, setPlacementStatus } (see StatusBar in statusBar.ts) - the mounted child is its .element.
     assertEqual(fromEnd(shellChildren, 1), "statusBar.element", "last shell child");
     for (const track of shellTracks.slice(-2)) {
       assertTrue(/^var\(--[a-z-]+\)$/.test(track), `bottom rows should use a fixed-height variable, got "${track}"`);

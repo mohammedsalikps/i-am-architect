@@ -4,6 +4,7 @@ import { ELEMENT_CATEGORIES, getElementKind } from "../engine/elements/catalog";
 import type { ElementKindDefinition, ParamSpec } from "../engine/elements/catalog";
 import { MATERIAL_LIBRARY, getMaterial, materialsFor } from "../engine/materials/materialLibrary";
 import type { MaterialDefinition } from "../engine/materials/materialLibrary";
+import { materialSwatchStyle } from "./materialSwatches";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
 import { isConnectable, kindsConnect } from "../engine/connections/connections";
 import { resolveConstructionObject } from "../engine/objects/resolveConstructionObject";
@@ -21,6 +22,9 @@ import type { WindowData } from "../engine/window/types";
 import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementData } from "../engine/elements/types";
 import type { ElementStore } from "../engine/elements/ElementStore";
+import { getAssetDefinition } from "../engine/assets/catalog";
+import type { AssetData } from "../engine/assets/types";
+import type { AssetStore } from "../engine/assets/AssetStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type {
@@ -30,7 +34,8 @@ import type {
   UpdateSlabCommand,
   UpdateDoorCommand,
   UpdateWindowCommand,
-  UpdateElementCommand
+  UpdateElementCommand,
+  UpdateAssetCommand
 } from "../engine/commands/types";
 
 function section(title: string, rows: HTMLElement[]): HTMLElement {
@@ -706,6 +711,57 @@ function buildWindowPanels(
   return [actions, properties, transform, dimensions, material, color];
 }
 
+/**
+ * A placed design asset's own panel - deliberately separate from the six
+ * original types' builders and from buildElementPanels, for the same
+ * reason every type has its own: an asset's fields (a catalog assetId
+ * and category, a real-meters width/height/depth box) aren't the same
+ * shape as a construction element's (a kind, params, connections) - see
+ * engine/assets/types.ts's own docs for why design assets are a
+ * genuinely separate model, not a variant of ElementData. Editable name
+ * (task section 10's "ASSET" section: Name/Category/Asset ID) mirrors
+ * how buildElementPanels already lets a room be renamed.
+ */
+function buildAssetPanels(asset: AssetData, commandExecutor: CommandExecutor, onDuplicateSelected: () => void, onDeleteSelected: () => void): HTMLElement[] {
+  const actions = buildActionsRow(onDuplicateSelected, onDeleteSelected);
+  const definition = getAssetDefinition(asset.assetId);
+
+  const updateAsset = (changes: UpdateAssetCommand["changes"]): void => {
+    commandExecutor.execute({ type: "asset.update", id: asset.id, changes });
+  };
+
+  const properties = section("Asset", [
+    textInputRow("Name", asset.label, (value) => updateAsset({ label: value })),
+    readOnlyRow("Category", definition?.category ?? "unknown"),
+    readOnlyRow("Asset ID", asset.assetId)
+  ]);
+
+  const rotationDegrees = displayDegrees(asset.rotation);
+  const transform = section("Transform", [
+    numberInputRow("Position X", asset.position.x, (value) => updateAsset({ position: { ...asset.position, x: value } }), { step: 0.1 }),
+    numberInputRow("Position Y", asset.position.y, (value) => updateAsset({ position: { ...asset.position, y: value } }), { step: 0.1 }),
+    numberInputRow("Position Z", asset.position.z, (value) => updateAsset({ position: { ...asset.position, z: value } }), { step: 0.1 }),
+    numberInputRow("Rotation Y", rotationDegrees, (value) => updateAsset({ rotation: degreesToRadians(value) }), { step: 1 })
+  ]);
+
+  const dimensions = section("Dimensions", [
+    numberInputRow("Width", asset.dimensions.width, (value) => updateAsset({ dimensions: { ...asset.dimensions, width: value } }), { min: 0.05, step: 0.05 }),
+    numberInputRow("Height", asset.dimensions.height, (value) => updateAsset({ dimensions: { ...asset.dimensions, height: value } }), {
+      min: 0.05,
+      step: 0.05
+    }),
+    numberInputRow("Depth", asset.dimensions.depth, (value) => updateAsset({ dimensions: { ...asset.dimensions, depth: value } }), { min: 0.05, step: 0.05 })
+  ]);
+
+  const material = section("Material", [
+    materialSelectRow(asset.material, materialsFor(definition?.materialCategories), (value) => updateAsset({ material: value }))
+  ]);
+
+  const color = section("Color", [colorInputRow("Color", asset.color, (value) => updateAsset({ color: value }))]);
+
+  return [actions, properties, transform, dimensions, material, color];
+}
+
 /** An object as the room section lists it. */
 interface ListedObject {
   id: string;
@@ -883,8 +939,20 @@ function buildElementPanels(
   return panels;
 }
 
-function buildEmptyState(): HTMLElement {
-  return el("div", { className: "sidebar__section" }, [
+/**
+ * Nothing selected: instead of a bare placeholder sentence, a quiet
+ * summary of what the project actually holds right now - "useful
+ * project/design information" (task section 7). Purely a read of counts
+ * already available in createRightSidebar (allObjects()/elementStore) -
+ * no new store or counting logic of its own.
+ */
+function buildEmptyState(objectCount: number, roomCount: number): HTMLElement {
+  const stats =
+    objectCount === 0
+      ? el("p", { className: "sidebar__placeholder empty-inspector__stat", text: "Nothing built yet." })
+      : el("p", { className: "empty-inspector__stat", text: `${objectCount} object${objectCount === 1 ? "" : "s"}${roomCount > 0 ? ` · ${roomCount} room${roomCount === 1 ? "" : "s"}` : ""}` });
+  return el("div", { className: "sidebar__section empty-inspector" }, [
+    stats,
     el("p", {
       className: "sidebar__placeholder",
       text: "Select an object - in the viewport or the Project hierarchy - to view and edit its properties."
@@ -900,6 +968,7 @@ export type RightSidebarOptions = {
   doorStore: DoorStore;
   windowStore: WindowStore;
   elementStore: ElementStore;
+  assetStore: AssetStore;
   selectionStore: SelectionStore;
   commandExecutor: CommandExecutor;
   onDuplicateSelected: () => void;
@@ -937,7 +1006,8 @@ function createMaterialsPanel(options: RightSidebarOptions): HTMLElement {
     slabStore: options.slabStore,
     doorStore: options.doorStore,
     windowStore: options.windowStore,
-    elementStore: options.elementStore
+    elementStore: options.elementStore,
+    assetStore: options.assetStore
   };
   const status = el("p", { className: "sidebar__placeholder material-library__status" });
   const applyButtons: HTMLButtonElement[] = [];
@@ -970,7 +1040,7 @@ function createMaterialsPanel(options: RightSidebarOptions): HTMLElement {
         });
         applyButtons.push(apply);
         return el("div", { className: "material-row", attrs: { "data-material": material.id } }, [
-          el("span", { className: "material-row__swatch", attrs: { style: `background: ${material.color}` } }),
+          el("span", { className: "material-row__swatch", attrs: { style: `background: ${materialSwatchStyle(material)}` } }),
           el("span", { className: "material-row__label", text: material.label }),
           apply
         ]);
@@ -1025,12 +1095,14 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     ...options.slabStore.getAll(),
     ...options.doorStore.getAll(),
     ...options.windowStore.getAll(),
-    ...options.elementStore.getAll()
+    ...options.elementStore.getAll(),
+    ...options.assetStore.getAll()
   ];
 
   const panelsFor = (selectedId: string | null): HTMLElement[] => {
     if (!selectedId) {
-      return [buildEmptyState()];
+      const objects = allObjects();
+      return [buildEmptyState(objects.length, objects.filter(isRoom).length)];
     }
     const { commandExecutor, onDuplicateSelected, onDeleteSelected } = options;
     const wall = options.wallStore.get(selectedId);
@@ -1068,7 +1140,12 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
         onDeleteSelected
       });
     }
-    return [buildEmptyState()];
+    const asset = options.assetStore.get(selectedId);
+    if (asset) {
+      return buildAssetPanels(asset, commandExecutor, onDuplicateSelected, onDeleteSelected);
+    }
+    const objects = allObjects();
+    return [buildEmptyState(objects.length, objects.filter(isRoom).length)];
   };
 
   // --- Relationships: host wall, a wall's openings, connections, alignment ---
@@ -1171,8 +1248,16 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   };
 
   const alignSection = (id: string, isOpening: boolean): HTMLElement => {
-    const note = el("p", { className: "relation-note", attrs: { role: "status" } });
     const others = allObjects().filter((object) => object.id !== id);
+    // Doubles as the disabled reason up front (task: a disabled control
+    // needs a visible reason, not just a mystery) and the post-click
+    // success/failure feedback once there's something to align with -
+    // feedback() below overwrites this same element either way.
+    const note = el("p", {
+      className: "relation-note",
+      attrs: { role: "status" },
+      text: others.length === 0 ? "Add another object to align or snap this one to." : undefined
+    });
     const target = el(
       "select",
       { className: "property-row__input property-row__select", attrs: { "aria-label": "Align with" } },

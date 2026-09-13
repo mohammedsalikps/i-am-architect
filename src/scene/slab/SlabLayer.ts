@@ -38,9 +38,16 @@ export class SlabLayer {
     this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
-  /** Current slab meshes, for the shared SelectionRaycaster to raycast against. */
+  /**
+   * Current slab meshes, for the shared SelectionRaycaster/
+   * ManipulationController to raycast against - hidden slabs excluded.
+   * See WallLayer.getMeshes()'s own comment for why this filtering has
+   * to happen here: THREE.Raycaster doesn't consult `.visible` itself.
+   */
   getMeshes(): THREE.Object3D[] {
-    return Array.from(this.entries.values(), (entry) => entry.mesh);
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.mesh.visible)
+      .map((entry) => entry.mesh);
   }
 
   private syncSlabs(slabs: SlabData[]): void {

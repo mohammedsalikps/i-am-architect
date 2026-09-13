@@ -535,7 +535,8 @@ async function run(): Promise<void> {
 
     const house = await pipeline.run("Build a simple house on a 10m x 8m footprint", buildAIProjectSnapshot(project));
     assertTrue(house.success, `the AI house builder still works: ${JSON.stringify(house.errors)}`);
-    assertEqual(project.wallStore.getAll().length, 4, "four walls");
+    // 4 exterior + 4 interior (the default 5-room layout: see houseDesign.ts) - the deterministic house planner, not this mock provider, decides the room layout.
+    assertEqual(project.wallStore.getAll().length, 8, "eight walls");
   });
 
   // --- Ribbon ---

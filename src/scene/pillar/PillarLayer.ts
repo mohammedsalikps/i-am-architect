@@ -36,9 +36,16 @@ export class PillarLayer {
     this.visibilityStore.subscribe((hidden) => this.syncVisibility(hidden));
   }
 
-  /** Current pillar meshes, for the shared SelectionRaycaster to raycast against. */
+  /**
+   * Current pillar meshes, for the shared SelectionRaycaster/
+   * ManipulationController to raycast against - hidden pillars excluded.
+   * See WallLayer.getMeshes()'s own comment for why this filtering has
+   * to happen here: THREE.Raycaster doesn't consult `.visible` itself.
+   */
   getMeshes(): THREE.Object3D[] {
-    return Array.from(this.entries.values(), (entry) => entry.mesh);
+    return Array.from(this.entries.values())
+      .filter((entry) => entry.mesh.visible)
+      .map((entry) => entry.mesh);
   }
 
   private syncPillars(pillars: PillarData[]): void {

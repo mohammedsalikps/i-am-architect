@@ -436,13 +436,24 @@ async function run(): Promise<void> {
 
   // --- Backend errors reach the UI ---
 
+  // Every case below is a technical/wire-protocol failure (an HTTP
+  // status, a network error, a malformed response body) - exactly the
+  // kind of detail the command bar must NEVER show a normal user
+  // verbatim (see AiPromptController.friendlyAiErrorMessage and
+  // ui/commandBar.ts's "Show details" disclosure). So `message` is
+  // asserted to be the one shared friendly line, and the original
+  // technical text is asserted to still exist - just moved to `details`,
+  // never lost, just not the headline.
+  const FRIENDLY_AI_FAILURE_MESSAGE = "AI service temporarily unavailable. Please try again.";
+
   await check("a backend 502 reaches the UI error state without mutating anything", async () => {
     const app = wireApp(() => ({ kind: "status", status: 502, error: "OpenAI request failed with status 401" }));
 
     await app.controller.submit("Build a wall");
 
     assertEqual(app.controller.getState().status, "error", "controller status");
-    assertIncludes(app.controller.getState().message, "502", "controller message should carry the status code");
+    assertEqual(app.controller.getState().message, FRIENDLY_AI_FAILURE_MESSAGE, "controller message should be the friendly, normal-user-safe line");
+    assertIncludes(app.controller.getState().details, "502", "the technical status code should still be available as details");
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
     assertEqual(app.context.history.canUndo(), false, "no history entry");
   });
@@ -452,7 +463,8 @@ async function run(): Promise<void> {
 
     await app.controller.submit("Build a wall");
 
-    assertIncludes(app.controller.getState().message, "400", "controller message");
+    assertEqual(app.controller.getState().message, FRIENDLY_AI_FAILURE_MESSAGE, "controller message should be the friendly, normal-user-safe line");
+    assertIncludes(app.controller.getState().details, "400", "the technical status code should still be available as details");
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
   });
 
@@ -462,7 +474,8 @@ async function run(): Promise<void> {
     await app.controller.submit("Build a wall");
 
     assertEqual(app.controller.getState().status, "error", "controller status");
-    assertIncludes(app.controller.getState().message, "Backend request failed", "controller message");
+    assertEqual(app.controller.getState().message, FRIENDLY_AI_FAILURE_MESSAGE, "controller message should be the friendly, normal-user-safe line");
+    assertIncludes(app.controller.getState().details, "Backend request failed", "the technical detail should still be available as details");
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
   });
 
@@ -472,7 +485,8 @@ async function run(): Promise<void> {
     await app.controller.submit("Build a wall");
 
     assertEqual(app.controller.getState().status, "error", "controller status");
-    assertIncludes(app.controller.getState().message, "commands", "controller message should name the missing field");
+    assertEqual(app.controller.getState().message, FRIENDLY_AI_FAILURE_MESSAGE, "controller message should be the friendly, normal-user-safe line");
+    assertIncludes(app.controller.getState().details, "commands", "the technical detail should still name the missing field");
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
   });
 
@@ -1484,14 +1498,23 @@ async function run(): Promise<void> {
     assertEqual(firstFreeSlot([{ x: 0.3, z: -4.2 }], slot), 1, "one still sitting near its slot keeps it");
   });
 
-  // --- AI house builder: natural language -> construction plan -> real, editable objects ---
-  // The mock backend here runs the real MockAIProvider on the request it
-  // received, exactly as backend/mockBackend.ts does. So every link is the
-  // real one: AiPromptController -> AIService -> AICommandPipeline ->
-  // BackendAIProvider -> the backend's HTTP contract -> MockAIProvider ->
-  // commands -> validation -> CommandExecutor -> stores and history.
+  // --- AI house builder: natural language -> design intent -> deterministic plan -> real, editable objects ---
+  // AICommandPipeline recognizes a whole-house instruction ITSELF (see
+  // houseIntent.ts/houseDesign.ts) and resolves it locally, before the
+  // provider is ever called - so for every check below, `mockProviderBackend`
+  // (and MockAIProvider behind it) is never actually reached for HOUSE_PROMPT;
+  // what's real end-to-end instead is AiPromptController -> AIService ->
+  // AICommandPipeline's own house-design path -> validation ->
+  // CommandExecutor -> stores and history. `mockProviderBackend` stays real
+  // and reachable for every ORDINARY (non-house) instruction in this file
+  // (e.g. the update_object edit below), proving the two paths coexist
+  // without interfering with each other.
 
   const HOUSE_PROMPT = "Build a simple 2-bedroom house on a 10m × 8m footprint.";
+  /** A five-room layout ("Living Room, Kitchen, Bedroom 1, Bedroom 2, Bathroom") is what HOUSE_PROMPT's "2-bedroom" resolves to (see houseDesign.ts's resolveRooms()) - computed once so every check below reads by name, never a bare magic number. */
+  const HOUSE_ROOMS = ["Living Room", "Kitchen", "Bedroom 1", "Bedroom 2", "Bathroom"];
+  const HOUSE_COUNTS = { slab: 1, wall: 8, pillar: 4, door: 5, window: 6, element: HOUSE_ROOMS.length + 1 /* rooms + roof */, beam: 0 };
+  const HOUSE_OBJECT_COUNT = Object.values(HOUSE_COUNTS).reduce((total, count) => total + count, 0);
 
   /** Answers like `npm run mock`: the real MockAIProvider interprets what the server received. */
   const mockProviderBackend: MockBackendHandler = (request) => {
@@ -1505,26 +1528,51 @@ async function run(): Promise<void> {
       : { kind: "ok", commands: response.commands, notes: response.notes };
   };
 
-  const overlappingPairs = (geometry: ConstructionGeometryAnalysis) =>
-    geometry.relationships.filter((pair) => pair.overlap.aabb).map((pair) => `${pair.a}/${pair.b}`);
+  /**
+   * Which pairs of construction objects overlap in space, restricted to
+   * load-bearing structure (walls, pillars, slabs, openings), and
+   * further excluding every legitimate hosted-opening/its-own-wall pair
+   * (from `geometry.hosts` - that overlap is exactly what "hosted in a
+   * wall" means: the opening's box sits inside the wall's, cut out as a
+   * visual hole - see engine/openings/hostOpening.ts). A "room" element
+   * deliberately spans to its surrounding walls' own centerlines too
+   * (the usual floor-plan convention; see houseDesign.ts's
+   * computeGrid()), so a room/wall overlap is excluded from "structural"
+   * entirely, not just this pair-specific carve-out.
+   */
+  const structuralOverlappingPairs = (geometry: ConstructionGeometryAnalysis) => {
+    const structural = new Set(["wall", "pillar", "slab", "door", "window"]);
+    const typeOf = (id: string) => geometry.objects.find((object) => object.id === id)?.type;
+    const hostedPairs = new Set(geometry.hosts.map((host) => [host.opening, host.wall].sort().join("/")));
+    return geometry.relationships
+      .filter((pair) => pair.overlap.aabb)
+      .filter((pair) => structural.has(typeOf(pair.a) ?? "") && structural.has(typeOf(pair.b) ?? ""))
+      .filter((pair) => !hostedPairs.has([pair.a, pair.b].sort().join("/")))
+      .map((pair) => `${pair.a}/${pair.b}`);
+  };
 
-  await check("AI house: the prompt on an empty project builds 1 slab, 4 walls, 4 pillars, 1 door and 2 windows through the real UI path", async () => {
+  await check("AI house: the prompt on an empty project builds a real, room-partitioned house through the real UI path, without ever calling the provider", async () => {
     const app = wireApp(mockProviderBackend);
 
     await app.controller.submit(HOUSE_PROMPT);
 
     const state = app.controller.getState();
     assertEqual(state.status, "success", "controller status");
-    assertEqual(state.message, "12 commands executed.", "controller message");
-    assertIncludes(state.notes, "10 m × 8 m house centered on the origin", "the provider's notes reach the UI");
-    assertEqual(app.backend.requests.length, 1, "one backend request");
-    assertEqual(app.backend.requests[0].instruction, HOUSE_PROMPT, "the prompt reached the backend verbatim");
-    assertEqual(app.context.slabStore.getAll().length, 1, "slab");
-    assertEqual(app.context.wallStore.getAll().length, 4, "walls");
-    assertEqual(app.context.pillarStore.getAll().length, 4, "pillars");
-    assertEqual(app.context.doorStore.getAll().length, 1, "door");
-    assertEqual(app.context.windowStore.getAll().length, 2, "windows");
-    assertEqual(app.context.beamStore.getAll().length, 0, "no beams");
+    assertEqual(state.message, `${HOUSE_OBJECT_COUNT} commands executed.`, "controller message");
+    assertIncludes(state.notes, "10 m × 8 m house", "the design summary names the requested footprint");
+    for (const room of HOUSE_ROOMS) {
+      assertIncludes(state.notes, room, `the design summary names ${room}`);
+    }
+    assertEqual(app.backend.requests.length, 0, "the provider is never called - the design is resolved locally (houseIntent.ts/houseDesign.ts)");
+    assertEqual(app.context.slabStore.getAll().length, HOUSE_COUNTS.slab, "slab");
+    assertEqual(app.context.wallStore.getAll().length, HOUSE_COUNTS.wall, "4 exterior + 4 interior walls");
+    assertEqual(app.context.pillarStore.getAll().length, HOUSE_COUNTS.pillar, "4 corner pillars");
+    assertEqual(app.context.doorStore.getAll().length, HOUSE_COUNTS.door, "1 entrance + 4 interior doors");
+    assertEqual(app.context.windowStore.getAll().length, HOUSE_COUNTS.window, "exterior windows");
+    assertEqual(app.context.elementStore.getAll().length, HOUSE_COUNTS.element, "5 named rooms + 1 roof");
+    assertEqual(app.context.beamStore.getAll().length, HOUSE_COUNTS.beam, "no beams");
+    const roomLabels = app.context.elementStore.getAll().filter((element) => element.kind === "room").map((element) => element.label);
+    assertSameJson([...roomLabels].sort(), [...HOUSE_ROOMS].sort(), "every requested room exists, by name, as a real element");
   });
 
   await check("AI house: every object is real - unique typed ids, in its own store, selectable, valid by its type's own validator", async () => {
@@ -1533,11 +1581,18 @@ async function run(): Promise<void> {
 
     const snapshot = buildAIProjectSnapshot(app.context);
     const ids = snapshot.objects.map((object) => object.id);
-    assertEqual(ids.length, 12, "12 objects in the project snapshot");
-    assertEqual(new Set(ids).size, 12, "12 unique ids");
+    assertEqual(ids.length, HOUSE_OBJECT_COUNT, `${HOUSE_OBJECT_COUNT} objects in the project snapshot`);
+    assertEqual(new Set(ids).size, HOUSE_OBJECT_COUNT, "every id is unique");
     for (const id of ids) {
       const resolved = resolveConstructionObject(id, app.context);
-      assertTrue(resolved && id.startsWith(`${resolved.type}-`), `${id} lives in its own type's store`);
+      assertTrue(!!resolved, `${id} resolves to some store`);
+      // An element's own ObjectType is the generic "element" (room and
+      // roof share the same store) - its id is prefixed by its specific
+      // catalog KIND instead ("room-1", "roof-1"), so that's what's
+      // checked for one; every other type's id is prefixed by its type
+      // directly, as before.
+      const expectedPrefix = resolved!.type === "element" ? `${app.context.elementStore.get(id)?.kind}-` : `${resolved!.type}-`;
+      assertTrue(id.startsWith(expectedPrefix), `${id} lives in its own type's store`);
       app.context.selectionStore.select(id);
       assertEqual(app.context.selectionStore.get(), id, `${id} is selectable`);
     }
@@ -1553,37 +1608,44 @@ async function run(): Promise<void> {
     assertTrue(parseAIProjectSnapshot(JSON.parse(JSON.stringify(snapshot))).ok, "and the snapshot passes the shared snapshot validator");
   });
 
-  await check("AI house: geometry finds 0 invalid objects and no overlapping pair - a closed perimeter standing on the slab", async () => {
+  await check("AI house: geometry finds 0 invalid objects and a closed, non-overlapping structural perimeter standing on the slab", async () => {
     const app = wireApp(mockProviderBackend);
     await app.controller.submit(HOUSE_PROMPT);
 
     const geometry = analyzeConstructionGeometry(buildAIProjectSnapshot(app.context));
     assertEqual(geometry.invalidObjects.length, 0, "no invalid objects");
-    assertEqual(geometry.relationships.length, 66, "12 * 11 / 2 pairs");
-    assertEqual(overlappingPairs(geometry).join(", "), "", "no two objects share any volume");
+    assertEqual(geometry.relationships.length, (HOUSE_OBJECT_COUNT * (HOUSE_OBJECT_COUNT - 1)) / 2, "every pair is analyzed");
+
+    assertEqual(
+      structuralOverlappingPairs(geometry).join(", "),
+      "",
+      "no two structural objects (walls, pillars, slab, openings) share any volume"
+    );
 
     const boxes = (type: string) => geometry.objects.filter((object) => object.type === type).map((object) => object.aabb);
-    const box = (min: [number, number, number], max: [number, number, number]) => ({
-      min: { x: min[0], y: min[1], z: min[2] },
-      max: { x: max[0], y: max[1], z: max[2] }
-    });
-    assertSameJson(boxes("slab"), [box([-5, 0, -4], [5, 0.2, 4])], "the slab covers the 10 x 8 footprint");
+    const slabBoxes = boxes("slab");
+    assertEqual(slabBoxes.length, 1, "one slab");
     assertSameJson(
-      boxes("pillar"),
-      [box([-5, 0.2, -4], [-4.6, 2.9, -3.6]), box([4.6, 0.2, -4], [5, 2.9, -3.6]), box([4.6, 0.2, 3.6], [5, 2.9, 4]), box([-5, 0.2, 3.6], [-4.6, 2.9, 4])],
-      "a pillar on each corner of the slab"
+      slabBoxes[0],
+      { min: { x: -5, y: 0, z: -4 }, max: { x: 5, y: 0.2, z: 4 } },
+      "the slab covers the requested 10 x 8 footprint exactly"
     );
-    assertSameJson(
-      boxes("wall"),
-      [box([-4.6, 0.2, 3.8], [4.6, 2.9, 4]), box([-4.6, 0.2, -4], [4.6, 2.9, -3.8]), box([-5, 0.2, -3.6], [-4.8, 2.9, 3.6]), box([4.8, 0.2, -3.6], [5, 2.9, 3.6])],
-      "front, back, left and right walls run pillar to pillar on the slab's edges - the perimeter is closed"
+    assertEqual(boxes("pillar").length, 4, "4 corner pillars");
+    assertEqual(boxes("wall").length, HOUSE_COUNTS.wall, "4 exterior + 4 interior walls");
+    assertEqual(boxes("door").length, HOUSE_COUNTS.door, "1 entrance + 4 interior doors");
+    assertEqual(boxes("window").length, HOUSE_COUNTS.window, "exterior windows");
+
+    // A closed perimeter: every exterior wall's aabb reaches exactly to
+    // the slab's own edge on its outward side (min/max X or Z match the
+    // slab's), the way buildSimpleHousePlan's own shell already proved -
+    // this design's exterior shell is built the same way.
+    const slabBox = slabBoxes[0];
+    const wallBoxes = boxes("wall");
+    const reachesEdge = (value: number) => [slabBox.min.x, slabBox.max.x, slabBox.min.z, slabBox.max.z].some((edge) => Math.abs(edge - value) < 1e-6);
+    const exteriorWalls = wallBoxes.filter(
+      (box) => reachesEdge(box.min.x) || reachesEdge(box.max.x) || reachesEdge(box.min.z) || reachesEdge(box.max.z)
     );
-    assertSameJson(boxes("door"), [box([-0.45, 0.2, 4], [0.45, 2.3, 4.05])], "the door stands on the slab, on the front wall's outside face");
-    assertSameJson(
-      boxes("window"),
-      [box([-3.1, 1.1, -4.05], [-1.9, 2.3, -4]), box([5, 1.1, -2.6], [5.05, 2.3, -1.4])],
-      "the windows sit 0.9 m above the floor on the back and right walls' outside faces"
-    );
+    assertEqual(exteriorWalls.length, 4, "exactly 4 walls reach the slab's outer edge - the exterior shell is closed");
   });
 
   await check("AI house: ONE undo removes the whole AI-built house, ONE redo restores it exactly", async () => {
@@ -1625,7 +1687,7 @@ async function run(): Promise<void> {
     assertEqual(app.context.wallStore.get(frontWall.id)?.dimensions.height, 2.7, "undo reverts the height edit");
     app.context.history.undo();
     assertSameJson(app.context.wallStore.get(frontWall.id), frontWall, "undo reverts the AI edit - the wall is exactly as built");
-    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 12, "the rest of the house is untouched");
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, HOUSE_OBJECT_COUNT, "the rest of the house is untouched");
     app.context.history.undo();
     assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, "the next undo removes the house");
   });
@@ -1639,15 +1701,18 @@ async function run(): Promise<void> {
     await app.controller.submit(HOUSE_PROMPT);
 
     assertEqual(app.controller.getState().status, "success", "status");
-    assertIncludes(app.controller.getState().notes, "clear of the existing objects", "the notes say it moved aside");
     const snapshot = buildAIProjectSnapshot(app.context);
-    assertEqual(snapshot.objects.length, 14, "2 manual + 12 AI objects");
+    assertEqual(snapshot.objects.length, 2 + HOUSE_OBJECT_COUNT, "2 manual + every AI-built house object");
     assertSameJson(
       snapshot.objects.filter((object) => object.id === manualWall || object.id === manualPillar),
       JSON.parse(manualBefore),
       "the manual objects are exactly as they were"
     );
-    assertEqual(overlappingPairs(analyzeConstructionGeometry(snapshot)).join(", "), "", "the house overlaps nothing - not the manual objects, not itself");
+    assertEqual(
+      structuralOverlappingPairs(analyzeConstructionGeometry(snapshot)).join(", "),
+      "",
+      "the house's structure overlaps nothing - not the manual objects, not itself"
+    );
 
     app.context.history.undo();
     assertEqual(objectsJson(app.context), manualBefore, "one undo removes only the house");
@@ -1688,7 +1753,12 @@ async function run(): Promise<void> {
       const beam = addThroughExecutor(app.context, { type: "beam.add", beam: {} });
       app.context.history.undo();
 
-      await app.controller.submit(HOUSE_PROMPT);
+      // A generic instruction, deliberately NOT a whole-house request
+      // (see houseIntent.ts) - this test is about a raw provider-returned
+      // plan being rejected atomically, so it goes through the ordinary
+      // provider path (mockProviderBackend/MockAIProvider), not the
+      // house-design one, which never even calls the provider.
+      await app.controller.submit("Build these exact objects.");
 
       assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, `${testCase.name}: nothing was built`);
       assertEqual(app.context.history.canUndo(), false, `${testCase.name}: no history entry`);
@@ -1712,10 +1782,20 @@ async function run(): Promise<void> {
     assertIncludes(app.controller.getState().message, "still in progress", "message");
   });
 
-  await check("AI house: the in-process MockAIProvider and the backend request path produce the same plan and the same model", async () => {
+  // Superseded by the AI Architectural Design Intent milestone: a whole-
+  // house instruction never reaches EITHER an in-process provider or the
+  // backend-request path any more - AICommandPipeline's own house-design
+  // branch (houseIntent.ts/houseDesign.ts) resolves it before either
+  // would be called (see this file's own header comment above). So the
+  // two setups below aren't "the same plan produced two ways" any more;
+  // this now proves they're both driven by the identical local resolver
+  // regardless of which AIProvider the pipeline happens to be holding -
+  // AIService/AiPromptController never has to know or care.
+  await check("AI house: the in-process AIService and the backend-request AIService produce the identical house, neither ever calling their provider", async () => {
     const direct = createProjectContext();
+    const directProvider = new MockAIProvider();
     const directService = new AIService({
-      provider: new MockAIProvider(),
+      provider: directProvider,
       commandExecutor: direct.commandExecutor,
       history: direct.history,
       snapshotSource: direct
@@ -1727,14 +1807,15 @@ async function run(): Promise<void> {
 
     assertTrue(directResult.success, "in-process: success");
     assertEqual(app.controller.getState().status, "success", "backend path: success");
-    assertSameJson(
-      directResult.outcomes.map((outcome) => outcome.command),
-      buildSimpleHousePlan({ length: 10, width: 8 }),
-      "in-process: exactly the reference plan"
-    );
-    // Ids differ (every context shares the id counters), so compare everything else.
-    const withoutIds = (context: ProjectContext) => buildAIProjectSnapshot(context).objects.map(({ id, ...rest }) => rest);
-    assertSameJson(withoutIds(app.context), withoutIds(direct), "the same 12 objects either way, ids aside");
+    assertEqual(app.backend.requests.length, 0, "backend path: the provider is never called either");
+    assertEqual(directResult.outcomes.length, HOUSE_OBJECT_COUNT, `in-process: the full ${HOUSE_OBJECT_COUNT}-object house`);
+    // Ids differ (every context shares the id counters), and so, in turn,
+    // does every hostId (a door/window's reference to ITS wall's id) -
+    // normalized to whether an object is hosted at all, since the
+    // specific id it's hosted in isn't independently meaningful here.
+    const withoutIds = (context: ProjectContext) =>
+      buildAIProjectSnapshot(context).objects.map(({ id, hostId, ...rest }) => ({ ...rest, hosted: hostId !== undefined }));
+    assertSameJson(withoutIds(app.context), withoutIds(direct), "the same house either way, ids (and id references) aside");
   });
 
   await check("every type keeps its base where it was when its vertical size changes - grounded stays grounded, raised stays raised", async () => {
@@ -1821,7 +1902,7 @@ async function run(): Promise<void> {
     await app.controller.submit(HOUSE_PROMPT);
 
     assertEqual(app.controller.getState().status, "success", "the house was built");
-    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 13, "the restored wall plus the 12-object house");
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 1 + HOUSE_OBJECT_COUNT, "the restored wall plus the whole AI-built house");
     app.context.history.undo();
     assertEqual(objectsJson(app.context), restored, "one undo leaves exactly the loaded project");
   });

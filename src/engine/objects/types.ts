@@ -35,6 +35,12 @@ export type ObjectType =
   // roof, stair, flooring, plumbing, electrical, furniture, landscape,
   // rooms, ... - shares this one type; its `kind` says which.
   | "element"
+  // Every design asset in assets/catalog.ts - a loaded GLB/GLTF model
+  // instance (a sofa, a bed, a lamp, ...); its `assetId` says which. A
+  // deliberately separate type from "element": see engine/assets/
+  // AssetStore.ts's own docs for why design assets aren't folded into
+  // the parametric-element system.
+  | "asset"
   | "roof"
   | "furniture"
   | "landscaping";
