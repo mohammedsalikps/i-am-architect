@@ -26,6 +26,8 @@ import type { ProjectPersistenceController } from "../engine/project/ProjectPers
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { AuthController } from "../engine/auth/AuthController";
 import type { VisibilityStore } from "../scene/visibility/VisibilityStore";
+import { buildAIProjectSnapshot } from "../engine/ai/types.ts";
+import type { HighlightConstructionObjects } from "./constructionMethodPanel.ts";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
@@ -77,6 +79,8 @@ export type AppShellOptions = {
   snapSettings: SnapSettings;
   /** Arms pick-and-place for one catalog design asset - see ui/assetLibrary.ts and main.ts's addAsset(). */
   onAddAsset: (assetId: string) => void;
+  /** The Construction Method tab's viewport highlight - see SceneManager.highlightConstructionObjects() and constructionMethodPanel.ts. */
+  onHighlightConstructionObjects: HighlightConstructionObjects;
 };
 
 /** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
@@ -252,7 +256,26 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.onFocusObjects,
     (objectId) => options.selectionStore.select(objectId),
     options.onUndo,
-    options.onSaveProject
+    options.onSaveProject,
+    // Fresh snapshot on every call (never cached) - the same
+    // buildAIProjectSnapshot() the AI layer itself reads the project
+    // through (see ai/types.ts), so the Construction Method tab classifies
+    // the actual current objects, never a duplicate object model.
+    () =>
+      buildAIProjectSnapshot({
+        wallStore: options.wallStore,
+        pillarStore: options.pillarStore,
+        beamStore: options.beamStore,
+        slabStore: options.slabStore,
+        doorStore: options.doorStore,
+        windowStore: options.windowStore,
+        elementStore: options.elementStore,
+        assetStore: options.assetStore,
+        assemblyStore: options.assemblyStore,
+        selectionStore: options.selectionStore
+      }).objects,
+    () => options.projectMeta.get().id,
+    options.onHighlightConstructionObjects
   );
 
   // The viewport's own "nothing built yet" state (task: don't leave an

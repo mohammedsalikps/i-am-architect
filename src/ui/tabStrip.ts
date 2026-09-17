@@ -7,6 +7,8 @@ export type TabDefinition = {
   build: () => HTMLElement;
   /** Disabled tabs render but cannot be activated - used for "Coming soon" sections. */
   disabled?: boolean;
+  /** Runs when the user switches away from this tab to another one - e.g. clearing a temporary viewport highlight. Never called for the tab's own initial build. */
+  onDeactivate?: () => void;
 };
 
 export type TabStrip = {
@@ -38,8 +40,13 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
   const panel = el("div", { className: "tab-strip__panel" });
   const buttons = new Map<string, HTMLButtonElement>();
   const built = new Map<string, HTMLElement>();
+  let activeId: string | null = null;
 
   function activate(id: string): void {
+    if (activeId && activeId !== id) {
+      tabs.find((t) => t.id === activeId)?.onDeactivate?.();
+    }
+    activeId = id;
     for (const [tabId, button] of buttons) {
       button.classList.toggle(`${buttonClassName}--active`, tabId === id);
     }

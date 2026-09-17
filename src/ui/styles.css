@@ -2286,6 +2286,133 @@ button {
   color: var(--color-surface);
 }
 
+/* ---------- Construction Method tab (build sequence + viewport highlight) ---------- */
+/* A professional workflow surface (task: "not a game") - a numbered step
+   list on the left, the selected step's description/components on the
+   right, matching the same quiet chrome (--color-surface-raised panels,
+   --color-border hairlines) every other command-bar tab already uses -
+   no new visual language introduced for this one feature. */
+
+.construction-method__nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 16px 8px;
+}
+
+.construction-method__step-indicator {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  flex: 1;
+  text-align: center;
+}
+
+.construction-method__unresolved {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  padding: 0 16px 8px;
+  margin: 0;
+}
+
+.construction-method__body {
+  display: flex;
+  gap: var(--space-3);
+  padding: 0 16px 16px;
+  min-height: 0;
+}
+
+.construction-method__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 220px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  max-height: 260px;
+}
+
+.construction-method__step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text);
+}
+
+.construction-method__step:hover {
+  background: var(--color-surface-raised);
+}
+
+.construction-method__step--active {
+  background: var(--color-surface-raised);
+  border-color: var(--color-accent);
+}
+
+.construction-method__step-number {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.construction-method__step-title {
+  font-size: 13px;
+}
+
+.construction-method__detail {
+  flex: 1;
+  min-width: 0;
+  border-left: 1px solid var(--color-border);
+  padding-left: var(--space-4);
+  overflow-y: auto;
+  max-height: 260px;
+}
+
+.construction-method__detail-title {
+  margin: 0 0 var(--space-2);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.construction-method__detail-description {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.construction-method__detail-meta {
+  margin: 0 0 var(--space-3);
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.construction-method__components {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.construction-method__component {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.construction-method__component-name {
+  color: var(--color-text);
+}
+
+.construction-method__component-quantity {
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
 /* ---------- Responsive: collapse the 3-column body below 1024px ---------- */
 
 @media (max-width: 1023px) {

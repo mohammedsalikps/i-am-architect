@@ -3,6 +3,8 @@ import { createTabStrip, comingSoon } from "./tabStrip";
 import { AiPromptController, isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
 import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState, AiUpdateSummary } from "../engine/ai/AiPromptController";
 import type { HouseDesignSummary } from "../engine/ai/houseDesign.ts";
+import { buildConstructionMethodTab, type HighlightConstructionObjects } from "./constructionMethodPanel.ts";
+import type { AIContextObject } from "../engine/ai/types.ts";
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
@@ -444,14 +446,18 @@ function buildManualBuildTab(onAddWall: () => void): HTMLElement {
 }
 
 /**
- * Bottom workspace: tabbed AI Prompt / Manual Build / Measurements /
- * Quotation / Design Review. AI Prompt sends the typed instruction
- * through `onSubmitAiInstruction` (in the running app, `AIService.submit`
- * - constructed once in main.ts from the shared CommandExecutor and a
- * BackendAIProvider - see main.ts and ai/README.md "Where
- * AICommandPipeline can be constructed safely") and renders the result
- * via AiPromptController - see buildAiPromptTab() above. Manual Build
- * hosts the Add Wall action relocated from the old header.
+ * Bottom workspace: tabbed AI Prompt / Manual Build / Construction Method /
+ * Measurements / Quotation / Design Review. AI Prompt sends the typed
+ * instruction through `onSubmitAiInstruction` (in the running app,
+ * `AIService.submit` - constructed once in main.ts from the shared
+ * CommandExecutor and a BackendAIProvider - see main.ts and ai/README.md
+ * "Where AICommandPipeline can be constructed safely") and renders the
+ * result via AiPromptController - see buildAiPromptTab() above. Manual
+ * Build hosts the Add Wall action relocated from the old header.
+ * Construction Method generates a deterministic build sequence from the
+ * project's real objects and highlights each step's objects in the
+ * viewport - see constructionMethodPanel.ts and
+ * engine/construction/generateConstructionSequence.ts.
  * Measurements/Quotation/Design Review are "Coming soon" - out of scope
  * for this milestone.
  */
@@ -467,7 +473,11 @@ export function createCommandBar(
   onFocusCreated: (objectIds: string[]) => void,
   onSelectObject: (objectId: string) => void,
   onUndo: () => void,
-  onSaveProject: () => void
+  onSaveProject: () => void,
+  /** The project's current real objects, as the AI layer already sees them (buildAIProjectSnapshot) - read fresh each time the Construction Method tab generates, never cached. */
+  getConstructionObjects: () => readonly AIContextObject[],
+  getProjectId: () => string | null,
+  onHighlightConstructionObjects: HighlightConstructionObjects
 ): CommandBar {
   // Built up front (not lazily inside the tab strip's own build()) so
   // its `focusInput()` is available regardless of which tab is active -
@@ -475,11 +485,21 @@ export function createCommandBar(
   // already the active one on load; this only matters once the user has
   // switched away and back.
   const aiPromptTab = buildAiPromptTab(onSubmitAiInstruction, onFocusCreated, onSelectObject, onUndo, onSaveProject);
+  let constructionMethodTab: ReturnType<typeof buildConstructionMethodTab> | null = null;
 
   const { strip, panel, activate } = createTabStrip(
     [
       { id: "ai-prompt", label: "AI Prompt", build: () => aiPromptTab.element },
       { id: "manual-build", label: "Manual Build", build: () => buildManualBuildTab(onAddWall) },
+      {
+        id: "construction-method",
+        label: "Construction Method",
+        build: () => {
+          constructionMethodTab = buildConstructionMethodTab(getConstructionObjects, getProjectId, onHighlightConstructionObjects);
+          return constructionMethodTab.element;
+        },
+        onDeactivate: () => constructionMethodTab?.clearHighlight()
+      },
       { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },
       { id: "quotation", label: "Quotation", build: () => comingSoon("Quotation"), disabled: true },
       { id: "design-review", label: "Design Review", build: () => comingSoon("Design review"), disabled: true }

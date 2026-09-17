@@ -77,6 +77,14 @@ export class SceneManager {
   /** The pick-and-place interaction - armed by ribbon/palette tools (main.ts), placing through the same CommandExecutor every other path uses. */
   readonly placementController: PlacementController;
   private readonly getAllMeshes: () => THREE.Object3D[];
+  /**
+   * The Construction Method panel's temporary highlight (see
+   * highlightConstructionObjects() below): every mesh currently tinted
+   * away from its real material color, paired with that real color so it
+   * can be restored exactly - never a second, permanent copy of project
+   * data, and never written back to any store.
+   */
+  private readonly highlightedMeshes = new Map<THREE.Mesh, THREE.Color>();
 
   constructor(
     container: HTMLElement,
@@ -383,6 +391,60 @@ export class SceneManager {
       return;
     }
     this.applyFit(this.boundingBoxOf(new Set(objectIds)));
+  }
+
+  /**
+   * The Construction Method panel's step highlight (task: "selecting a
+   * step must highlight its linked objects... the rest kept visible but
+   * subdued... do NOT permanently modify object materials... do NOT
+   * alter saved project data"). Every mesh (across every layer, via the
+   * same getAllMeshes() closure focusOn() uses) is matched to `objectIds`
+   * by its own `userData.objectId` - the same field every layer already
+   * tags every selectable part with. `null` restores every mesh to its
+   * real material color and highlights nothing (the panel's "Show All").
+   *
+   * Safe to mutate `material.color` directly and restore it afterwards
+   * because every mesh this app builds gets its OWN material instance
+   * (see buildWallMesh.ts/buildElementMesh.ts/AssetLoader.ts's per-instance
+   * material cloning) - never one shared across multiple objects, so
+   * tinting one object's meshes can never bleed into another's.
+   *
+   * Returns how many of the requested ids were actually found on a real
+   * mesh (`resolved`) versus not (`unresolved`) - the caller shows the
+   * step normally either way and only reports the unresolved count,
+   * rather than throwing (task section 6).
+   */
+  highlightConstructionObjects(objectIds: readonly string[] | null): { resolved: number; unresolved: number } {
+    for (const [mesh, color] of this.highlightedMeshes) {
+      (mesh.material as THREE.MeshStandardMaterial).color.copy(color);
+    }
+    this.highlightedMeshes.clear();
+
+    if (!objectIds || objectIds.length === 0) {
+      return { resolved: 0, unresolved: objectIds?.length ?? 0 };
+    }
+
+    const wanted = new Set(objectIds);
+    const resolved = new Set<string>();
+    const HIGHLIGHT_TINT = new THREE.Color(0xffb703);
+
+    for (const object of this.getAllMeshes()) {
+      const mesh = object as THREE.Mesh;
+      const material = mesh.material as THREE.MeshStandardMaterial | undefined;
+      const objectId = mesh.userData.objectId as string | undefined;
+      if (!material || !("color" in material) || !objectId) {
+        continue;
+      }
+      this.highlightedMeshes.set(mesh, material.color.clone());
+      if (wanted.has(objectId)) {
+        resolved.add(objectId);
+        material.color.lerp(HIGHLIGHT_TINT, 0.6);
+      } else {
+        material.color.multiplyScalar(0.3);
+      }
+    }
+
+    return { resolved: resolved.size, unresolved: objectIds.length - resolved.size };
   }
 
   /** The union bounding box of every visible mesh, optionally restricted to `ids`; null when nothing qualifies. */

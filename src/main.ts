@@ -661,7 +661,8 @@ const shell = createAppShell({
   history,
   commandExecutor,
   snapSettings,
-  onAddAsset: addAsset
+  onAddAsset: addAsset,
+  onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 }
 });
 
 appRoot.append(shell.root);
