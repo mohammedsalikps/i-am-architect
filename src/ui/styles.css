@@ -1237,6 +1237,80 @@ button {
   padding: 4px 0;
 }
 
+/* ---------- Asset hover preview (task section 4-9) ---------- */
+/* A compact, static information card shown on hover - a real thumbnail,
+   name, category, dimensions and description, never a live 3D preview or
+   a marketplace-style popup. Appended to document.body (see
+   assetPreview.ts), positioned in JS with `fixed` coordinates computed
+   from the hovered card's own rect, so the left sidebar's own
+   `overflow-y: auto` (.tab-strip__panel) can never clip it. */
+.asset-preview {
+  position: fixed;
+  z-index: 60;
+  width: 240px;
+  max-width: calc(100vw - 20px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-elevation-1);
+  pointer-events: auto;
+}
+
+.asset-preview[hidden] {
+  display: none;
+}
+
+.asset-preview__thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 160px;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.asset-preview__thumb-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.asset-preview__thumb--icon {
+  color: var(--color-text-muted);
+}
+
+.asset-preview__thumb--icon svg {
+  width: 56px;
+  height: 56px;
+}
+
+.asset-preview__name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.asset-preview__meta {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.asset-preview__description {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
 /* ---------- Left rail + hierarchy ---------- */
 
 .sidebar-rail {
@@ -1754,6 +1828,18 @@ button {
   border-radius: var(--radius-xs);
   background: var(--color-bg);
   cursor: pointer;
+}
+
+/* A read-only block of prose inside a property section (an asset's
+   catalog description) - distinct from .property-row, which is a
+   label/value pair on one line and wouldn't wrap a sentence cleanly. */
+.property-note {
+  margin: 6px 0 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-muted);
 }
 
 /* ---------- Bottom workspace ---------- */

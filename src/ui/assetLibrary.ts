@@ -1,8 +1,19 @@
 import { el } from "./dom";
 import { assetIconSvg } from "./assetIcons";
 import { resolveAssetThumbnailUrl } from "./assetThumbnails";
+import { assetCategoryLabel, createAssetPreview, formatAssetDimensions } from "./assetPreview";
+import type { AssetPreview } from "./assetPreview";
 import { ASSET_CATEGORIES, assetDefinitionsIn, searchAssetDefinitions } from "../engine/assets/catalog";
 import type { AssetCategory, AssetDefinition } from "../engine/assets/catalog";
+
+/** How long a hover must linger before the preview appears/disappears - short enough to feel immediate, long enough that sweeping the mouse across the grid never flickers a preview per card (task section 8). */
+const PREVIEW_SHOW_DELAY_MS = 150;
+const PREVIEW_HIDE_DELAY_MS = 150;
+
+/** "Sofa / Living / 2.0 × 0.92 × 0.85 m / A three-seat sofa..." - the existing description, plus category and real dimensions (task section 1), never invented metadata. */
+function assetTooltip(definition: AssetDefinition): string {
+  return [definition.label, assetCategoryLabel(definition), formatAssetDimensions(definition), definition.description].join("\n");
+}
 
 export interface AssetLibraryOptions {
   /** Arms pick-and-place for this asset - see main.ts's addAsset(). Placing follows the exact same pick→place→select→inspect flow every construction tool already uses. */
@@ -37,7 +48,13 @@ function placementIdFor(assetId: string): string {
   return `asset:${assetId}`;
 }
 
-function assetCard(definition: AssetDefinition, onPlace: (assetId: string) => void): HTMLElement {
+interface AssetCardHandlers {
+  onPlace(assetId: string): void;
+  onHoverStart(definition: AssetDefinition, anchor: HTMLElement): void;
+  onHoverEnd(): void;
+}
+
+function assetCard(definition: AssetDefinition, handlers: AssetCardHandlers): HTMLElement {
   const thumbnailUrl = resolveAssetThumbnailUrl(definition);
   const thumb = el("div", { className: "asset-card__thumb" });
   if (thumbnailUrl) {
@@ -73,11 +90,19 @@ function assetCard(definition: AssetDefinition, onPlace: (assetId: string) => vo
     "button",
     {
       className: "asset-card",
-      attrs: { type: "button", title: definition.description, "aria-label": `Place ${definition.label}` }
+      attrs: { type: "button", title: assetTooltip(definition), "aria-label": `Place ${definition.label}` }
     },
     [thumb, el("span", { className: "asset-card__name", text: definition.label })]
   );
-  card.addEventListener("click", () => onPlace(definition.id));
+  // Hover previews (mouseenter/mouseleave) are entirely independent of
+  // this click - clicking still arms placement immediately, exactly as
+  // before Phase 4B (task section 4: "hover must not arm placement").
+  card.addEventListener("mouseenter", () => handlers.onHoverStart(definition, card));
+  card.addEventListener("mouseleave", () => handlers.onHoverEnd());
+  card.addEventListener("click", () => {
+    handlers.onHoverEnd();
+    handlers.onPlace(definition.id);
+  });
   return card;
 }
 
@@ -85,7 +110,7 @@ function categorySection(
   category: AssetCategory,
   label: string,
   assets: readonly AssetDefinition[],
-  onPlace: (assetId: string) => void,
+  handlers: AssetCardHandlers,
   cards: { id: string; card: HTMLElement }[]
 ): HTMLElement {
   const body =
@@ -95,7 +120,7 @@ function categorySection(
           "div",
           { className: "asset-library__grid" },
           assets.map((definition) => {
-            const card = assetCard(definition, onPlace);
+            const card = assetCard(definition, handlers);
             cards.push({ id: definition.id, card });
             return card;
           })
@@ -132,12 +157,58 @@ export function createAssetLibrary(options: AssetLibraryOptions): AssetLibrary {
   /** The cards the last render() produced, for refresh() to re-check - see AssetLibrary.refresh()'s own docs. */
   let cards: { id: string; card: HTMLElement }[] = [];
 
+  // A single preview surface reused across every card (task section 6-7:
+  // one shared, viewport-anchored overlay, not one per card) - see
+  // assetPreview.ts's own docs for why it lives on document.body rather
+  // than inside this scrolling panel.
+  const preview: AssetPreview = createAssetPreview();
+  let showTimer: number | undefined;
+  let hideTimer: number | undefined;
+
+  const cancelPendingShow = (): void => {
+    window.clearTimeout(showTimer);
+  };
+  const cancelPendingHide = (): void => {
+    window.clearTimeout(hideTimer);
+  };
+  const hideNow = (): void => {
+    cancelPendingShow();
+    cancelPendingHide();
+    preview.hide();
+  };
+  const handlers: AssetCardHandlers = {
+    onPlace: options.onPlaceAsset,
+    onHoverStart: (definition, anchor) => {
+      cancelPendingHide();
+      cancelPendingShow();
+      showTimer = window.setTimeout(() => preview.show(definition, anchor), PREVIEW_SHOW_DELAY_MS);
+    },
+    onHoverEnd: () => {
+      cancelPendingShow();
+      cancelPendingHide();
+      hideTimer = window.setTimeout(() => preview.hide(), PREVIEW_HIDE_DELAY_MS);
+    }
+  };
+  // Moving from a card onto the preview itself (task section 6: "preview
+  // remains available") cancels that pending hide; leaving the preview
+  // (to empty space, not back onto a card) hides it the same way leaving
+  // a card does.
+  preview.element.addEventListener("mouseenter", cancelPendingHide);
+  preview.element.addEventListener("mouseleave", () => {
+    hideTimer = window.setTimeout(() => preview.hide(), PREVIEW_HIDE_DELAY_MS);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      hideNow();
+    }
+  });
+
   const render = (): void => {
     cards = [];
     const query = search.value.trim();
     if (!query) {
       results.replaceChildren(
-        ...ASSET_CATEGORIES.map((category) => categorySection(category.id, category.label, assetDefinitionsIn(category.id), options.onPlaceAsset, cards))
+        ...ASSET_CATEGORIES.map((category) => categorySection(category.id, category.label, assetDefinitionsIn(category.id), handlers, cards))
       );
     } else {
       const matches = searchAssetDefinitions(query);
@@ -148,7 +219,7 @@ export function createAssetLibrary(options: AssetLibraryOptions): AssetLibrary {
               "div",
               { className: "asset-library__grid" },
               matches.map((definition) => {
-                const card = assetCard(definition, options.onPlaceAsset);
+                const card = assetCard(definition, handlers);
                 cards.push({ id: definition.id, card });
                 return card;
               })
@@ -164,7 +235,10 @@ export function createAssetLibrary(options: AssetLibraryOptions): AssetLibrary {
     }
   };
 
-  search.addEventListener("input", render);
+  search.addEventListener("input", () => {
+    hideNow();
+    render();
+  });
   render();
 
   return { element: el("div", { className: "asset-library" }, [search, results]), refresh };

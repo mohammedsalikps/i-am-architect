@@ -83,9 +83,35 @@ export class AssetLoader {
 
     const { template, naturalSize } = await pending;
     const group = template.clone(true);
+
+    /**
+     * `Object3D.clone(true)` deep-clones the node hierarchy but not
+     * materials/geometries - every mesh in `group` still points at the
+     * exact same material object(s) as the cached template (and as each
+     * other, wherever the source .gltf had several primitives share one
+     * material index - GLTFExporter/GLTFLoader both dedupe by reference,
+     * see scripts/generate-asset-models.mjs, e.g. the sofa's seat+back+
+     * both armrests are one shared "fabric" material). Cloning per
+     * ORIGINAL reference (not per mesh) preserves that same sharing at
+     * the instance level: two meshes that shared a material before
+     * cloning share one new clone after it, so buildAssetVisual.ts's
+     * override - which only mutates meshes[0]'s material object in place -
+     * still reaches every mesh that originally shared it, while a mesh
+     * with a genuinely different original material (e.g. a lamp's shade
+     * vs. its metal pole) keeps its own independent clone untouched.
+     */
+    const clonedMaterials = new Map<THREE.Material, THREE.Material>();
+    function cloneMaterial(material: THREE.Material): THREE.Material {
+      let clone = clonedMaterials.get(material);
+      if (!clone) {
+        clone = material.clone();
+        clonedMaterials.set(material, clone);
+      }
+      return clone;
+    }
     group.traverse((object) => {
       if (object instanceof THREE.Mesh) {
-        object.material = Array.isArray(object.material) ? object.material.map((material) => material.clone()) : object.material.clone();
+        object.material = Array.isArray(object.material) ? object.material.map(cloneMaterial) : cloneMaterial(object.material);
       }
     });
     return { group, naturalSize };

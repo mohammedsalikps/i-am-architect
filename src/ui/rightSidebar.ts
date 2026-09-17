@@ -52,6 +52,11 @@ function readOnlyRow(label: string, value: string): HTMLElement {
   ]);
 }
 
+/** A read-only block of prose within a section - the catalog description below an asset's Name/Category/Asset ID rows, never an editable field. */
+function descriptionRow(text: string): HTMLElement {
+  return el("p", { className: "property-note", text });
+}
+
 /**
  * Makes Enter commit a field. A number input doesn't fire "change" on
  * Enter by itself - only on blur - which left an edit pending until the
@@ -733,7 +738,8 @@ function buildAssetPanels(asset: AssetData, commandExecutor: CommandExecutor, on
   const properties = section("Asset", [
     textInputRow("Name", asset.label, (value) => updateAsset({ label: value })),
     readOnlyRow("Category", definition?.category ?? "unknown"),
-    readOnlyRow("Asset ID", asset.assetId)
+    readOnlyRow("Asset ID", asset.assetId),
+    ...(definition?.description ? [descriptionRow(definition.description)] : [])
   ]);
 
   const rotationDegrees = displayDegrees(asset.rotation);

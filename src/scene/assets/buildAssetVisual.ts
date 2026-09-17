@@ -77,14 +77,20 @@ export function buildPlaceholderVisual(asset: AssetData, state: "loading" | "fai
  * "Primary surface" is a real, documented simplification: by this
  * project's own authoring convention (scripts/generate-asset-models.mjs),
  * the first mesh every asset's build*() function adds is its main
- * surface (a sofa's base, a table's top, ...) - secondary parts (legs,
- * a mattress's pillows, a counter's sink) keep their own authored color
- * regardless of the object's material/color, the same "main surface
- * only" precedent buildElementMesh.ts's surfaceMaterial() already set
- * for catalog elements' own secondary parts (WOOD/LINEN/BARK constants).
- * A future milestone could tag every part explicitly (glTF extras round-
- * trip through GLTFLoader as userData) rather than relying on mesh
- * order, if per-part overrides are ever needed.
+ * surface (a sofa's base, a table's top, ...). Mutating meshes[0]'s
+ * material in place also recolors every other mesh that originally
+ * shared that same material - AssetLoader.load() clones per original
+ * material reference, not per mesh, precisely so this reaches a sofa's
+ * backrest/armrests or a dining chair's legs along with its seat.
+ * Secondary parts with a genuinely different original material (a
+ * mattress, a counter's sink, a lamp's shade) keep their own authored
+ * color regardless of the object's material/color - the same "main
+ * surface only" precedent buildElementMesh.ts's surfaceMaterial() already
+ * set for catalog elements' own secondary parts (WOOD/LINEN/BARK
+ * constants). A future milestone could tag every part explicitly (glTF
+ * extras round-trip through GLTFLoader as userData) rather than relying
+ * on mesh order/material identity, if genuinely independent per-part
+ * overrides are ever needed.
  */
 export async function buildLoadedVisual(asset: AssetData, loader: AssetLoader, definition: Parameters<AssetLoader["load"]>[0]): Promise<AssetVisual> {
   const loaded: LoadedAsset = await loader.load(definition);
