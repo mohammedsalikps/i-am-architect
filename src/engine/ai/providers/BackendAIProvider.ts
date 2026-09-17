@@ -171,6 +171,18 @@ export class BackendAIProvider implements AIProvider {
     if (!httpResponse.ok) {
       // Error 2 of 4: the request reached the backend but it rejected/failed it (400/401/413/502/500 - see backend/README.md).
       const errorBody = await safeText(httpResponse);
+      if (httpResponse.status === 401) {
+        // The backend's own clean, actionable refusal ("Sign in to use
+        // the AI assistant.") - thrown as-is, deliberately WITHOUT the
+        // "status 401" wrapping every other case gets below. That
+        // wrapping's literal digits match friendlyAiErrorMessage()'s own
+        // technical-failure pattern (/status (4|5)\d\d/i), which would
+        // otherwise collapse this into the generic "AI service
+        // temporarily unavailable" line - hiding the one AI failure that
+        // isn't a technical outage at all, but something the user can
+        // immediately act on (sign in again).
+        throw new Error(errorDetail(errorBody));
+      }
       throw new Error(`Backend request failed with status ${httpResponse.status}: ${errorDetail(errorBody)}`);
     }
 

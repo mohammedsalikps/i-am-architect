@@ -16,32 +16,28 @@ export const GRID_DIVISIONS = 50;
 export function addGround(scene: THREE.Scene): void {
   const groundGeometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
   const groundMaterial = new THREE.MeshStandardMaterial({
-    // Phase 3A: lightened one step further from the horizon gradient's
-    // own darkest tone (see environment.ts) than before, so the plane
-    // reads as a distinct site surface at the default "Fit House"
-    // distance instead of blending into the background - still the same
-    // dark, neutral family, just a clearer step above it rather than
-    // nearly matching it.
-    color: 0x34363f,
-    // Was 0.96 (almost perfectly matte). A real site surface - concrete,
-    // packed ground, paving - still has a faint sheen under direct sun;
-    // this is a small, deliberate step toward that, not a floor finish.
-    // Nowhere near glossy: still far above any value that would produce
-    // a visible reflection or a "wet floor" look.
-    roughness: 0.85
+    // Rescue milestone: a light, neutral concrete/paving tone matching
+    // the new studio backdrop (environment.ts) - previously a dark grey
+    // tuned to sit inside the shell's own near-black palette, which read
+    // as part of the "empty void" complaint rather than a believable
+    // site surface a building visibly rests on.
+    color: 0xc9cac6,
+    // A real site surface - concrete, packed ground, paving - still has
+    // a faint sheen under direct sun; nowhere near glossy or reflective.
+    roughness: 0.9
   });
   const ground = new THREE.Mesh(groundGeometry, groundMaterial);
   ground.rotation.x = -Math.PI / 2; // lay flat on the XZ plane
   ground.receiveShadow = true;
   scene.add(ground);
 
-  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x4a4f58, 0x2d2f34);
+  // Darker lines than the ground now, the inverse of the previous dark-
+  // ground/light-line pairing - still a quiet reference plane (moderate
+  // opacity), not a competing grid.
+  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x8f9296, 0xb2b4b8);
   const gridMaterial = grid.material as THREE.Material;
   gridMaterial.transparent = true;
-  // Was 0.5 - a touch more present now that the ground itself is a
-  // little lighter, so the grid doesn't lose the contrast that made it
-  // readable before this change.
-  gridMaterial.opacity = 0.58;
+  gridMaterial.opacity = 0.5;
   grid.position.y = 0.001; // avoid z-fighting with the ground plane
   scene.add(grid);
 }
