@@ -1,5 +1,9 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
 import { createHorizonBackground, HORIZON_FOG_COLOR } from "./environment";
@@ -60,6 +64,16 @@ export class SceneManager {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly controls: OrbitControls;
   private readonly container: HTMLElement;
+  /**
+   * The post-processing pipeline (Phase 3A: RenderPass -> GTAOPass ->
+   * OutputPass) - null when it couldn't be set up (see the constructor's
+   * try/catch) or has since failed at runtime, in which case start()
+   * falls back to the plain renderer.render() call every previous
+   * milestone used. Never required for the viewport to work; purely an
+   * additive visual layer over the same scene/camera.
+   */
+  private composer: EffectComposer | null = null;
+  private gtaoPass: GTAOPass | null = null;
   /** The pick-and-place interaction - armed by ribbon/palette tools (main.ts), placing through the same CommandExecutor every other path uses. */
   readonly placementController: PlacementController;
   private readonly getAllMeshes: () => THREE.Object3D[];
@@ -122,6 +136,47 @@ export class SceneManager {
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
+
+    // Phase 3A: a light ambient-occlusion pass over the exact same
+    // renderer/scene/camera above - never a second scene, never a
+    // replacement renderer. RenderPass renders the scene into an
+    // offscreen (linear, untonemapped - three.js skips tone mapping and
+    // sRGB encoding for any non-null render target) buffer; GTAOPass
+    // reads it, multiplies in a contact-occlusion term computed from its
+    // own depth/normal pass, and writes the result onward; OutputPass is
+    // what actually applies the renderer's ACES tone mapping and sRGB
+    // output encoding, since that only happens when the target is the
+    // screen (null) - skipping it would send raw linear values to the
+    // canvas. Wrapped in try/catch: if this fails to construct for any
+    // reason (an old/limited WebGL context, say), the viewport falls
+    // back to the exact rendering every previous milestone used - see
+    // start() and handleResize() below.
+    try {
+      const composer = new EffectComposer(this.renderer);
+      composer.addPass(new RenderPass(this.scene, this.camera));
+
+      const gtaoPass = new GTAOPass(this.scene, this.camera, container.clientWidth, container.clientHeight);
+      gtaoPass.output = GTAOPass.OUTPUT.Default;
+      // Kept deliberately restrained (task: "modest AO intensity...no
+      // exaggerated black creases") - a subtle contact cue at wall/floor
+      // and object/floor junctions, not a stylized AO look. blendIntensity
+      // is GTAOPass's own overall-strength knob (default 1); radius is in
+      // the SAME world-space meters every other measurement in this app
+      // uses (the shader's own default, 0.25m, already suits this scale -
+      // nudged slightly up here for a touch more presence at floor level).
+      gtaoPass.blendIntensity = 0.75;
+      gtaoPass.updateGtaoMaterial({ radius: 0.3, samples: 16 });
+      composer.addPass(gtaoPass);
+      composer.addPass(new OutputPass());
+
+      this.composer = composer;
+      this.gtaoPass = gtaoPass;
+      this.resizeGtaoPass(container.clientWidth, container.clientHeight);
+    } catch (error) {
+      console.warn("SceneManager: ambient-occlusion pipeline unavailable, rendering without it.", error);
+      this.composer = null;
+      this.gtaoPass = null;
+    }
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true; // smoother pan/rotate/zoom feel
@@ -254,7 +309,34 @@ export class SceneManager {
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+    // The composer's own render targets must track the renderer's size
+    // exactly like this.renderer.setSize() above - composer.setSize()
+    // also resizes every pass it holds (including gtaoPass) to that same
+    // full size, so the half-resolution AO override below has to be
+    // re-applied every time, not just at construction.
+    this.composer?.setSize(width, height);
+    this.resizeGtaoPass(width, height);
   };
+
+  /**
+   * Runs the AO pass's own depth/normal/occlusion computation at half the
+   * viewport's actual pixel size (task: "reduced/half-resolution AO") -
+   * the one deliberately-cheap corner of this pipeline, since GTAOPass's
+   * own three internal render targets are the only per-frame cost this
+   * milestone adds. The blend step still samples this smaller buffer
+   * across the full-resolution frame, which is exactly the point: a
+   * quarter of the pixels to shade for an effect that's meant to read as
+   * a soft, low-frequency contact cue, not a sharp one.
+   */
+  private resizeGtaoPass(width: number, height: number): void {
+    if (!this.gtaoPass) {
+      return;
+    }
+    const pixelRatio = this.renderer.getPixelRatio();
+    const aoWidth = Math.max(1, Math.round((width * pixelRatio) / 2));
+    const aoHeight = Math.max(1, Math.round((height * pixelRatio) / 2));
+    this.gtaoPass.setSize(aoWidth, aoHeight);
+  }
 
   /** Moves the camera to a named preset view, keeping the origin as the look-at target. */
   setView(preset: ViewPreset): void {
@@ -324,6 +406,21 @@ export class SceneManager {
     const animate = (): void => {
       requestAnimationFrame(animate);
       this.controls.update(); // required when damping is enabled
+      if (this.composer) {
+        try {
+          this.composer.render();
+          return;
+        } catch (error) {
+          // A runtime failure (rare - a lost/degraded WebGL context, say)
+          // disables the composer permanently rather than erroring every
+          // frame; the very same renderer.render() call every previous
+          // milestone used takes over immediately below, so the viewport
+          // keeps working with plain shadows/lighting instead of breaking.
+          console.warn("SceneManager: ambient-occlusion pipeline failed at runtime, disabling it.", error);
+          this.composer = null;
+          this.gtaoPass = null;
+        }
+      }
       this.renderer.render(this.scene, this.camera);
     };
     animate();

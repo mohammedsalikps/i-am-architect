@@ -3,7 +3,7 @@ import * as THREE from "three";
 export interface FitCameraOptions {
   /** The camera's vertical field of view, in degrees (SceneManager's PerspectiveCamera uses 60). */
   fovDegrees: number;
-  /** Extra breathing room around the content - 1.35 leaves about 35% margin. */
+  /** Extra breathing room around the content - 1.18 leaves about 18% margin. */
   padding?: number;
   /** Never closer than this, so a single small object doesn't zoom in uncomfortably close. */
   minDistance?: number;
@@ -15,7 +15,15 @@ export interface FitCameraResult {
   distance: number;
 }
 
-const DEFAULT_PADDING = 1.35;
+// Phase 3A: was 1.35 (about 35% margin) - the viewport inspection found
+// "Fit House" left the model occupying roughly a fifth of the frame, with
+// a lot of empty space doing nothing for it. Tightened one step, not
+// removed - still real breathing room on every side, just enough less of
+// it that the building reads as the hero rather than a small object in a
+// big field. Every *ratio* this value affects (bigger box -> bigger
+// distance, narrower FOV -> bigger distance, and so on - see verify.ts)
+// is unchanged; only the margin itself is smaller.
+const DEFAULT_PADDING = 1.18;
 const DEFAULT_MIN_DISTANCE = 2;
 
 /**

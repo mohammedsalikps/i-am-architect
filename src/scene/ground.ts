@@ -16,12 +16,19 @@ export const GRID_DIVISIONS = 50;
 export function addGround(scene: THREE.Scene): void {
   const groundGeometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
   const groundMaterial = new THREE.MeshStandardMaterial({
-    // Tuned to sit in the same tonal family as the viewport's horizon
-    // gradient (see scene/environment.ts) - a touch lighter than the
-    // old flat near-black, so the ground reads as a real receiving
-    // surface for the sun's shadow rather than a hole in the scene.
-    color: 0x2a2c33,
-    roughness: 0.96
+    // Phase 3A: lightened one step further from the horizon gradient's
+    // own darkest tone (see environment.ts) than before, so the plane
+    // reads as a distinct site surface at the default "Fit House"
+    // distance instead of blending into the background - still the same
+    // dark, neutral family, just a clearer step above it rather than
+    // nearly matching it.
+    color: 0x34363f,
+    // Was 0.96 (almost perfectly matte). A real site surface - concrete,
+    // packed ground, paving - still has a faint sheen under direct sun;
+    // this is a small, deliberate step toward that, not a floor finish.
+    // Nowhere near glossy: still far above any value that would produce
+    // a visible reflection or a "wet floor" look.
+    roughness: 0.85
   });
   const ground = new THREE.Mesh(groundGeometry, groundMaterial);
   ground.rotation.x = -Math.PI / 2; // lay flat on the XZ plane
@@ -31,7 +38,10 @@ export function addGround(scene: THREE.Scene): void {
   const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x4a4f58, 0x2d2f34);
   const gridMaterial = grid.material as THREE.Material;
   gridMaterial.transparent = true;
-  gridMaterial.opacity = 0.5;
+  // Was 0.5 - a touch more present now that the ground itself is a
+  // little lighter, so the grid doesn't lose the contrast that made it
+  // readable before this change.
+  gridMaterial.opacity = 0.58;
   grid.position.y = 0.001; // avoid z-fighting with the ground plane
   scene.add(grid);
 }
