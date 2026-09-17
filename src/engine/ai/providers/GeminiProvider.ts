@@ -78,10 +78,34 @@ export interface GeminiProviderOptions {
   model?: string;
   /** Defaults to Gemini's public generateContent endpoint base - override to point at a proxy/gateway instead. */
   baseUrl?: string;
+  /**
+   * How many times to retry a TRANSIENT failure (a network error, or an
+   * HTTP 429/500/502/503/504) after the first attempt - never a 400/401/
+   * 403/404, which retrying can't fix. Defaults to 2 (3 attempts total).
+   * This project's own testing has observed real, repeated Gemini 503
+   * "high demand" responses even for a single, simple instruction (see
+   * this milestone's report) - a short retry absorbs exactly that,
+   * without masking a genuinely broken request or hanging the UI (see
+   * retryDelayMs).
+   */
+  maxRetries?: number;
+  /** Base backoff between retries, in milliseconds - attempt N waits `retryDelayMs * N`. Defaults to 300ms, so the worst case (2 retries) adds at most 300 + 600 = 900ms before giving up - small next to BackendAIProvider's own 30s client-side timeout, and nowhere near "the UI wait excessively" (task, section 21). */
+  retryDelayMs?: number;
+  /** Injected delay function - real usage waits for real time; every test in this repo passes an instant no-op, so a retry test never actually sleeps. Deliberately not defaulted to a real timer at the type level, matching this class's existing "nothing implicit" convention for `fetch`. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const DEFAULT_MODEL = "gemini-3.6-flash";
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_DELAY_MS = 300;
+
+/** HTTP statuses worth retrying: rate limiting and server-side/gateway failures. Never 4xx client errors that retrying can't fix (400 malformed request, 401 bad key, 403 forbidden, 404 not found). */
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -212,6 +236,9 @@ export class GeminiProvider implements AIProvider {
   private readonly fetchImpl: GeminiFetch;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly maxRetries: number;
+  private readonly retryDelayMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(options: GeminiProviderOptions) {
     if (!options || typeof options.apiKey !== "string" || options.apiKey.trim().length === 0) {
@@ -231,9 +258,20 @@ export class GeminiProvider implements AIProvider {
     this.fetchImpl = options.fetch;
     this.model = options.model ?? DEFAULT_MODEL;
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.sleep = options.sleep ?? defaultSleep;
   }
 
-  async interpret(request: AIProviderRequest): Promise<AIProviderResponse> {
+  /**
+   * One attempt's outcome: a usable HTTP response, or a transient failure
+   * this method's caller (interpret()) should retry - a network error, or
+   * an HTTP status in RETRYABLE_STATUSES. A NON-transient HTTP failure
+   * (400/401/403/404/...) is thrown immediately, exactly as before this
+   * milestone - retrying it would only waste the same 4 attempts on
+   * something no retry can fix.
+   */
+  private async attempt(request: AIProviderRequest): Promise<{ ok: true; response: GeminiHttpResponse } | { ok: false; error: Error }> {
     const body = JSON.stringify({
       systemInstruction: { role: "system", parts: [{ text: buildSystemPrompt(request) }] },
       // Two parts of one user turn, not two turns - the context and the
@@ -262,12 +300,37 @@ export class GeminiProvider implements AIProvider {
         body
       });
     } catch (error) {
-      // Error 1 of 4 required by requirement 10: the request itself failed (network error, transport threw, etc.).
-      throw new Error(`Gemini request failed: ${describeError(error)}`);
+      // Error 1 of 4 required by requirement 10: the request itself failed (network error, transport threw, etc.) - always transient.
+      return { ok: false, error: new Error(`Gemini request failed: ${describeError(error)}`) };
+    }
+
+    if (!httpResponse.ok && RETRYABLE_STATUSES.has(httpResponse.status)) {
+      return { ok: false, error: new Error(`Gemini request failed with status ${httpResponse.status}`) };
+    }
+    return { ok: true, response: httpResponse };
+  }
+
+  async interpret(request: AIProviderRequest): Promise<AIProviderResponse> {
+    let httpResponse: GeminiHttpResponse | undefined;
+    let lastError: Error | undefined;
+    for (let attemptNumber = 0; httpResponse === undefined && attemptNumber <= this.maxRetries; attemptNumber += 1) {
+      if (attemptNumber > 0) {
+        await this.sleep(this.retryDelayMs * attemptNumber);
+      }
+      const result = await this.attempt(request);
+      if (result.ok) {
+        httpResponse = result.response;
+      } else {
+        lastError = result.error;
+      }
+    }
+    if (httpResponse === undefined) {
+      // Every attempt (the first, plus up to maxRetries retries) failed transiently.
+      throw lastError ?? new Error("Gemini request failed.");
     }
 
     if (!httpResponse.ok) {
-      // Error 2 of 4: the request reached Gemini but it rejected it (bad key, rate limit, bad request, ...).
+      // Error 2 of 4: the request reached Gemini but it rejected it (bad key, bad request, ...) - not retryable, so this is the FIRST attempt's own response.
       const errorBody = await safeText(httpResponse);
       throw new Error(`Gemini request failed with status ${httpResponse.status}: ${errorBody}`);
     }

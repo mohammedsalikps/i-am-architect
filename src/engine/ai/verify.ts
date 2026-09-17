@@ -46,7 +46,7 @@ import type {
 import type { Command } from "../commands/types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
-import { AiPromptController, isAiPromptSubmitKey, summarizeUpdatedObjects } from "./AiPromptController.ts";
+import { AiPromptController, friendlyAiErrorMessage, isAiPromptSubmitKey, summarizeUpdatedObjects } from "./AiPromptController.ts";
 import type { AiPromptState } from "./AiPromptController.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
@@ -880,6 +880,174 @@ async function run(): Promise<void> {
     assertEqual(executor.calls.length, 0, "nothing executed");
   });
 
+  // --- Object references within one response (Phase 7) ---
+
+  /** Records every raw command CommandExecutor.execute() actually received (post-reference-resolution), and assigns each a real sequential id - what proves resolveCommandReferences() ran BEFORE execution, not just that the pipeline "worked". */
+  function makeIdAssigningExecutorSpy(): CommandExecutorLike & { calls: unknown[] } {
+    const calls: unknown[] = [];
+    let next = 1;
+    return {
+      calls,
+      execute(input: unknown): CommandResult {
+        calls.push(input);
+        const id = `object-${next}`;
+        next += 1;
+        return { success: true, objectId: id, message: "ok" };
+      }
+    };
+  }
+
+  await check('"$previous" in a later command resolves to the real id CommandExecutor assigned the one before it', async () => {
+    const executor = makeIdAssigningExecutorSpy();
+    const provider = fixedProvider({
+      commands: [
+        { type: "element.add", element: { kind: "room", label: "Bedroom" } },
+        { type: "asset.add", asset: { assetId: "bed", roomId: "$previous" } }
+      ]
+    });
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Create a bedroom and put a bed inside it", emptySnapshot);
+
+    assertTrue(result.success, "result.success");
+    assertEqual(executor.calls.length, 2, "both commands ran");
+    assertDeepEqual(
+      executor.calls[1],
+      { type: "asset.add", asset: { assetId: "bed", roomId: "object-1" } },
+      "the SECOND call's roomId is the first command's real, executor-assigned id - never the literal token"
+    );
+  });
+
+  await check('"$step:N" resolves to a specific earlier command\'s id, not necessarily the immediately preceding one', async () => {
+    const executor = makeIdAssigningExecutorSpy();
+    const provider = fixedProvider({
+      commands: [
+        { type: "element.add", element: { kind: "room", label: "Bedroom" } },
+        { type: "wall.add", wall: {} },
+        { type: "asset.add", asset: { assetId: "bed", roomId: "$step:0" } }
+      ]
+    });
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Create a bedroom, a wall, then a bed in the bedroom", emptySnapshot);
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(
+      executor.calls[2],
+      { type: "asset.add", asset: { assetId: "bed", roomId: "object-1" } },
+      "roomId resolved to command 0's id, skipping the wall at index 1"
+    );
+  });
+
+  await check('"$selection" resolves to the snapshot\'s selectedObjectId, copied exactly as if the provider had written it', async () => {
+    const executor = makeIdAssigningExecutorSpy();
+    const provider = fixedProvider({ commands: [{ type: "update_object", objectId: "$selection", changes: { material: "concrete" } }] });
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Change this wall's material to concrete", { ...emptySnapshot, selectedObjectId: "wall-7" });
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(executor.calls[0], { type: "update_object", objectId: "wall-7", changes: { material: "concrete" } }, "resolved to the real selection");
+  });
+
+  await check("an unresolvable reference (nothing earlier created an object) fails cleanly and rolls back like any other execution failure", async () => {
+    const history = new HistoryManager();
+    const executor = makeRecordingExecutor(history);
+    const provider = fixedProvider({
+      commands: [
+        { type: "wall.add", wall: {} },
+        { type: "asset.add", asset: { assetId: "bed", roomId: "$step:5" } }
+      ]
+    });
+    const pipeline = new AICommandPipeline(provider, executor, history);
+
+    const result = await pipeline.run("Add a wall, then a bed in a room that doesn't exist", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertDeepEqual(executor.objects, [], "the wall was rolled back too - the response is all-or-nothing");
+    assertEqual(result.errors[0].stage, "execution", "a reference failure surfaces as an ordinary execution-stage error");
+    assertTrue(result.errors[0].message.includes("earlier command"), "explains the reference was invalid");
+  });
+
+  await check("a reference token in a field the resolver doesn't recognize is left alone, untouched, for ordinary validation to reject or CommandExecutor to accept literally", async () => {
+    // Only specific known id-bearing fields are ever rewritten (see
+    // referenceResolution.ts's REFERENCE_FIELDS) - anywhere else, a "$..."
+    // string is just an ordinary (if unusual) string value.
+    const executor = makeExecutorSpy();
+    const provider = fixedProvider({ commands: [{ type: "element.add", element: { kind: "room", label: "$previous" } }] });
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Create a room named $previous", emptySnapshot);
+
+    assertTrue(result.success, "result.success");
+    assertDeepEqual(executor.calls[0], { type: "element.add", element: { kind: "room", label: "$previous" } }, "label is untouched - not a recognized reference field");
+  });
+
+  // --- Deterministic fallback for common edits (Phase 7) ---
+
+  const selectedWallSnapshot: AIProjectSnapshot = {
+    ...emptySnapshot,
+    wallCount: 1,
+    selectedObjectId: "wall-1",
+    objects: [
+      {
+        id: "wall-1",
+        type: "wall",
+        position: { x: 0, y: 1.35, z: 0 },
+        rotation: 0,
+        dimensions: { length: 4, height: 2.7, thickness: 0.2 },
+        material: "concrete",
+        color: "#ffffff",
+        assemblyIds: []
+      }
+    ]
+  };
+
+  await check('"make the selected wall N meters long" is handled locally - the provider is never called', async () => {
+    const executor = makeExecutorSpy((input) => ({ success: true, objectId: (input as { objectId: string }).objectId, message: "Wall updated." }));
+    const provider = makeProviderCallCounter(throwingProvider("the provider should never be called for this instruction"));
+    const pipeline = new AICommandPipeline(provider, executor);
+
+    const result = await pipeline.run("Make the selected wall 6 meters long", selectedWallSnapshot);
+
+    assertTrue(result.success, "result.success");
+    assertEqual(provider.callCount, 0, "the AI provider was never called");
+    assertEqual(executor.calls.length, 1, "exactly one real command executed");
+    assertDeepEqual(executor.calls[0], { type: "update_object", objectId: "wall-1", changes: { dimensions: { length: 6 } } }, "the real update_object command");
+    assertTrue(!!result.notes?.includes("without contacting the AI provider"), "the result is honest about how it was handled");
+  });
+
+  await check("a deterministic phrasing that matches but fails its precondition (nothing selected) is rejected locally, without calling the provider", async () => {
+    const provider = makeProviderCallCounter(throwingProvider("should never be called"));
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    const result = await pipeline.run("Make the selected wall 6 meters long", emptySnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(provider.callCount, 0, "the AI provider was never called");
+    assertEqual(result.errors[0].stage, "deterministic", "error stage");
+    assertTrue(result.errors[0].message.includes("Nothing is selected"), "clear local reason");
+  });
+
+  await check("a deterministic match still runs through CommandExecutor's own validation, and a rejected result still shows a real execution failure", async () => {
+    const executor = makeExecutorSpy(() => ({ success: false, message: "Could not update wall: validation failed." }));
+    const pipeline = new AICommandPipeline(new MockAIProvider(), executor);
+
+    const result = await pipeline.run("Make the selected wall 6 meters long", selectedWallSnapshot);
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(result.errors[0].stage, "execution", "still a real execution-stage failure, not silently swallowed");
+  });
+
+  await check('a non-deterministic, open-ended instruction ("make the living room bigger") is never matched locally and still reaches the provider', async () => {
+    const provider = makeProviderCallCounter(fixedProvider({ commands: [] }));
+    const pipeline = new AICommandPipeline(provider, makeExecutorSpy());
+
+    await pipeline.run("Make the living room bigger", selectedWallSnapshot);
+
+    assertEqual(provider.callCount, 1, "an open-ended edit always reaches the provider");
+  });
+
   // --- MockAIProvider: a whole house (see housePlan.ts) ---
 
   const HOUSE_INSTRUCTION = "Build a simple 2-bedroom house on a 10m × 8m footprint.";
@@ -1351,6 +1519,28 @@ async function run(): Promise<void> {
     assertDeepEqual(created, [["wall-1", "wall-2", "element-1"]], "onCreated is called once, with the same ids");
   });
 
+  await check('AiPromptController\'s result summary counts a created "asset.add" (furniture/fixtures/lighting/decor) in its own bucket, not silently (Phase 7)', async () => {
+    const controller = new AiPromptController(async () =>
+      makeResult({
+        outcomes: [
+          { command: { type: "element.add", element: { kind: "room", label: "Bedroom" } }, result: { success: true, objectId: "room-1" } },
+          { command: { type: "asset.add", asset: { assetId: "bed", roomId: "room-1" } }, result: { success: true, objectId: "bed-1" } }
+        ]
+      })
+    );
+
+    await controller.submit("Create a bedroom and put a bed inside it");
+
+    const summary = controller.getState().summary;
+    assertTrue(summary !== null, "a build that created objects should report a summary");
+    assertEqual(summary?.total, 2, "both objects counted");
+    assertDeepEqual(
+      summary?.byType,
+      [{ label: "room", count: 1 }, { label: "furnishing", count: 1 }],
+      "the asset has its own labeled bucket - it never silently drops out of the breakdown"
+    );
+  });
+
   await check("AiPromptController reports no summary when nothing was created (an edit-only instruction, or a failure)", async () => {
     const created: string[][] = [];
     const editOnly = new AiPromptController(
@@ -1373,6 +1563,89 @@ async function run(): Promise<void> {
     );
     await failed.submit("Create a wall");
     assertEqual(failed.getState().summary, null, "a failed build has nothing to summarize");
+  });
+
+  // --- AiPromptController.reset() - the error card's "Dismiss" action (Phase 7) ---
+
+  await check("reset() clears a finished result (success or error) back to idle", async () => {
+    const success = new AiPromptController(async () => makeResult());
+    await success.submit("Create a wall");
+    assertEqual(success.getState().status, "success", "precondition");
+    success.reset();
+    assertEqual(success.getState().status, "idle", "back to idle");
+    assertEqual(success.getState().message, null, "message cleared");
+    assertEqual(success.getState().summary, null, "summary cleared");
+
+    const error = new AiPromptController(async () => makeResult({ success: false, outcomes: [], errors: [{ stage: "input", message: "boom" }] }));
+    await error.submit("");
+    assertEqual(error.getState().status, "error", "precondition");
+    error.reset();
+    assertEqual(error.getState().status, "idle", "back to idle");
+  });
+
+  await check("reset() is a no-op while a submission is in flight - it never races the submission's own state updates", async () => {
+    let resolveSubmit: (() => void) | undefined;
+    const controller = new AiPromptController(
+      () =>
+        new Promise((resolve) => {
+          resolveSubmit = () => resolve(makeResult());
+        })
+    );
+
+    const submitPromise = controller.submit("Create a wall");
+    assertEqual(controller.getState().status, "submitting", "precondition");
+    controller.reset();
+    assertEqual(controller.getState().status, "submitting", "reset() while submitting changes nothing");
+
+    resolveSubmit?.();
+    await submitPromise;
+    assertEqual(controller.getState().status, "success", "the in-flight submission still completes normally");
+  });
+
+  // --- friendlyAiErrorMessage: distinguishing failure categories (Phase 7) ---
+
+  await check("a 401 embedded in a technical error message gets the actionable sign-in-again line", () => {
+    assertEqual(
+      friendlyAiErrorMessage('Provider threw an error: Error: Backend request failed with status 401: {"error":"..."}'),
+      "Please sign in again to continue using EAVARA AI.",
+      "401 category"
+    );
+  });
+
+  await check("a 429 embedded in a technical error message gets the actionable rate-limit line, distinct from a generic outage", () => {
+    const message = friendlyAiErrorMessage("Provider threw an error: Error: Gemini request failed with status 429: quota exceeded");
+    assertTrue(message.includes("receiving a lot of requests"), "rate-limit specific wording");
+    assertTrue(message !== "AI service temporarily unavailable. Please try again.", "distinct from the generic outage message");
+  });
+
+  await check("a timeout is distinguished from a generic outage", () => {
+    const message = friendlyAiErrorMessage("Provider threw an error: Error: Backend request timed out after 30000ms.");
+    assertTrue(message.includes("taking too long"), "timeout specific wording");
+  });
+
+  await check("a 500/502/503/504 keeps the exact same generic message this project has always shown for it (no behavior change for the common case)", () => {
+    for (const status of [500, 502, 503, 504]) {
+      assertEqual(
+        friendlyAiErrorMessage(`Provider threw an error: Error: Backend request failed with status ${status}: upstream failed`),
+        "AI service temporarily unavailable. Please try again.",
+        `status ${status}`
+      );
+    }
+  });
+
+  await check("when a backend 502 wraps an upstream provider's own embedded status text, the OUTER (backend) status is what actually reached this app, and wins", () => {
+    // Mirrors ai/e2e/verify.ts's own "backend 502" scenario: the backend
+    // always relays an upstream AI provider failure as its own 502 (see
+    // backend/src/createServer.ts) - the upstream's status is only text
+    // inside the body, never the status this app's own request actually
+    // received.
+    const message = friendlyAiErrorMessage("Provider threw an error: Error: Backend request failed with status 502: OpenAI request failed with status 401");
+    assertEqual(message, "AI service temporarily unavailable. Please try again.", "502 (the real status) wins over 401 (upstream text) mentioned later in the body");
+  });
+
+  await check("a clean pipeline/validation message with no technical markers passes through completely unchanged", () => {
+    assertEqual(friendlyAiErrorMessage('Unsupported object type: "roof".'), 'Unsupported object type: "roof".', "unchanged");
+    assertEqual(friendlyAiErrorMessage("Nothing is selected. Select a wall, then try again."), "Nothing is selected. Select a wall, then try again.", "unchanged");
   });
 
   // --- CREATE vs MODIFY (Phase 6) ---

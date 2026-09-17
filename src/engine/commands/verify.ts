@@ -42,6 +42,12 @@ import { SlabStore } from "../slab/SlabStore.ts";
 import { DoorStore } from "../door/DoorStore.ts";
 import { WindowStore } from "../window/WindowStore.ts";
 import { AssemblyStore } from "../assemblies/AssemblyStore.ts";
+import { ElementStore } from "../elements/ElementStore.ts";
+import { AssetStore } from "../assets/AssetStore.ts";
+import type { ElementData, ElementId } from "../elements/types.ts";
+import type { ElementValidationResult } from "../elements/validateElement.ts";
+import type { AssetData, AssetId } from "../assets/types.ts";
+import type { AssetValidationResult } from "../assets/validateAsset.ts";
 import type { WallData, WallId } from "../wall/types.ts";
 import type { WallValidationResult } from "../wall/validateWall.ts";
 import type { PillarData, PillarId } from "../pillar/types.ts";
@@ -60,7 +66,9 @@ import type {
   BeamHistoryLike,
   SlabHistoryLike,
   DoorHistoryLike,
-  WindowHistoryLike
+  WindowHistoryLike,
+  ElementHistoryLike,
+  AssetHistoryLike
 } from "./types.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
@@ -1550,6 +1558,22 @@ function run(): void {
 
   // --- update_object: edit an existing object of any type, by id ---
 
+  function makeElementHistoryStub(store: ElementStore): ElementHistoryLike {
+    return {
+      add: (element: ElementData): ElementValidationResult => store.add(element),
+      update: (id: ElementId, changes) => store.update(id, changes),
+      remove: (id: ElementId) => store.remove(id)
+    };
+  }
+
+  function makeAssetHistoryStub(store: AssetStore): AssetHistoryLike {
+    return {
+      add: (asset: AssetData): AssetValidationResult => store.add(asset),
+      update: (id: AssetId, changes) => store.update(id, changes),
+      remove: (id: AssetId) => store.remove(id)
+    };
+  }
+
   function makeFullExecutor() {
     const walls = new WallStore();
     const pillars = new PillarStore();
@@ -1557,6 +1581,8 @@ function run(): void {
     const slabs = new SlabStore();
     const doors = new DoorStore();
     const windows = new WindowStore();
+    const elements = new ElementStore();
+    const assets = new AssetStore();
     const assemblies = new AssemblyStore();
     const wallHistory = makeWallHistoryStub(walls);
     const executor = new CommandExecutor(
@@ -1572,9 +1598,13 @@ function run(): void {
       doors,
       makeDoorHistoryStub(doors),
       windows,
-      makeWindowHistoryStub(windows)
+      makeWindowHistoryStub(windows),
+      elements,
+      makeElementHistoryStub(elements),
+      assets,
+      makeAssetHistoryStub(assets)
     );
-    return { executor, walls, pillars, beams, slabs, doors, windows, assemblies, wallHistory };
+    return { executor, walls, pillars, beams, slabs, doors, windows, elements, assets, assemblies, wallHistory };
   }
 
   /** Adds a default object of `type` through the executor and returns its id. */
@@ -1824,6 +1854,96 @@ function run(): void {
     app.executor.execute({ type: "update_object", objectId: id, changes: { dimensions: { height: 4 } } });
 
     assertEqual(app.walls.get(id)?.position.y, 2, "base stays on the ground (y = height / 2)");
+  });
+
+  // --- "roomId": placing a new element/asset inside an existing room (Phase 7) ---
+
+  function addRoom(app: ReturnType<typeof makeFullExecutor>, position: { x: number; z: number }): string {
+    const result = app.executor.execute({
+      type: "element.add",
+      element: { kind: "room", label: "Living Room", position, dimensions: { length: 5, width: 4 } }
+    });
+    assertTrue(result.success && result.objectId, "precondition: room created");
+    return result.objectId;
+  }
+
+  check("asset.add with roomId centers the new asset on the room's real x/z, leaving its own default height", () => {
+    const app = makeFullExecutor();
+    const roomId = addRoom(app, { x: 10, z: -3 });
+
+    const result = app.executor.execute({ type: "asset.add", asset: { assetId: "sofa", roomId } });
+
+    assertTrue(result.success, "result.success");
+    const sofa = app.assets.get(result.objectId as string);
+    assertTrue(sofa, "sofa stored");
+    assertEqual(sofa!.position.x, 10, "x taken from the room's center");
+    assertEqual(sofa!.position.z, -3, "z taken from the room's center");
+    assertTrue(sofa!.position.y > 0, "y still uses the asset's own default height rule, untouched by roomId");
+  });
+
+  check("asset.add with roomId AND an explicit position keeps the explicit position (position always wins)", () => {
+    const app = makeFullExecutor();
+    const roomId = addRoom(app, { x: 10, z: -3 });
+
+    const result = app.executor.execute({ type: "asset.add", asset: { assetId: "sofa", roomId, position: { x: 1, z: 2 } } });
+
+    assertTrue(result.success, "result.success");
+    const sofa = app.assets.get(result.objectId as string);
+    assertEqual(sofa!.position.x, 1, "explicit x kept");
+    assertEqual(sofa!.position.z, 2, "explicit z kept");
+  });
+
+  check("asset.add with an unknown roomId is rejected and nothing is created", () => {
+    const app = makeFullExecutor();
+
+    const result = app.executor.execute({ type: "asset.add", asset: { assetId: "sofa", roomId: "room-999" } });
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(app.assets.getAll().length, 0, "nothing created");
+  });
+
+  check("asset.add with a roomId pointing at a non-room object is rejected", () => {
+    const app = makeFullExecutor();
+    const wallId = addObject(app.executor, "wall");
+
+    const result = app.executor.execute({ type: "asset.add", asset: { assetId: "sofa", roomId: wallId } });
+
+    assertEqual(result.success, false, "result.success");
+    assertEqual(app.assets.getAll().length, 0, "nothing created");
+  });
+
+  check("element.add with roomId centers a non-room element on the room's real x/z", () => {
+    const app = makeFullExecutor();
+    const roomId = addRoom(app, { x: 2, z: 7 });
+
+    const result = app.executor.execute({ type: "element.add", element: { kind: "kitchen-counter", roomId } });
+
+    assertTrue(result.success, "result.success");
+    const counter = app.elements.get(result.objectId as string);
+    assertEqual(counter!.position.x, 2, "x taken from the room's center");
+    assertEqual(counter!.position.z, 7, "z taken from the room's center");
+  });
+
+  check("element.add rejects roomId on a room itself - a room cannot be placed inside itself", () => {
+    const app = makeFullExecutor();
+    const otherRoomId = addRoom(app, { x: 0, z: 0 });
+
+    const result = app.executor.execute({ type: "element.add", element: { kind: "room", label: "Bedroom", roomId: otherRoomId } });
+
+    assertEqual(result.success, false, "result.success");
+  });
+
+  check("roomId is a placement hint only - it is never stored on the created asset or element", () => {
+    const app = makeFullExecutor();
+    const roomId = addRoom(app, { x: 0, z: 0 });
+
+    const assetResult = app.executor.execute({ type: "asset.add", asset: { assetId: "sofa", roomId } });
+    const elementResult = app.executor.execute({ type: "element.add", element: { kind: "kitchen-counter", roomId } });
+
+    const sofa = app.assets.get(assetResult.objectId as string) as unknown as Record<string, unknown>;
+    const counter = app.elements.get(elementResult.objectId as string) as unknown as Record<string, unknown>;
+    assertEqual(Object.prototype.hasOwnProperty.call(sofa, "roomId"), false, "asset record has no roomId field");
+    assertEqual(Object.prototype.hasOwnProperty.call(counter, "roomId"), false, "element record has no roomId field");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

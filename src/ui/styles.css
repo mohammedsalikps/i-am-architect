@@ -2170,15 +2170,26 @@ button {
   font-size: 12px;
 }
 
-/* "AI Could Not Complete Request" - buildAiErrorCard()'s failure
-   counterpart to the success card above, same shape/weight but in the
-   danger color already used elsewhere (command-bar__note--error). */
+/* "Design not changed" - buildAiErrorCard()'s failure counterpart to the
+   success card above, same shape/weight but in the danger color already
+   used elsewhere (command-bar__note--error). */
 .ai-result--error {
   border-left-color: var(--color-danger);
 }
 
 .ai-result__heading--error {
   color: var(--color-danger);
+}
+
+/* "Reason" - a small label ahead of the failure's own message, the same
+   restrained weight as ai-result__stat-label. */
+.ai-result__reason-label {
+  margin: 0 0 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-label);
 }
 
 .ai-result__details-toggle {

@@ -99,6 +99,18 @@ const TECHNICAL_FAILURE_PATTERNS: readonly RegExp[] = [
   /\b5\d\d\b/
 ];
 
+/** Distinguishes an authentication failure (actionable: sign in again) from a rate limit (wait and retry) from every other technical failure (generic outage). Matched against the FIRST "status NNN" substring in the raw message - the outermost one when a backend proxy has wrapped an upstream provider's own "status NNN" text (see BackendAIProvider.ts/GeminiProvider.ts), which is always the status that actually reached this app. */
+const STATUS_CODE_PATTERN = /\bstatus (\d{3})\b/i;
+
+/** A request that never got a response in time - a real client-side timeout (BackendAIProvider.ts's own AbortController) or a raw fetch AbortError, either way distinct from "the server answered with an error". */
+const TIMEOUT_PATTERNS: readonly RegExp[] = [/\btimed out\b/i, /\bETIMEDOUT\b/, /\bAbortError\b/];
+
+const SIGN_IN_AGAIN_MESSAGE = "Please sign in again to continue using EAVARA AI.";
+const RATE_LIMITED_MESSAGE = "EAVARA AI is receiving a lot of requests right now. Please wait a moment and try again. Your design was not changed.";
+const TIMED_OUT_MESSAGE = "The AI service is taking too long to respond. Please try again. Your design was not changed.";
+/** Unchanged from before this milestone - pinned by ai/e2e/verify.ts's FRIENDLY_AI_FAILURE_MESSAGE across several existing failure-category tests, so this exact string is never changed casually. */
+const UNAVAILABLE_MESSAGE = "AI service temporarily unavailable. Please try again.";
+
 /**
  * Turns one AICommandPipeline/provider error message into something a
  * normal user should see (task: never "fetch failed"/"500"/a raw JSON
@@ -109,10 +121,39 @@ const TECHNICAL_FAILURE_PATTERNS: readonly RegExp[] = [
  * `Unsupported object type: "x".`) or the backend's own already-friendly
  * refusal (e.g. `Sign in to use the AI assistant.`) matches none of
  * these patterns and passes through unchanged.
+ *
+ * Distinguishes WHICH kind of technical failure this was (task: "the UI
+ * should clearly communicate the actual category of failure" - never a
+ * generic "unavailable" for something the user can actually act on, like
+ * signing in again, or a rate limit that will pass on its own): a timeout
+ * or abort, an authentication failure (401), a rate limit (429), or every
+ * other technical failure (a 4xx/5xx status, a network error, a malformed
+ * response) - the last of these keeps the exact same message this project
+ * has always shown for it. This app's backend always relays an upstream AI
+ * provider failure as its own 502 with the real detail in the body (see
+ * backend/src/createServer.ts), so the status this function looks for is
+ * whatever is embedded in the message text, not the HTTP status a caller
+ * might separately have available.
  */
 export function friendlyAiErrorMessage(raw: string): string {
+  if (TIMEOUT_PATTERNS.some((pattern) => pattern.test(raw))) {
+    return TIMED_OUT_MESSAGE;
+  }
+  const statusMatch = STATUS_CODE_PATTERN.exec(raw);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    if (status === 401) {
+      return SIGN_IN_AGAIN_MESSAGE;
+    }
+    if (status === 429) {
+      return RATE_LIMITED_MESSAGE;
+    }
+    if (status >= 400 && status < 600) {
+      return UNAVAILABLE_MESSAGE;
+    }
+  }
   if (TECHNICAL_FAILURE_PATTERNS.some((pattern) => pattern.test(raw))) {
-    return "AI service temporarily unavailable. Please try again.";
+    return UNAVAILABLE_MESSAGE;
   }
   return raw;
 }
@@ -125,11 +166,20 @@ const CREATED_TYPE_LABELS: Readonly<Record<string, { singular: string; plural: s
   slab: { singular: "slab", plural: "slabs" },
   door: { singular: "door", plural: "doors" },
   window: { singular: "window", plural: "windows" },
-  element: { singular: "item", plural: "items" }
+  element: { singular: "item", plural: "items" },
+  // Phase 7: "asset.add" (furniture/fixtures/lighting/decor - see
+  // assets/catalog.ts) is now something the AI reliably creates on its
+  // own (see ai/README.md "Object references"/"room-aware placement") -
+  // it needs its own bucket here, or every AI-placed sofa/bed/table would
+  // silently vanish from the result card's breakdown (summarizeCreatedObjects()
+  // would still count it in `total`, but CREATED_TYPE_ORDER.filter() drops
+  // any key not listed here, so `byType` - what the card actually renders
+  // per line - would never mention it).
+  asset: { singular: "furnishing", plural: "furnishings" }
 };
 
 /** Display order for the result card - rooms first (they read as the headline of a house), "item" (everything else) last. */
-const CREATED_TYPE_ORDER = ["room", "wall", "pillar", "beam", "slab", "door", "window", "element"];
+const CREATED_TYPE_ORDER = ["room", "wall", "pillar", "beam", "slab", "door", "window", "element", "asset"];
 
 function commandTypeOf(command: unknown): string | null {
   if (typeof command === "object" && command !== null && "type" in command) {
@@ -363,6 +413,21 @@ export class AiPromptController {
     } else if (updateSummary) {
       this.onCreated?.(updateSummary.objectIds);
     }
+  }
+
+  /**
+   * Clears the last result (success or error) back to idle - what the
+   * error card's "Dismiss" action uses (task section 15) so a failed
+   * attempt doesn't linger once the user has read it. A no-op while a
+   * submission is in flight: dismissing a result that hasn't arrived yet
+   * makes no sense, and would otherwise race the submission's own
+   * `setState` calls.
+   */
+  reset(): void {
+    if (this.state.status === "submitting") {
+      return;
+    }
+    this.setState(IDLE_STATE);
   }
 
   private setState(next: AiPromptState): void {

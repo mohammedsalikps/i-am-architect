@@ -7,6 +7,9 @@ import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
 import { buildAIProjectContext } from "./aiProjectContext.ts";
 import { parseHouseIntent } from "./houseIntent.ts";
 import { buildHouseDesign, planHouseDesign, summarizeHouseDesign } from "./houseDesign.ts";
+import { tryDeterministicIntent } from "./deterministicIntent.ts";
+import type { DeterministicIntentResult } from "./deterministicIntent";
+import { resolveCommandReferences } from "./referenceResolution.ts";
 import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
 import type { HistoryGroupLike } from "../commands/executeCommandBatch";
 import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectContext, AIProjectSnapshot } from "./types";
@@ -158,8 +161,26 @@ function validateCommandShape(
  * freehand the geometry for a dozen-plus objects at once was exactly
  * what produced an incoherent, incomplete house - see this milestone's
  * own report. Everything that ISN'T a whole-house request (an ordinary
- * "build a wall", "add a door", or an edit) falls straight through to
- * the provider path below, completely unchanged.
+ * "build a wall", "add a door", or an edit) falls through to the next
+ * check.
+ *
+ * A COMMON, UNAMBIGUOUS EDIT ON THE CURRENT SELECTION ("make the selected
+ * wall 5 metres long", "rotate the selected sofa 90 degrees", "move the
+ * selected object 2 metres to the right") is recognized next, by
+ * deterministicIntent.ts - again before the provider is ever called. See
+ * runDeterministicIntent() and this milestone's own report ("Deterministic
+ * fallback behavior") for why: a reliability layer for the app's most
+ * common edits, not an AI bypass - the matched command still runs through
+ * the exact same validation and execution as any other. Everything that
+ * doesn't match falls through to the provider path below, unchanged.
+ *
+ * OBJECT REFERENCES WITHIN ONE RESPONSE: a command may reference an object
+ * an EARLIER command in the SAME response is about to create (which has
+ * no stable id yet) using a reference token ("$previous", "$step:N", or
+ * "$selection") instead of an invented id - see referenceResolution.ts,
+ * applied to each command immediately before it executes, in step 3
+ * above. A real id already in the current construction state is used
+ * directly, never a token.
  */
 export class AICommandPipeline {
   // Plain field declarations + assignment in the constructor body,
@@ -212,6 +233,18 @@ export class AICommandPipeline {
     const houseIntent = parseHouseIntent(trimmedInstruction);
     if (houseIntent.kind !== "none") {
       return this.runHouseDesign(instruction, houseIntent, projectContext, availableObjectTypes);
+    }
+
+    // A common, unambiguous edit on the current selection (see
+    // deterministicIntent.ts) - resolved locally, without ever calling
+    // the provider, before anything else below. Anything that doesn't
+    // match falls straight through to the provider, unchanged.
+    const deterministic = tryDeterministicIntent(trimmedInstruction, projectContext);
+    if (deterministic.kind === "rejected") {
+      return { success: false, instruction, outcomes: [], errors: [{ stage: "deterministic", message: deterministic.reason }] };
+    }
+    if (deterministic.kind === "matched") {
+      return this.runDeterministicIntent(instruction, deterministic, projectContext, availableObjectTypes);
     }
 
     let response;
@@ -294,7 +327,14 @@ export class AICommandPipeline {
     }
 
     // 2. Execute the whole response as one all-or-nothing, undoable batch.
-    const batch = executeCommandBatch(this.commandExecutor, commands, this.history);
+    // A command may reference an object an EARLIER command in this same
+    // response is about to create (see referenceResolution.ts) - this
+    // resolver rewrites such a reference into the real id that earlier
+    // command actually produced, immediately before each command runs.
+    const selectedObjectId = projectContext.selectedObjectId;
+    const batch = executeCommandBatch(this.commandExecutor, commands, this.history, (command, index, priorResults) =>
+      resolveCommandReferences(command, index, priorResults, selectedObjectId)
+    );
 
     if (batch.success) {
       return {
@@ -341,6 +381,55 @@ export class AICommandPipeline {
       outcomes,
       errors: [{ stage: "execution", message: failed.message ?? "Command execution failed.", commandIndex: failedIndex }],
       notes
+    };
+  }
+
+  /**
+   * A common, unambiguous edit recognized locally by deterministicIntent.ts
+   * (task: a "reliability layer", not an AI bypass). The matched command
+   * still goes through exactly the same validation and execution as any
+   * provider-produced one - structural shape validation, then a real
+   * (single-command) executeCommandBatch() run with the shared history, so
+   * it is one ordinary undo entry, exactly like any other AI edit. Only
+   * the provider round-trip is skipped. `notes` says so plainly, so the
+   * result card never claims credit a real network call didn't earn.
+   */
+  private runDeterministicIntent(
+    instruction: string,
+    matched: Extract<DeterministicIntentResult, { kind: "matched" }>,
+    projectContext: AIProjectSnapshot,
+    availableObjectTypes: readonly ObjectType[]
+  ): AIPipelineResult {
+    const shapeError = validateCommandShape(matched.command, availableObjectTypes, projectContext);
+    if (shapeError) {
+      return { success: false, instruction, outcomes: [], errors: [{ stage: "deterministic", message: shapeError }] };
+    }
+
+    const batch = executeCommandBatch(this.commandExecutor, [matched.command], this.history);
+    if (batch.success) {
+      return {
+        success: true,
+        instruction,
+        outcomes: [{ command: matched.command, result: batch.results[0] }],
+        errors: [],
+        notes: `${matched.explanation} Handled locally, without contacting the AI provider.`
+      };
+    }
+
+    if (batch.failedIndex === undefined) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "execution", message: batch.message ?? "The command could not be executed." }]
+      };
+    }
+    const failed = batch.results[batch.failedIndex];
+    return {
+      success: false,
+      instruction,
+      outcomes: [{ command: matched.command, result: failed }],
+      errors: [{ stage: "execution", message: failed.message ?? "Command execution failed.", commandIndex: 0 }]
     };
   }
 

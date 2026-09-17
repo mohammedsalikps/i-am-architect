@@ -644,6 +644,59 @@ export class CommandExecutor {
     return { ok: true, changes };
   }
 
+  /**
+   * `element.add` and `asset.add` both accept an optional "roomId": an
+   * existing room's id (an `element` with kind "room" - see
+   * elements/catalog.ts) to place the new object inside, centered on that
+   * room, unless the caller also gave an explicit position (which always
+   * wins). "roomId" is a placement HINT consumed entirely here - it is
+   * never stored on the created object (no schema change: see this
+   * milestone's own report, "Persistence verification"), so it does
+   * nothing after the object is created and cannot go stale.
+   *
+   * "roomId" may be a real room id already in the current construction
+   * state, or, for a room created earlier in the SAME AI response, a
+   * reference token ("$previous"/"$step:N") already resolved to that
+   * room's real id by referenceResolution.ts before this method ever
+   * runs - by the time this command executes, that room already exists in
+   * elementStore (commands in one response run strictly in order), so
+   * reading it here always sees the room's real, current position.
+   *
+   * Only x/z come from the room (a room's `position` is the center of its
+   * floor area - see elements/createElement.ts); y is left to the normal
+   * default-height rule for whatever is being placed. Does not attempt to
+   * fit the new object within the room's bounds, avoid overlapping
+   * existing furniture, or account for the room's own rotation - see this
+   * milestone's own report, "Room-aware behavior", for that limitation.
+   */
+  private resolveRoomPlacement(options: Record<string, unknown>): { ok: true; options: Record<string, unknown> } | { ok: false; message: string } {
+    const roomId = options.roomId;
+    if (roomId === undefined) {
+      return { ok: true, options };
+    }
+    if (typeof roomId !== "string" || roomId.length === 0) {
+      return { ok: false, message: '"roomId" must be a room\'s id.' };
+    }
+    const room = this.elementStore.get(roomId);
+    if (!room || room.kind !== "room") {
+      return { ok: false, message: `Can't place in "${roomId}": no room found with that id.` };
+    }
+
+    const rest: Record<string, unknown> = {};
+    for (const key of Object.keys(options)) {
+      if (key !== "roomId") {
+        rest[key] = options[key];
+      }
+    }
+    const position = isPlainObject(options.position) ? options.position : {};
+    const resolvedPosition = {
+      ...position,
+      x: typeof position.x === "number" ? position.x : room.position.x,
+      z: typeof position.z === "number" ? position.z : room.position.z
+    };
+    return { ok: true, options: { ...rest, position: resolvedPosition } };
+  }
+
   private executeAddWall(command: AddWallCommand): CommandResult {
     const wall = createWallData(command.wall ?? {});
     const result = this.wallHistory.add(wall);
@@ -1297,8 +1350,15 @@ export class CommandExecutor {
     if (!definition) {
       return { success: false, message: `Unknown element kind "${String(options.kind)}".` };
     }
+    if (definition.kind === "room" && options.roomId !== undefined) {
+      return fail('"roomId" is not meaningful when creating a room itself.');
+    }
+    const placed = this.resolveRoomPlacement(options);
+    if (!placed.ok) {
+      return fail(placed.message);
+    }
 
-    const element = createElementData(command.element);
+    const element = createElementData(placed.options as unknown as typeof command.element);
     const result = this.elementHistory.add(element);
     if (!result.valid) {
       return {
@@ -1774,8 +1834,12 @@ export class CommandExecutor {
     if (!definition) {
       return { success: false, message: `Unknown asset "${String(options.assetId)}".` };
     }
+    const placed = this.resolveRoomPlacement(options);
+    if (!placed.ok) {
+      return fail(placed.message);
+    }
 
-    const asset = createAssetData(command.asset);
+    const asset = createAssetData(placed.options as unknown as typeof command.asset);
     const result = this.assetHistory.add(asset);
     if (!result.valid) {
       return { success: false, errors: result.errors, message: `Could not add ${definition.label.toLowerCase()}: validation failed.` };

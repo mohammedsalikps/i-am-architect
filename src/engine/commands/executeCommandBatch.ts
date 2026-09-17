@@ -32,6 +32,22 @@ export interface CommandBatchResult {
 }
 
 /**
+ * Rewrites one not-yet-executed command immediately before it runs, given
+ * every result this batch has already produced (in order) - what
+ * ai/referenceResolution.ts uses to turn a "$previous"/"$step:N"/
+ * "$selection" reference into a real id copied from an earlier command's
+ * own real result. Returning `{ ok: false }` fails the batch at this
+ * command exactly like a CommandExecutor rejection would (same rollback,
+ * same "stops here" semantics) - nothing after it runs, and nothing this
+ * batch already did is kept.
+ */
+export type CommandResolver = (
+  command: unknown,
+  index: number,
+  priorResults: readonly CommandResult[]
+) => { ok: true; command: unknown } | { ok: false; message: string };
+
+/**
  * Runs a list of commands as ONE all-or-nothing, undoable operation.
  *
  * - Every command goes through `executor.execute()` - the normal mutation
@@ -62,7 +78,8 @@ export interface CommandBatchResult {
 export function executeCommandBatch(
   executor: BatchCommandExecutor,
   commands: readonly unknown[],
-  history?: HistoryGroupLike
+  history?: HistoryGroupLike,
+  resolveCommand?: CommandResolver
 ): CommandBatchResult {
   if (history?.isGrouping()) {
     return {
@@ -77,7 +94,17 @@ export function executeCommandBatch(
   let failedIndex: number | undefined;
   try {
     for (let index = 0; index < commands.length; index += 1) {
-      const result = executor.execute(commands[index]);
+      let toExecute = commands[index];
+      if (resolveCommand) {
+        const resolved = resolveCommand(toExecute, index, results);
+        if (!resolved.ok) {
+          failedIndex = index;
+          results.push({ success: false, message: resolved.message });
+          break;
+        }
+        toExecute = resolved.command;
+      }
+      const result = executor.execute(toExecute);
       results.push(result);
       if (!result.success) {
         failedIndex = index;

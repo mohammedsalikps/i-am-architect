@@ -16,6 +16,16 @@ export interface CreateElementOptions {
   params?: ElementParams;
   material?: string;
   color?: string;
+  /**
+   * Place this inside an existing room: that room's id (an element with
+   * kind "room"), or a reference token for a room created earlier in the
+   * same AI response - see commands/CommandExecutor.ts's
+   * resolveRoomPlacement(), which is the only thing that reads this field.
+   * Meaningless (and rejected) when this element's own kind is "room".
+   * createElementData() itself never reads it - it does not become part
+   * of the created ElementData.
+   */
+  roomId?: string;
 }
 
 /** Per-kind id counters: roof-1, roof-2, water-pipe-1, ... */

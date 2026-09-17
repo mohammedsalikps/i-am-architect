@@ -148,19 +148,37 @@ function buildAiUpdateResultCard(updateSummary: AiUpdateSummary, notes: string |
   return el("div", { className: "ai-result" }, children);
 }
 
+export interface AiErrorActions {
+  /** Resubmits the exact same instruction (the input's text is never cleared on failure - see buildAiPromptTab's submit()). */
+  onRetry: () => void;
+  /** Clears this error back to the idle state (AiPromptController.reset()) and empties the input, so a dismissed failure doesn't linger. */
+  onDismiss: () => void;
+}
+
 /**
- * "AI Could Not Complete Request" - the failure counterpart to
- * buildAiResultCard(), same visual weight so an error doesn't read as
- * "quieter" than success. `message` is always the pre-filtered, normal-
- * user-safe text (see AiPromptController.friendlyAiErrorMessage) -
- * `details`, when present, is the original technical message (a raw
- * fetch failure, HTTP status, or provider exception string), tucked
- * behind an opt-in "Show details" toggle rather than shown by default.
+ * "EAVARA AI / Design not changed" - the failure counterpart to
+ * buildAiResultCard()/buildAiUpdateResultCard(), same visual weight so an
+ * error doesn't read as "quieter" than success (task section 15). The
+ * heading is deliberately factual, not apologetic: nothing changed - that
+ * is always true here, since AICommandPipeline is all-or-nothing (see its
+ * own docs) and this card only ever renders for `state.status === "error"`
+ * - so, unlike the CREATE/MODIFY cards, this one never offers Undo (task:
+ * "Do not show fake Undo if nothing changed").
+ *
+ * `message` is always the pre-filtered, normal-user-safe text (see
+ * AiPromptController.friendlyAiErrorMessage) - `details`, when present, is
+ * the original technical message (a raw fetch failure, HTTP status, or
+ * provider exception string), tucked behind an opt-in "Show details"
+ * toggle rather than shown by default. Retry/Dismiss are the only actions
+ * offered - reviewing or focusing "what changed" makes no sense when
+ * nothing did.
  */
-function buildAiErrorCard(message: string, details: string | null): HTMLElement {
-  const heading = el("p", { className: "ai-result__heading ai-result__heading--error", text: "AI Could Not Complete Request" });
+function buildAiErrorCard(message: string, details: string | null, actions: AiErrorActions): HTMLElement {
+  const eyebrow = el("p", { className: "ai-result__eyebrow", text: "EAVARA AI" });
+  const heading = el("p", { className: "ai-result__heading ai-result__heading--error", text: "Design not changed" });
+  const reasonLabel = el("p", { className: "ai-result__reason-label", text: "Reason" });
   const line = el("p", { className: "ai-result__line", text: message });
-  const children: HTMLElement[] = [heading, line];
+  const children: HTMLElement[] = [eyebrow, heading, reasonLabel, line];
   if (details) {
     const detailsText = el("pre", { className: "ai-result__details" });
     detailsText.hidden = true;
@@ -172,6 +190,21 @@ function buildAiErrorCard(message: string, details: string | null): HTMLElement 
     });
     children.push(toggle, detailsText);
   }
+
+  const retryButton = el("button", {
+    className: "toolbar-button toolbar-button--primary ai-result__action",
+    text: "Retry",
+    attrs: { type: "button", title: "Try this instruction again" }
+  });
+  retryButton.addEventListener("click", actions.onRetry);
+  const dismissButton = el("button", {
+    className: "toolbar-button ai-result__action",
+    text: "Dismiss",
+    attrs: { type: "button", title: "Clear this message" }
+  });
+  dismissButton.addEventListener("click", actions.onDismiss);
+  children.push(el("div", { className: "ai-result__actions" }, [retryButton, dismissButton]));
+
   return el("div", { className: "ai-result ai-result--error" }, children);
 }
 
@@ -333,7 +366,14 @@ function buildAiPromptTab(
             onSave: onSaveProject
           })
         : state.status === "error" && state.message
-          ? buildAiErrorCard(state.message, state.details)
+          ? buildAiErrorCard(state.message, state.details, {
+              onRetry: submit,
+              onDismiss: () => {
+                input.value = "";
+                controller.reset();
+                input.focus();
+              }
+            })
           : null;
     resultContainer.replaceChildren(...(card ? [card] : []));
     renderAiPromptState(state, input, aiButton, status, card !== null);

@@ -376,8 +376,8 @@ export interface AICommandOutcome {
   result: CommandResult;
 }
 
-/** Where in the pipeline a failure happened - lets a caller distinguish "the provider produced garbage" from "CommandExecutor rejected a well-formed command". "design" is a whole-house/design-intent request (see houseIntent.ts/houseDesign.ts) that AICommandPipeline recognized and resolved deterministically, entirely BEFORE the provider was ever called - its failures (an unsupported footprint, too many rooms, a design the construction engine couldn't build) are its own stage, distinct from "provider" (which only ever means the AI provider itself). */
-export type AIPipelineStage = "input" | "design" | "provider" | "validation" | "execution";
+/** Where in the pipeline a failure happened - lets a caller distinguish "the provider produced garbage" from "CommandExecutor rejected a well-formed command". "design" is a whole-house/design-intent request (see houseIntent.ts/houseDesign.ts) that AICommandPipeline recognized and resolved deterministically, entirely BEFORE the provider was ever called - its failures (an unsupported footprint, too many rooms, a design the construction engine couldn't build) are its own stage, distinct from "provider" (which only ever means the AI provider itself). "deterministic" is the same idea for one common, unambiguous edit recognized locally (see deterministicIntent.ts) - never a whole house, but the same "resolved before the provider was ever called" shape. */
+export type AIPipelineStage = "input" | "design" | "deterministic" | "provider" | "validation" | "execution";
 
 export interface AIPipelineError {
   stage: AIPipelineStage;

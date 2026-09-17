@@ -15,6 +15,15 @@ export interface CreateAssetOptions {
   dimensions?: Partial<AssetDimensions>;
   material?: string;
   color?: string;
+  /**
+   * Place this inside an existing room: that room's id (an element with
+   * kind "room"), or a reference token for a room created earlier in the
+   * same AI response - see commands/CommandExecutor.ts's
+   * resolveRoomPlacement(), which is the only thing that reads this field.
+   * createAssetData() itself never reads it - it does not become part of
+   * the created AssetData.
+   */
+  roomId?: string;
 }
 
 /** One id counter per asset definition: sofa-1, sofa-2, bed-1, ... - same convention as elements/createElement.ts's nextIdFor(). */

@@ -35,6 +35,10 @@ approach").
 | `geometry/analyzeConstructionGeometry.ts` | `analyzeConstructionGeometry()` - pure, deterministic bounding boxes and pairwise spatial facts derived from an `AIProjectSnapshot`. The only geometry calculation - see "Construction geometry analysis". |
 | `aiProjectContext.ts` | `buildAIProjectContext()` - the snapshot plus its derived geometry, as the deep-frozen `AIProjectContext` every provider receives; `parseAIProjectContext()` - the backend's sanitize-then-derive entry point. See "Geometry in the AI context". |
 | `geometry/verify.ts` | Node-runnable unit verification for the geometry analyzer. |
+| `referenceResolution.ts` | `resolveCommandReferences()` - rewrites a "$previous"/"$step:N"/"$selection" reference token in one command's known id-bearing fields into a real id, using only commands already executed earlier in the same response. See "Object references" below. |
+| `referenceResolution.verify.ts` | Node-runnable unit verification for `resolveCommandReferences()`/`isReferenceToken()` in isolation. |
+| `deterministicIntent.ts` | `tryDeterministicIntent()` - recognizes a handful of common, unambiguous edits on the current selection and turns them into a real command WITHOUT calling the provider. See "Deterministic fallback" below. |
+| `deterministicIntent.verify.ts` | Node-runnable unit verification for `tryDeterministicIntent()` in isolation. |
 
 ## Construction geometry analysis
 
@@ -308,6 +312,121 @@ stores (ProjectContext)
   objects, alignment, connection, snapping, collision resolution, rooms,
   or planning. The prompt still tells the model to refuse
   relative-placement requests.
+
+## Object references within one response (Phase 7)
+
+The known limitation "the AI cannot reference an object created earlier in
+the same response" (e.g. "Create a bedroom and put a bed inside it") is
+solved for the one case that actually needs solving - a new command
+referencing an object ANOTHER command in the same response is about to
+create - without inventing ids or weakening validation:
+
+```
+commands: [
+  { type: "element.add", element: { kind: "room", label: "Bedroom" } },   // no id yet
+  { type: "asset.add", asset: { assetId: "bed", roomId: "$previous" } }   // references it
+]
+```
+
+- `AICommandPipeline.run()` already executes a response's commands
+  sequentially through `executeCommandBatch()`, one at a time, through the
+  exact same `CommandExecutor` every UI action uses - each command's real
+  result (including its assigned `objectId`) is available before the next
+  one runs. This was already true before this milestone; nothing about
+  execution order changed.
+- `executeCommandBatch()` now accepts an optional `resolveCommand`
+  callback, called on each not-yet-executed command with every result the
+  batch has produced so far. `AICommandPipeline.run()` passes
+  `referenceResolution.ts`'s `resolveCommandReferences()`.
+- A reference TOKEN - `"$previous"` (the immediately preceding command),
+  `"$step:N"` (command N, 0-based, in this response), or `"$selection"`
+  (the selection when the request was submitted) - appearing in one of a
+  small, fixed list of known id-bearing fields (`update_object`'s
+  `objectId`; `door.add`/`window.add`'s `hostId`; `element.add`/
+  `asset.add`'s `roomId`; `element.connect`'s `from.id`/`to.id`) is
+  rewritten into the real id that earlier command's own `CommandResult`
+  actually returned - never a guessed or invented id. A field that
+  already holds a real id (the common case: the provider is instructed to
+  copy one straight from the current construction state) is left
+  completely untouched.
+- An unresolvable reference (a forward reference, a reference to a
+  command that failed or created nothing, or `"$selection"` when nothing
+  is selected) fails the batch at that command exactly like a
+  `CommandExecutor` rejection would - same rollback, same all-or-nothing
+  guarantee, surfaced as an ordinary `"execution"`-stage error.
+- **`roomId`** (`element.add`/`asset.add`) is the other half of this
+  feature: it accepts either a real room's id (an `element` with kind
+  `"room"`) already in the current construction state, or a reference
+  token for a room this same response is creating. `CommandExecutor`
+  (`resolveRoomPlacement()`) resolves it to that room's real, CURRENT
+  position (reading straight from `elementStore`, which by execution time
+  already has the room if it was created earlier in this response) and
+  centers the new object's x/z on it, unless an explicit `position` was
+  also given (which always wins). It is a placement HINT only - never
+  stored on the created object, so it can't go stale and needed no
+  persistence-schema change.
+- **What this deliberately does NOT do**: arbitrary multi-step planning,
+  forward references, or fitting a new object within a room's bounds
+  around existing furniture (`roomId` centers on the room; it does not
+  avoid overlapping whatever else is already in it, and does not account
+  for the room's own rotation). This is the "safest useful subset" the
+  milestone asked for, not general dependency-aware planning.
+
+## Deterministic fallback for common edits (Phase 7)
+
+`AICommandPipeline.run()` recognizes a small, fixed set of common,
+completely unambiguous edits on the current selection LOCALLY
+(`deterministicIntent.ts`), before ever calling the provider: "make the
+selected wall N meters long", "rotate the selected `<noun>` N degrees",
+and "move the selected `<noun>` N meters to the right/left/forward/back".
+This exists because Gemini has shown real, repeated `503` "high demand"
+failures during this project's own testing, even for instructions this
+simple - a reliability layer for the app's most-demoed edits, **not an AI
+bypass**:
+
+- A match still becomes a real `update_object` command, still runs
+  through the exact same structural (`validateCommandShape`) and domain
+  (`CommandExecutor`/store) validation as any provider-produced command,
+  and still executes through `executeCommandBatch()` with the shared
+  history - one ordinary undo entry, indistinguishable from a
+  provider-produced edit in the undo stack.
+- Only the network round-trip is skipped. The result's `notes` says so
+  plainly ("Handled locally, without contacting the AI provider.") - the
+  UI never claims credit a real AI call didn't earn.
+- Each pattern requires the literal phrasing, an explicit number, and (for
+  the wall-length case) a specific selected object type. Anything that
+  doesn't match exactly - a synonym, an open-ended edit ("make the living
+  room bigger" - by how much?), or nothing matching at all - falls through
+  to the provider completely unchanged.
+- When the phrasing matches but a precondition doesn't (nothing selected,
+  wrong type selected), the instruction is rejected locally with a clear
+  reason (`errors[0].stage === "deterministic"`) rather than spending a
+  provider call on something already known to fail.
+
+## Gemini transient-failure retry (Phase 7)
+
+`GeminiProvider` retries a TRANSIENT failure - a network error, or an HTTP
+`429`/`500`/`502`/`503`/`504` - up to `maxRetries` times (default 2, so 3
+attempts total) with a short backoff (`retryDelayMs * attemptNumber`,
+default 300ms/600ms - under 1 second added in the worst case, well inside
+`BackendAIProvider`'s own 30s client-side timeout). A non-transient HTTP
+failure (400/401/403/404/...) is never retried - retrying a bad request or
+a bad API key can't fix it. The delay function is injected (`sleep`
+option, defaulting to a real timer) so every test in `providers/verify.ts`
+runs instantly with no real wall-clock delay. `BackendAIProvider` itself
+adds no second retry layer - one retry point, at the actual source of the
+transient failure, is enough; a second layer on top would only compound
+latency without improving reliability.
+
+`AiPromptController.friendlyAiErrorMessage()` distinguishes what kind of
+technical failure reached the UI - a timeout, a `401` (sign in again), a
+`429` (rate limited, distinct wording from a generic outage), or every
+other 4xx/5xx/network failure (the exact same generic message this
+project has always shown for that case) - by reading the status embedded
+in the error text, since the backend always relays an upstream provider
+failure as its own `502` with the real detail in the body (see
+`backend/src/createServer.ts`) rather than forwarding the original status
+code.
 
 ## AI house builder
 
