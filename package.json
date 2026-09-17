@@ -11,9 +11,12 @@
     "verify": "node src/engine/objects/verify.ts && node src/engine/wall/verify.ts && node src/engine/pillar/verify.ts && node src/engine/beam/verify.ts && node src/engine/slab/verify.ts && node src/engine/door/verify.ts && node src/engine/window/verify.ts && node src/engine/assemblies/verify.ts && node src/engine/commands/verify.ts && node src/engine/ai/verify.ts && node src/engine/ai/houseDesign.verify.ts && node src/engine/ai/referenceResolution.verify.ts && node src/engine/ai/deterministicIntent.verify.ts && node src/engine/ai/providers/verify.ts && node src/engine/ai/geometry/verify.ts && node src/engine/manipulation/verify.ts && node src/engine/snapping/assetPlacementSnapper.verify.ts && node src/engine/auth/verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types src/engine/project/verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types src/engine/ai/e2e/verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types src/engine/elements/verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types src/engine/relationships/verify.ts && node src/scene/visibility/verify.ts && node src/scene/camera/verify.ts && node src/engine/assets/verify.ts && node src/engine/construction/generateConstructionSequence.verify.ts && node src/ui/verify.ts"
   },
   "dependencies": {
+    "@capacitor/android": "6.2.2",
+    "@capacitor/core": "6.2.2",
     "three": "^0.169.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "6.2.2",
     "@types/three": "^0.169.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
