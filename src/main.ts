@@ -22,6 +22,9 @@ import type { ElementKindDefinition } from "./engine/elements/catalog";
 import { getAssetDefinition } from "./engine/assets/catalog";
 import type { AssetDefinition } from "./engine/assets/catalog";
 import type { PlacementTool } from "./scene/placement/PlacementController";
+import { createAssetPlacementPreview } from "./scene/placement/assetPlacementPreview";
+import type { AssetPlacementPreview } from "./scene/placement/assetPlacementPreview";
+import { createPlacementHud } from "./ui/placementHud";
 import { roomPresetOptions } from "./engine/elements/roomPresets";
 import type { CreateElementOptions } from "./engine/elements/createElement";
 import { resolveConstructionObject } from "./engine/objects/resolveConstructionObject";
@@ -365,7 +368,13 @@ function addAsset(assetId: string): void {
   }
   armPlacement(`asset:${assetId}`, definition.label, assetGhostSize(definition), (point) => ({
     type: "asset.add",
-    asset: { assetId, position: { x: point.x, z: point.z } }
+    // The preview's own current rotation (R/Shift+R while armed - see
+    // scene/placement/assetPlacementPreview.ts), read at the moment of
+    // this confirmed click so the real placed object matches exactly
+    // what was previewed. Falls back to 0 if the preview module hasn't
+    // been constructed yet (getViewportContext() only exists once
+    // sceneManager.current is set - see below).
+    asset: { assetId, position: { x: point.x, z: point.z }, rotation: assetPlacementPreview?.getCurrentRotation() ?? 0 }
   }));
 }
 
@@ -592,6 +601,12 @@ function duplicateSelected(): void {
 // shell creates), so the callback reads this ref instead of a value.
 const sceneManager = { current: null as SceneManager | null };
 
+// Same "mutable ref read by an earlier-defined closure" pattern as
+// sceneManager above: addAsset()'s placement closure needs the current
+// preview rotation at click time, but this can only be constructed once
+// sceneManager.current exists (see below, after `new SceneManager(...)`).
+let assetPlacementPreview: AssetPlacementPreview | null = null;
+
 // Whether drags snap - a UI preference (the viewport's Snap toggle), not part of the model.
 const snapSettings = new SnapSettings();
 
@@ -686,6 +701,21 @@ sceneManager.current.placementController.subscribe((tool) => {
   shell.refreshRibbon();
   shell.refreshAssetLibrary();
   shell.setPlacementStatus(tool ? { label: tool.label, onCancel: () => sceneManager.current?.placementController.disarm() } : null);
+});
+
+// Phase 5A: a real, translucent GLTF preview + pre-placement rotation +
+// a contextual dimension/rotation HUD for asset placement specifically -
+// entirely additive to PlacementController's own generic ghost/arm/
+// disarm/click/Escape lifecycle. Needs the real scene/camera/canvas to
+// render an actual model in the viewport, which only SceneManager can
+// hand out - see its getViewportContext() and PlacementController's own
+// setGhostVisible() for the two small, additive exceptions this required.
+const placementHud = createPlacementHud();
+document.body.append(placementHud.element);
+assetPlacementPreview = createAssetPlacementPreview({
+  ...sceneManager.current.getViewportContext(),
+  placementController: sceneManager.current.placementController,
+  onHudChange: placementHud.update
 });
 
 // Restore a stored session, if any, and confirm it with the backend.

@@ -338,6 +338,20 @@ export class SceneManager {
     this.gtaoPass.setSize(aoWidth, aoHeight);
   }
 
+  /**
+   * A read-only handle on this viewport's real scene/camera/canvas - for a
+   * small, additive presentation layer outside this class that must
+   * render into the same world and track the same cursor-to-ground
+   * convention as the rest of the viewport (the asset placement preview,
+   * Phase 5A - see scene/placement/assetPlacementPreview.ts). Deliberately
+   * the only thing this class exposes beyond its existing named actions
+   * (setView/fitToScene/focusOn): construction data still only ever
+   * changes through CommandExecutor, never through this reference.
+   */
+  getViewportContext(): { scene: THREE.Scene; camera: THREE.Camera; canvas: HTMLCanvasElement } {
+    return { scene: this.scene, camera: this.camera, canvas: this.renderer.domElement };
+  }
+
   /** Moves the camera to a named preset view, keeping the origin as the look-at target. */
   setView(preset: ViewPreset): void {
     const [x, y, z] = VIEW_CAMERA_POSITIONS[preset];

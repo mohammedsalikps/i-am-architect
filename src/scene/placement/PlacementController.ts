@@ -94,6 +94,8 @@ export class PlacementController {
   private readonly ghost: THREE.Group;
   private readonly listeners = new Set<PlacementListener>();
   private onDeselect: (() => void) | null = null;
+  /** See setGhostVisible()'s own docs. */
+  private ghostSuppressed = false;
 
   constructor(private readonly options: PlacementControllerOptions) {
     this.ghost = buildGhost();
@@ -119,6 +121,7 @@ export class PlacementController {
    */
   arm(tool: PlacementTool): void {
     this.tool = tool;
+    this.ghostSuppressed = false; // every new placement session starts with the generic ghost, exactly as before this existed
     sizeGhost(this.ghost, tool.ghostSize);
     this.ghost.visible = false; // shown again on the first pointermove over the canvas
     this.options.canvas.style.cursor = "crosshair";
@@ -131,6 +134,7 @@ export class PlacementController {
       return;
     }
     this.tool = null;
+    this.ghostSuppressed = false;
     this.ghost.visible = false;
     this.options.canvas.style.cursor = "";
     this.emit();
@@ -142,6 +146,23 @@ export class PlacementController {
 
   activeToolId(): string | null {
     return this.tool?.id ?? null;
+  }
+
+  /**
+   * Shows or hides the generic box ghost without altering arm/disarm/
+   * click/Escape semantics - lets a richer, asset-specific preview (see
+   * scene/placement/assetPlacementPreview.ts) take over the visual once
+   * its own real model is ready, while this class remains the sole owner
+   * of the placement state machine itself. Purely a rendering toggle: it
+   * never affects isArmed()/activeToolId()/subscribers, and is reset back
+   * to "visible" by every arm()/disarm() so a tool that never calls this
+   * (every non-asset tool) is completely unaffected.
+   */
+  setGhostVisible(visible: boolean): void {
+    this.ghostSuppressed = !visible;
+    if (this.ghostSuppressed) {
+      this.ghost.visible = false;
+    }
   }
 
   subscribe(listener: PlacementListener): () => void {
@@ -197,7 +218,7 @@ export class PlacementController {
     }
     const point = this.groundPointFor(event);
     if (point) {
-      this.ghost.visible = true;
+      this.ghost.visible = !this.ghostSuppressed;
       this.ghost.position.set(point.x, 0, point.z);
     } else {
       this.ghost.visible = false;

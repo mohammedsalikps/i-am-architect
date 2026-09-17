@@ -1311,6 +1311,44 @@ button {
   color: var(--color-text-muted);
 }
 
+/* ---------- Placement HUD (Phase 5A) ---------- */
+/* A small, contextual readout that follows the asset placement preview -
+   deliberately its own element (see ui/placementHud.ts), not
+   .manipulation-readout, so placement state never couples to
+   ManipulationController's drag state. Styled to match that same
+   restrained "floating viewport chrome" language (--overlay-bg, a
+   hairline border, a light blur) rather than a new visual idiom. */
+.placement-hud {
+  position: fixed;
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  backdrop-filter: blur(2px);
+  box-shadow: var(--shadow-elevation-1);
+  pointer-events: none;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.placement-hud[hidden] {
+  display: none;
+}
+
+.placement-hud__name {
+  font-weight: 600;
+}
+
+.placement-hud__dimensions,
+.placement-hud__rotation {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- Left rail + hierarchy ---------- */
 
 .sidebar-rail {
