@@ -2077,8 +2077,11 @@ button {
   box-shadow: var(--shadow-elevation-1);
 }
 
-.ai-result__heading {
-  margin: 0 0 3px;
+/* "EAVARA AI" - a small identity label above the actual headline, so the
+   result reads as something the assistant is reporting back, not just a
+   status line (task: "EAVARA AI - Architectural Assistant" framing). */
+.ai-result__eyebrow {
+  margin: 0 0 2px;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: var(--letter-spacing-label);
@@ -2086,9 +2089,50 @@ button {
   color: var(--color-brand);
 }
 
+/* The actual headline ("Design generated"/"Build complete") - one step
+   up from the eyebrow's own weight, still restrained (no huge type). */
+.ai-result__heading {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
 .ai-result__line {
   margin: 0;
   color: var(--color-text);
+}
+
+/* The structured architectural summary (task section 8) - a compact
+   stat row per fact (footprint, bedrooms, bathrooms, rooms, element
+   count), not a paragraph of prose. Wraps at narrow widths rather than
+   clipping. */
+.ai-result__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: 4px;
+}
+
+.ai-result__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 64px;
+}
+
+.ai-result__stat-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-result__stat-label {
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: var(--letter-spacing-label);
 }
 
 /* The rich, human-readable design summary (summarizeHouseDesign(), or an

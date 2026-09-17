@@ -1199,7 +1199,11 @@ async function run(): Promise<void> {
 
   await check("AiPromptController starts idle", () => {
     const controller = new AiPromptController(async () => makeResult());
-    assertDeepEqual(controller.getState(), { status: "idle", message: null, notes: null, summary: null, details: null }, "initial state");
+    assertDeepEqual(
+      controller.getState(),
+      { status: "idle", message: null, notes: null, summary: null, details: null, houseSummary: null },
+      "initial state"
+    );
   });
 
   await check("AiPromptController transitions submitting -> success and reports a summary message", async () => {

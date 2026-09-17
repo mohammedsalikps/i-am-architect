@@ -408,6 +408,6 @@ export class AICommandPipeline {
     }
 
     this.history?.endGroup();
-    return { success: true, instruction, outcomes, errors: [], notes: summarizeHouseDesign(built.summary) };
+    return { success: true, instruction, outcomes, errors: [], notes: summarizeHouseDesign(built.summary), houseSummary: built.summary };
   }
 }

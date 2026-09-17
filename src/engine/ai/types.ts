@@ -1,6 +1,7 @@
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
 import type { ConstructionGeometryAnalysis } from "./geometry/types";
+import type { HouseDesignSummary } from "./houseDesign.ts";
 
 /**
  * Provider-independent AI command pipeline - shared type definitions.
@@ -399,4 +400,14 @@ export interface AIPipelineResult {
    * when the provider gave none.
    */
   notes?: string;
+  /**
+   * Present only when this instruction was recognized and resolved as a
+   * whole-house/design-intent request (see houseDesign.ts) - the same
+   * structured summary summarizeHouseDesign() already turns into
+   * `notes`' prose, kept here too so a UI that wants specific fields
+   * (footprint, room list, counts) never has to parse that sentence back
+   * apart. Absent for every other kind of AI response (an ordinary
+   * provider-mapped instruction, an edit, a partial/failed request).
+   */
+  houseSummary?: HouseDesignSummary;
 }

@@ -250,7 +250,9 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.ribbonActions.addWall,
     options.onSubmitAiInstruction,
     options.onFocusObjects,
-    (objectId) => options.selectionStore.select(objectId)
+    (objectId) => options.selectionStore.select(objectId),
+    options.onUndo,
+    options.onSaveProject
   );
 
   // The viewport's own "nothing built yet" state (task: don't leave an

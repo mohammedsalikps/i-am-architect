@@ -25,7 +25,7 @@ import { createStoreSnapper } from "../engine/snapping/storeSnapper";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { VisibilityStore } from "./visibility/VisibilityStore";
 import { PlacementController } from "./placement/PlacementController";
-import { computeFitCamera } from "./camera/fitCamera";
+import { computeArchitecturalFit } from "./camera/fitCamera";
 import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -409,7 +409,7 @@ export class SceneManager {
       return;
     }
     const direction = this.camera.position.clone().sub(this.controls.target);
-    const { position, target } = computeFitCamera(box, direction, { fovDegrees: this.camera.fov });
+    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.camera.aspect });
     this.camera.position.copy(position);
     this.controls.target.copy(target);
     this.camera.lookAt(target);

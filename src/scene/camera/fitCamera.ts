@@ -56,3 +56,74 @@ export function computeFitCamera(box: THREE.Box3, directionFromTarget: THREE.Vec
   const position = center.clone().addScaledVector(direction, distance);
   return { position, target: center, distance };
 }
+
+export interface ArchitecturalFitOptions extends FitCameraOptions {
+  /** The camera's aspect ratio (width/height) - needed to fit the box's actual projected width, not just a spherical approximation of it. */
+  aspect: number;
+}
+
+/**
+ * Like computeFitCamera, but frames the box's own projected silhouette
+ * from the given viewing direction - both the vertical AND horizontal
+ * field of view - rather than its bounding sphere.
+ *
+ * Phase 5B finding: a typical single-story building is wide and flat, so
+ * its bounding-SPHERE radius is dominated by the long horizontal
+ * diagonal. computeFitCamera then sizes distance off that same radius
+ * for the VERTICAL fov too, which - for a low building - leaves large,
+ * empty margins above and below it (task: "avoid huge empty areas...
+ * building should occupy a meaningful portion of the viewport";
+ * confirmed by inspection: "Fit House" on the AI-generated 10m x 8m
+ * house left it occupying under a fifth of the frame). This measures the
+ * box's real extent along the camera's own right/up axes instead, so a
+ * wide flat building is framed by its true, smaller silhouette.
+ *
+ * Deliberately a separate function rather than a change to
+ * computeFitCamera itself: the asset-thumbnail generator
+ * (scripts/generate-thumbnails.html) also calls computeFitCamera, for
+ * single, roughly cubic assets where the sphere/silhouette distinction
+ * is moot - left untouched rather than risking a behavior change to
+ * already-generated, committed thumbnails.
+ */
+export function computeArchitecturalFit(box: THREE.Box3, directionFromTarget: THREE.Vector3, options: ArchitecturalFitOptions): FitCameraResult {
+  const center = box.getCenter(new THREE.Vector3());
+  const outward = directionFromTarget.lengthSq() < 1e-9 ? new THREE.Vector3(1, 1, 1) : directionFromTarget.clone();
+  outward.normalize();
+  const forward = outward.clone().negate(); // the direction the camera looks, into the scene
+
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3().crossVectors(forward, worldUp);
+  if (right.lengthSq() < 1e-9) {
+    right.set(1, 0, 0); // looking straight down/up - fall back to world X as "right"
+  }
+  right.normalize();
+  const camUp = new THREE.Vector3().crossVectors(right, forward).normalize();
+
+  let halfWidth = 0;
+  let halfHeight = 0;
+  const corner = new THREE.Vector3();
+  const offset = new THREE.Vector3();
+  for (let i = 0; i < 8; i += 1) {
+    corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+    offset.subVectors(corner, center);
+    halfWidth = Math.max(halfWidth, Math.abs(offset.dot(right)));
+    halfHeight = Math.max(halfHeight, Math.abs(offset.dot(camUp)));
+  }
+
+  const padding = options.padding ?? DEFAULT_PADDING;
+  const verticalHalfFov = THREE.MathUtils.degToRad(options.fovDegrees) / 2;
+  const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * options.aspect);
+  const distanceForHeight = halfHeight / Math.tan(verticalHalfFov);
+  const distanceForWidth = halfWidth / Math.tan(horizontalHalfFov);
+  // halfDepth is deliberately NOT added to distance here: the padding
+  // margin below already covers the perspective foreshortening a deep
+  // box's near corner introduces (the same "generous, not pixel-tight"
+  // trade-off computeFitCamera's own docs already make) - adding the
+  // full half-depth on top of it was measured to over-correct, pushing a
+  // corner-viewed box's distance back ABOVE the sphere-based fit this
+  // function exists to improve on.
+  const distance = Math.max(Math.max(distanceForHeight, distanceForWidth) * padding, options.minDistance ?? DEFAULT_MIN_DISTANCE);
+
+  const position = center.clone().addScaledVector(outward, distance);
+  return { position, target: center, distance };
+}

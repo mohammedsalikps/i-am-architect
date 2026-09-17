@@ -2,58 +2,122 @@ import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
 import { AiPromptController, isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
 import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState } from "../engine/ai/AiPromptController";
+import type { HouseDesignSummary } from "../engine/ai/houseDesign.ts";
 
 function pluralize(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+/** "7" stays "7", "7.5" stays "7.5" - a plain, minimal-decimal meters format for a footprint dimension (never invented precision beyond what the design actually used). */
+function formatMetersValue(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+}
+
+/** Counts room labels matching `pattern` - e.g. "Bedroom 2" and "Bathroom" from HouseDesignSummary.rooms, the same real, generator-authored labels summarizeHouseDesign() already renders as prose. Never a guess: a label either matches or it doesn't. */
+function countRoomsMatching(rooms: readonly string[], pattern: RegExp): number {
+  return rooms.filter((room) => pattern.test(room)).length;
+}
+
+export interface AiResultActions {
+  onFocusBuilding: () => void;
+  onReviewChanges: () => void;
+  /** The same undo the top toolbar's own Undo button already runs (HistoryManager.undo()) - not a second, scoped-to-this-response undo. */
+  onUndo: () => void;
+  /** The same save the top toolbar's own Save button already runs - prompts to sign in first when signed out, exactly as it already does there. */
+  onSave: () => void;
+}
+
 /**
- * "AI BUILD COMPLETE" - the task's own explicit ask: not just a
- * "Success." line. Purely a presentation of AiPromptState.summary (see
- * AiPromptController.summarizeCreatedObjects) - everything about WHAT
- * was created is decided there; this only lays it out and wires two
- * actions onto real camera/selection behavior the app already has
- * (SceneManager.focusOn(), SelectionStore.select()) - no new "what
- * happened" logic lives here.
+ * "EAVARA AI - Design generated" (task: the AI should feel like an
+ * architectural assistant reporting a real result, not a bare "prompt ->
+ * command executed" line). Purely a presentation of data that already
+ * exists:
+ *
+ * - `houseSummary` (AIPipelineResult.houseSummary, present only for a
+ *   recognized whole-house request - see houseDesign.ts) drives the
+ *   structured footprint/bedroom/bathroom/room/element-count stats;
+ *   bedroom and bathroom counts come from matching the design's own real
+ *   room labels ("Bedroom 2", "Bathroom") - never invented, and simply
+ *   absent from the list when a design has none (e.g. a single room).
+ * - Every other successful response (a single wall, an edit) falls back
+ *   to the existing generic "N objects created - ..." breakdown
+ *   (AiPromptController.summarizeCreatedObjects) - nothing here invents
+ *   architectural detail a plain construction command doesn't have.
+ *
+ * All four actions call real, already-existing behavior
+ * (SceneManager.focusOn/SelectionStore.select/HistoryManager.undo/
+ * ProjectPersistenceController.save) - no action is shown that doesn't
+ * actually do something.
  */
-function buildAiResultCard(
-  summary: AiBuildSummary,
-  notes: string | null,
-  onFocusBuilding: () => void,
-  onReviewChanges: () => void
-): HTMLElement {
-  const heading = el("p", { className: "ai-result__heading", text: "✦ Design Complete" });
-  // A house-design response's own summarizeHouseDesign() text (houseDesign.ts,
-  // untouched by this milestone) already reads like "Designed a 10 m × 8 m
-  // house: 6 rooms (...), 4 exterior walls, ..." - shown here, in the
-  // result card itself, is simply a better home for it than the command
-  // bar's small one-line status text; an ordinary (non-house) response's
-  // notes, when it has any, read the same way. The object-count line
-  // underneath always renders too, so a response with no notes text is
-  // never a blank card.
-  const children: HTMLElement[] = [heading];
-  if (notes) {
-    children.push(el("p", { className: "ai-result__line ai-result__line--notes", text: notes }));
+function buildAiResultCard(summary: AiBuildSummary, notes: string | null, houseSummary: HouseDesignSummary | null, actions: AiResultActions): HTMLElement {
+  const eyebrow = el("p", { className: "ai-result__eyebrow", text: "EAVARA AI" });
+  const heading = el("p", { className: "ai-result__heading", text: houseSummary ? "Design generated" : "Build complete" });
+  const children: HTMLElement[] = [eyebrow, heading];
+
+  if (houseSummary) {
+    const { footprint, rooms } = houseSummary;
+    const bedrooms = countRoomsMatching(rooms, /bedroom/i);
+    const bathrooms = countRoomsMatching(rooms, /bathroom/i);
+    const stats: { label: string; value: string }[] = [
+      { label: "Footprint", value: `${formatMetersValue(footprint.length)}m × ${formatMetersValue(footprint.width)}m` },
+      ...(bedrooms > 0 ? [{ label: bedrooms === 1 ? "Bedroom" : "Bedrooms", value: String(bedrooms) }] : []),
+      ...(bathrooms > 0 ? [{ label: bathrooms === 1 ? "Bathroom" : "Bathrooms", value: String(bathrooms) }] : []),
+      { label: "Rooms", value: String(rooms.length) },
+      { label: "Construction elements", value: String(summary.total) }
+    ];
+    children.push(
+      el(
+        "div",
+        { className: "ai-result__stats" },
+        stats.map((stat) =>
+          el("div", { className: "ai-result__stat" }, [
+            el("span", { className: "ai-result__stat-value", text: stat.value }),
+            el("span", { className: "ai-result__stat-label", text: stat.label })
+          ])
+        )
+      )
+    );
+  } else {
+    // A house-design response's own summarizeHouseDesign() prose reaches
+    // here as `notes` too, but houseSummary being set already gave it
+    // the structured card above - this branch only ever shows notes for
+    // a NON-house response (an ordinary provider-mapped instruction).
+    if (notes) {
+      children.push(el("p", { className: "ai-result__line ai-result__line--notes", text: notes }));
+    }
+    children.push(
+      el("p", {
+        className: "ai-result__line",
+        text: `${pluralize(summary.total, "object")} created — ${summary.byType.map((entry) => `${entry.count} ${entry.label}`).join(", ")}`
+      })
+    );
   }
-  children.push(
-    el("p", {
-      className: "ai-result__line",
-      text: `${pluralize(summary.total, "object")} created — ${summary.byType.map((entry) => `${entry.count} ${entry.label}`).join(", ")}`
-    })
-  );
+
   const focusButton = el("button", {
     className: "toolbar-button toolbar-button--primary ai-result__action",
-    text: "View House",
+    text: "View",
     attrs: { type: "button", title: "Frame everything this response just created" }
   });
-  focusButton.addEventListener("click", onFocusBuilding);
+  focusButton.addEventListener("click", actions.onFocusBuilding);
   const reviewButton = el("button", {
     className: "toolbar-button ai-result__action",
-    text: "Review Changes",
+    text: "Modify",
     attrs: { type: "button", title: "Select the first object this response created, and open its properties" }
   });
-  reviewButton.addEventListener("click", onReviewChanges);
-  children.push(el("div", { className: "ai-result__actions" }, [focusButton, reviewButton]));
+  reviewButton.addEventListener("click", actions.onReviewChanges);
+  const undoButton = el("button", {
+    className: "toolbar-button ai-result__action",
+    text: "Undo",
+    attrs: { type: "button", title: "Undo this generation" }
+  });
+  undoButton.addEventListener("click", actions.onUndo);
+  const saveButton = el("button", {
+    className: "toolbar-button ai-result__action",
+    text: "Save",
+    attrs: { type: "button", title: "Save the project" }
+  });
+  saveButton.addEventListener("click", actions.onSave);
+  children.push(el("div", { className: "ai-result__actions" }, [focusButton, reviewButton, undoButton, saveButton]));
   return el("div", { className: "ai-result" }, children);
 }
 
@@ -162,7 +226,9 @@ const AI_EXAMPLES: readonly string[] = [
 function buildAiPromptTab(
   onSubmitAiInstruction: AiInstructionSubmitter,
   onFocusCreated: (objectIds: string[]) => void,
-  onSelectObject: (objectId: string) => void
+  onSelectObject: (objectId: string) => void,
+  onUndo: () => void,
+  onSaveProject: () => void
 ): AiPromptTab {
   const input = el("input", {
     className: "command-bar__input",
@@ -215,17 +281,17 @@ function buildAiPromptTab(
   controller.subscribe((state) => {
     const summary = state.status === "success" ? state.summary : null;
     const card = summary
-      ? buildAiResultCard(
-          summary,
-          state.notes,
-          () => onFocusCreated(summary.objectIds),
-          () => {
+      ? buildAiResultCard(summary, state.notes, state.houseSummary, {
+          onFocusBuilding: () => onFocusCreated(summary.objectIds),
+          onReviewChanges: () => {
             const firstId = summary.objectIds[0];
             if (firstId) {
               onSelectObject(firstId);
             }
-          }
-        )
+          },
+          onUndo,
+          onSave: onSaveProject
+        })
       : state.status === "error" && state.message
         ? buildAiErrorCard(state.message, state.details)
         : null;
@@ -319,14 +385,16 @@ export function createCommandBar(
   onAddWall: () => void,
   onSubmitAiInstruction: AiInstructionSubmitter,
   onFocusCreated: (objectIds: string[]) => void,
-  onSelectObject: (objectId: string) => void
+  onSelectObject: (objectId: string) => void,
+  onUndo: () => void,
+  onSaveProject: () => void
 ): CommandBar {
   // Built up front (not lazily inside the tab strip's own build()) so
   // its `focusInput()` is available regardless of which tab is active -
   // AI Prompt is the tab strip's first, non-disabled tab, so it's
   // already the active one on load; this only matters once the user has
   // switched away and back.
-  const aiPromptTab = buildAiPromptTab(onSubmitAiInstruction, onFocusCreated, onSelectObject);
+  const aiPromptTab = buildAiPromptTab(onSubmitAiInstruction, onFocusCreated, onSelectObject, onUndo, onSaveProject);
 
   const { strip, panel, activate } = createTabStrip(
     [

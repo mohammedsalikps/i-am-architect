@@ -1,4 +1,5 @@
 import type { AIPipelineResult } from "./types";
+import type { HouseDesignSummary } from "./houseDesign.ts";
 
 /**
  * DOM-free UI state machine for the command bar's "AI Prompt" tab.
@@ -54,6 +55,8 @@ export interface AiPromptState {
   summary: AiBuildSummary | null;
   /** The original, unfiltered error text `message` was simplified from - null unless it actually differs (nothing to hide behind "Show details" otherwise). Developer/debugging detail only - never shown by default. */
   details: string | null;
+  /** Present only for a successful whole-house/design-intent response (see AIPipelineResult.houseSummary) - lets the result card show a structured architectural summary (footprint, room breakdown, element count) instead of only the generic byType/notes text. Null for every other kind of response. */
+  houseSummary: HouseDesignSummary | null;
 }
 
 export type AiPromptListener = (state: AiPromptState) => void;
@@ -61,7 +64,7 @@ export type AiPromptListener = (state: AiPromptState) => void;
 /** What AiPromptController delegates the actual work to - `AIService.submit` in the running app, a fake async function in tests. */
 export type AiInstructionSubmitter = (instruction: string) => Promise<AIPipelineResult>;
 
-const IDLE_STATE: AiPromptState = { status: "idle", message: null, notes: null, summary: null, details: null };
+const IDLE_STATE: AiPromptState = { status: "idle", message: null, notes: null, summary: null, details: null, houseSummary: null };
 
 /**
  * Raw text substrings that mark a message as an internal/technical
@@ -274,7 +277,7 @@ export class AiPromptController {
       return;
     }
 
-    this.setState({ status: "submitting", message: null, notes: null, summary: null, details: null });
+    this.setState({ status: "submitting", message: null, notes: null, summary: null, details: null, houseSummary: null });
 
     let result: AIPipelineResult;
     try {
@@ -287,7 +290,8 @@ export class AiPromptController {
         message: friendly,
         notes: null,
         summary: null,
-        details: friendly === raw ? null : raw
+        details: friendly === raw ? null : raw,
+        houseSummary: null
       });
       return;
     }
@@ -300,7 +304,8 @@ export class AiPromptController {
       message: friendlyMessage,
       notes: result.notes ?? null,
       summary,
-      details: friendlyMessage === rawMessage ? null : rawMessage
+      details: friendlyMessage === rawMessage ? null : rawMessage,
+      houseSummary: (result.success && result.houseSummary) || null
     });
     if (summary) {
       this.onCreated?.(summary.objectIds);
