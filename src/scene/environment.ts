@@ -2,22 +2,23 @@ import * as THREE from "three";
 
 /**
  * The viewport's backdrop: a soft vertical gradient rather than a single
- * flat fill color - a cheap, texture-free stand-in for a photography-
- * studio cyclorama. A lighter band sits at the horizon (roughly where
- * the camera naturally looks when a building is framed), receding to a
- * slightly deeper neutral tone above and below, so a building reads as
- * standing IN a bright, clean studio space rather than floating in a
- * dark void.
+ * flat fill color - a cheap, texture-free stand-in for a dark
+ * photography/architectural-studio cyclorama. A slightly lighter charcoal
+ * band sits at the horizon (roughly where the camera naturally looks when
+ * a building is framed), receding to a deeper near-black tone above and
+ * below, so a building reads as standing IN a calm, dark studio space -
+ * enough depth/gradient to avoid a flat "empty void", without ever going
+ * bright or white.
  *
- * Rescue-milestone revision: previously this stayed inside the shell's
- * own near-black UI palette, on the theory that a dark surround would
- * never tint a material's color. In practice, for a presentation, that
- * read as "empty black void" rather than "studio" - the single most
- * common piece of negative feedback on the viewport. A light neutral
- * grey cyclorama (the literal, real-world photography/architectural-viz
- * convention this comment already named) fixes that directly, and stays
- * "neutral architectural studio" rather than a blue "sky" tone, which
- * would tint every material's apparent color against it.
+ * Viewport-correction revision: an earlier ("Rescue") milestone tried a
+ * light neutral-grey cyclorama here on the theory that "empty void"
+ * feedback meant "too dark". In practice that made the viewport read as a
+ * bright/white workspace, which is wrong for this product's professional
+ * CAD/studio identity and visibly hurt shadow and material contrast
+ * (task: "restore the professional DARK architectural modeling
+ * viewport"). Dark charcoal tones restore that contrast while keeping
+ * the same "soft gradient, not a flat void" structure this file already
+ * had - only the actual color stops changed.
  *
  * A 2x256 canvas is plenty: it's stretched to fill the background, never
  * sampled at an angle, so no vertical banding is visible at any window
@@ -35,9 +36,9 @@ export function createHorizonBackground(): THREE.Texture {
     return texture;
   }
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, "#dfe1e6"); // zenith
-  gradient.addColorStop(0.55, "#f2f1ee"); // horizon - the lightest band, an off-white studio backdrop
-  gradient.addColorStop(1, "#c7c8cc"); // recedes toward the ground's own tone
+  gradient.addColorStop(0, "#15161a"); // zenith - near-black, not pitch black
+  gradient.addColorStop(0.55, "#24262b"); // horizon - a lighter charcoal band, enough to read as a studio wall, not a void
+  gradient.addColorStop(1, "#1a1b1f"); // recedes toward the ground's own dark tone
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -46,5 +47,5 @@ export function createHorizonBackground(): THREE.Texture {
   return texture;
 }
 
-/** Matches the gradient's lower band, so distant geometry fades into the same tone instead of a mismatched flat fog color. */
-export const HORIZON_FOG_COLOR = 0xc7c8cc;
+/** Matches the gradient's lower band, so distant geometry fades into the same dark tone instead of a mismatched flat fog color. */
+export const HORIZON_FOG_COLOR = 0x1a1b1f;

@@ -16,12 +16,13 @@ export const GRID_DIVISIONS = 50;
 export function addGround(scene: THREE.Scene): void {
   const groundGeometry = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE);
   const groundMaterial = new THREE.MeshStandardMaterial({
-    // Rescue milestone: a light, neutral concrete/paving tone matching
-    // the new studio backdrop (environment.ts) - previously a dark grey
-    // tuned to sit inside the shell's own near-black palette, which read
-    // as part of the "empty void" complaint rather than a believable
-    // site surface a building visibly rests on.
-    color: 0xc9cac6,
+    // Viewport-correction: a dark studio-floor/concrete tone, restoring
+    // the professional dark CAD workspace (task: "dark concrete/studio
+    // floor") - still distinct in both hue and lightness from the
+    // background's own darkest tones (environment.ts), so the ground
+    // plane still reads as a real surface a building rests on, not part
+    // of an undifferentiated black void.
+    color: 0x35363b,
     // A real site surface - concrete, packed ground, paving - still has
     // a faint sheen under direct sun; nowhere near glossy or reflective.
     roughness: 0.9
@@ -31,10 +32,11 @@ export function addGround(scene: THREE.Scene): void {
   ground.receiveShadow = true;
   scene.add(ground);
 
-  // Darker lines than the ground now, the inverse of the previous dark-
-  // ground/light-line pairing - still a quiet reference plane (moderate
+  // Lighter lines than the now-dark ground (the inverse of the previous
+  // dark-line/light-ground pairing) so the grid stays visible without
+  // dominating the model - still a quiet reference plane (moderate
   // opacity), not a competing grid.
-  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x8f9296, 0xb2b4b8);
+  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x6b6d72, 0x4a4c50);
   const gridMaterial = grid.material as THREE.Material;
   gridMaterial.transparent = true;
   gridMaterial.opacity = 0.5;
