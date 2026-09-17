@@ -319,6 +319,12 @@ function buildProjectHierarchy(
  * resolveConstructionObject.ts) rather than assuming every member is a
  * wall.
  */
+export interface LeftSidebar {
+  element: HTMLElement;
+  /** Re-checks the Assets tab's own card active-states - see AssetLibrary.refresh()'s own docs. A no-op if the Assets tab has never been built (nothing to refresh yet). */
+  refreshAssetLibrary(): void;
+}
+
 export function createLeftSidebar(
   assemblyStore: AssemblyStore,
   commandExecutor: CommandExecutor,
@@ -333,8 +339,10 @@ export function createLeftSidebar(
   assetStore: AssetStore,
   visibilityStore: VisibilityStore,
   onFocusObjects: (objectIds: string[]) => void,
-  onAddAsset: (assetId: string) => void
-): HTMLElement {
+  onAddAsset: (assetId: string) => void,
+  /** Whether placement tool `id` is currently armed - the same function passed to the ribbon as RibbonActions.isPlacementActive (see ribbonTabs.ts), reused for the Assets tab's own active-card state. */
+  isPlacementActive: (id: string) => boolean
+): LeftSidebar {
   const objectSources: ObjectSource[] = [
     originalSource("Wall", wallStore),
     originalSource("Pillar", pillarStore),
@@ -345,6 +353,12 @@ export function createLeftSidebar(
     { store: elementStore, labelOf: elementLabel, orderOf: elementOrder },
     { store: assetStore, labelOf: assetLabel, orderOf: assetOrder }
   ];
+
+  // Built up front, like commandBar.ts's own AI Prompt tab - so its
+  // refresh() is callable regardless of which rail tab is currently
+  // active (main.ts's placementController subscription refreshes it
+  // unconditionally, the same way it already refreshes the ribbon).
+  const assetLibrary = createAssetLibrary({ onPlaceAsset: onAddAsset, isPlacementActive });
 
   const { strip, panel } = createTabStrip(
     [
@@ -370,7 +384,7 @@ export function createLeftSidebar(
             elementStore
           )
       },
-      { id: "assets", label: "Assets", build: () => createAssetLibrary({ onPlaceAsset: onAddAsset }) },
+      { id: "assets", label: "Assets", build: () => assetLibrary.element },
       { id: "layers", label: "Layers", build: () => comingSoon("Layer management"), disabled: true },
       { id: "views", label: "Views", build: () => comingSoon("Saved views"), disabled: true },
       { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },
@@ -380,5 +394,8 @@ export function createLeftSidebar(
     "sidebar-rail__item"
   );
 
-  return el("aside", { className: "sidebar sidebar--left" }, [strip, panel]);
+  return {
+    element: el("aside", { className: "sidebar sidebar--left" }, [strip, panel]),
+    refreshAssetLibrary: assetLibrary.refresh
+  };
 }

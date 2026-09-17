@@ -1150,18 +1150,22 @@ button {
   gap: 6px;
 }
 
+/* Image-first (task: "the asset card should become visually image-first") -
+   a real rendered thumbnail (see assetThumbnails.ts) fills its own area,
+   a quiet divider line separates it from the name below, matching the
+   Phase 2 ribbon card's own restrained language (a fixed visual zone
+   over a compact label) rather than inventing a second card style. */
 .asset-card {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 4px;
   background: var(--color-surface-raised);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-1);
+  padding: 0;
   cursor: pointer;
   color: var(--color-text);
-  transition: border-color 0.12s ease, transform 0.12s ease;
+  overflow: hidden;
+  transition: border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
 }
 
 .asset-card:hover {
@@ -1169,25 +1173,64 @@ button {
   transform: translateY(-1px);
 }
 
-.asset-card__icon {
-  width: 32px;
-  height: 32px;
-  color: var(--color-text-muted);
+/* Armed for placement - the same restrained "edge + a light lift" the
+   ribbon's own .app-ribbon__item--active uses (see constructionRibbon.ts),
+   not a solid fill: a real photo-like thumbnail shouldn't be tinted or
+   inverted the way a single-color icon tile can be. */
+.asset-card--active {
+  border-color: var(--color-accent);
+  border-width: 2px;
+  box-shadow: var(--shadow-elevation-1);
 }
 
-.asset-card:hover .asset-card__icon {
+.asset-card--active .asset-card__name {
   color: var(--color-accent);
 }
 
-.asset-card__icon svg {
-  width: 100%;
-  height: 100%;
+.asset-card__thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 72px;
+  padding: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.asset-card__thumb-image {
+  max-width: 100%;
+  max-height: 100%;
+  /* object-fit on an <img> sized by its own intrinsic dimensions inside
+     a flex-centered box - preserves the model's real proportions (a
+     wide rug, a tall floor lamp) rather than stretching either to fill
+     a fixed box (task: "thumbnail uses object-fit: contain"). */
+  object-fit: contain;
+}
+
+/* The hand-drawn SVG fallback (no thumbnail yet, or one that failed to
+   load) - the container stays the same 72px zone every card gets (a
+   thumbnail and a fallback icon must read as the same kind of card), only
+   the glyph itself is sized down within it. */
+.asset-card__thumb--icon {
+  color: var(--color-text-muted);
+}
+
+.asset-card:hover .asset-card__thumb--icon {
+  color: var(--color-accent);
+}
+
+.asset-card__thumb--icon svg {
+  width: 32px;
+  height: 32px;
 }
 
 .asset-card__name {
+  padding: 6px 4px;
   font-size: 11px;
   text-align: center;
   line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .asset-library__empty {

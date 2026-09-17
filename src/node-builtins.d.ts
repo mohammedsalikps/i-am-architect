@@ -1,7 +1,8 @@
 /**
  * Minimal ambient declarations for the handful of Node built-ins this
  * project's Node-run verify.ts scripts use (source-text scanning in
- * src/engine/ai/providers/verify.ts and src/engine/ai/e2e/verify.ts).
+ * src/engine/ai/providers/verify.ts and src/engine/ai/e2e/verify.ts;
+ * existsSync's own thumbnail-file check in src/engine/assets/verify.ts).
  *
  * The root tsconfig.json - used by `npm run build`'s `tsc --noEmit`,
  * which type-checks every file under src/ whether or not the app
@@ -25,6 +26,7 @@ declare module "node:fs" {
   export function readFileSync(path: string, encoding: "utf8"): string;
   export function readdirSync(path: string): string[];
   export function statSync(path: string): { isDirectory(): boolean; isFile(): boolean };
+  export function existsSync(path: string): boolean;
 }
 
 declare module "node:url" {

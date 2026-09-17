@@ -684,6 +684,7 @@ persistence.subscribe((state) => {
 // re-derived from PlacementController, not duplicated state of their own.
 sceneManager.current.placementController.subscribe((tool) => {
   shell.refreshRibbon();
+  shell.refreshAssetLibrary();
   shell.setPlacementStatus(tool ? { label: tool.label, onCancel: () => sceneManager.current?.placementController.disarm() } : null);
 });
 

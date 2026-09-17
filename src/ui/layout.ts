@@ -156,6 +156,8 @@ export type AppShell = {
   viewportContainer: HTMLElement;
   /** Re-checks every ribbon tool's enabled/active state - call after anything that could change one (e.g. PlacementController arming/disarming). */
   refreshRibbon: () => void;
+  /** Re-checks the Assets tab's own card active-state, the same "call after anything that could change it" contract as refreshRibbon - see AssetLibrary.refresh()'s own docs. */
+  refreshAssetLibrary: () => void;
   /** Shows/clears the status bar's pick-and-place banner and Cancel button - see PlacementController. */
   setPlacementStatus: (info: PlacementStatusInfo | null) => void;
 };
@@ -219,7 +221,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.assetStore,
     options.visibilityStore,
     options.onFocusObjects,
-    options.onAddAsset
+    options.onAddAsset,
+    options.ribbonActions.isPlacementActive
   );
   const rightSidebar = createRightSidebar({
     wallStore: options.wallStore,
@@ -275,7 +278,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
 
   const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay, emptyState]);
 
-  const body = el("div", { className: "app-body" }, [leftSidebar, viewportArea, rightSidebar]);
+  const body = el("div", { className: "app-body" }, [leftSidebar.element, viewportArea, rightSidebar]);
 
   const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore });
 
@@ -288,5 +291,5 @@ export function createAppShell(options: AppShellOptions): AppShell {
     statusBar.element
   ]);
 
-  return { root, viewportContainer, refreshRibbon, setPlacementStatus: statusBar.setPlacementStatus };
+  return { root, viewportContainer, refreshRibbon, refreshAssetLibrary: leftSidebar.refreshAssetLibrary, setPlacementStatus: statusBar.setPlacementStatus };
 }

@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>i am Architect — thumbnail generator (dev-only)</title>
+    <!--
+      A one-time/rerunnable AUTHORING TOOL, not application code - the
+      exact same status as scripts/generate-asset-models.mjs, just run in
+      a real browser instead of Node, because rendering a GLTF to a PNG
+      needs a real WebGL context and Node has none. It is never linked
+      from index.html or main.ts and Vite's default build only bundles
+      configured entry points, so this file is never part of the shipped
+      app - open it directly from the dev server
+      (http://localhost:5173/scripts/generate-thumbnails.html) to run it.
+
+      It imports the project's OWN installed `three` and the OWN real
+      ASSET_DEFINITIONS/computeFitCamera (via Vite's dev-time module
+      resolution for absolute /src/... paths), rather than a second,
+      hand-copied asset list or a different framing algorithm - so a
+      thumbnail's framing is governed by the exact same tested logic
+      "Fit House" uses, not a reimplementation.
+
+      Usage: open the page, wait for "13 / 13 rendered", then use the
+      "Copy JSON" button (or read `window.__thumbnails__` from the
+      console) to get every asset's PNG as a base64 data URL, and save
+      each one to src/assets/thumbnails/<id>.png.
+    -->
+    <style>
+      body { background: #14151a; color: #eceef1; font: 13px "Segoe UI", sans-serif; padding: 24px; }
+      h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+      p { color: #8d93a1; margin: 0 0 16px; }
+      #grid { display: grid; grid-template-columns: repeat(auto-fill, 128px); gap: 12px; }
+      figure { margin: 0; padding: 8px; background: #1b1d23; border: 1px solid #2b2e36; border-radius: 6px; }
+      figure img { width: 112px; height: 112px; display: block; background: repeating-conic-gradient(#23252d 0% 25%, #1b1d23 0% 50%) 50% / 16px 16px; border-radius: 3px; }
+      figcaption { margin-top: 6px; font-size: 11px; text-align: center; color: #8d93a1; }
+      #status { margin: 16px 0; font-variant-numeric: tabular-nums; }
+      button { font: inherit; background: #4f8ef7; color: #fff; border: none; border-radius: 4px; padding: 8px 14px; cursor: pointer; }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+    </style>
+  </head>
+  <body>
+    <h1>Asset thumbnail generator</h1>
+    <p>Dev-only authoring tool - renders every catalog asset's real .gltf to a 256&times;256 PNG. Not part of the shipped app.</p>
+    <div id="status">starting…</div>
+    <button id="copy" disabled>Copy JSON to clipboard</button>
+    <div id="grid"></div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+      import { computeFitCamera } from "/src/scene/camera/fitCamera.ts";
+      import { ASSET_DEFINITIONS } from "/src/engine/assets/catalog.ts";
+
+      const SIZE = 256;
+      const statusEl = document.getElementById("status");
+      const gridEl = document.getElementById("grid");
+      const copyBtn = document.getElementById("copy");
+
+      // One renderer, reused for every asset - a fresh scene/camera per
+      // asset, but no reason to pay for a new WebGL context 13 times.
+      // Alpha + a transparent clear so the PNG carries no background
+      // color of its own: the asset-card's own surface always shows
+      // through correctly, in this theme or any future one.
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+      renderer.setSize(SIZE, SIZE);
+      renderer.setPixelRatio(1);
+      renderer.setClearColor(0x000000, 0);
+      // Same renderer-level settings as the real workspace viewport
+      // (SceneManager.ts) - a thumbnail should read as the same product,
+      // not a differently-lit preview.
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.05;
+
+      const loader = new GLTFLoader();
+
+      /** The same soft daylight recipe as scene/lights.ts, minus shadows - a thumbnail this small has no ground to receive one, and the point is a clean, even product shot, not a dramatic one. */
+      function addStudioLights(scene) {
+        scene.add(new THREE.HemisphereLight(0xcfe0ff, 0x2b2620, 0.9));
+        const key = new THREE.DirectionalLight(0xfff3e0, 1.9);
+        key.position.set(3, 4, 3);
+        scene.add(key);
+        const fill = new THREE.DirectionalLight(0xdce8ff, 0.6);
+        fill.position.set(-3, 2, -2);
+        scene.add(fill);
+      }
+
+      function loadGltf(url) {
+        return new Promise((resolve, reject) => loader.load(url, resolve, undefined, reject));
+      }
+
+      /**
+       * Frames `object` the exact way SceneManager's "Fit House"/"Focus
+       * Selected" do - same computeFitCamera() call, same (1,1,1)
+       * direction the workspace's own default perspective camera uses
+       * (see SceneManager.ts's VIEW_CAMERA_POSITIONS.perspective) - so a
+       * wide/flat asset (the rug) and a tall/narrow one (the floor lamp)
+       * each get a distance computed from their own bounding sphere,
+       * never a fixed camera position that would clip one or leave the
+       * other tiny. A tighter padding than the workspace's own (which
+       * frames a whole building) and a narrower FOV than the workspace's
+       * 60° both push the object further to fill this much smaller,
+       * product-shot-style frame without wide-angle distortion.
+       */
+      function frame(camera, object) {
+        const box = new THREE.Box3().setFromObject(object);
+        const direction = new THREE.Vector3(1, 1, 1);
+        const { position, target } = computeFitCamera(box, direction, { fovDegrees: camera.fov, padding: 1.15 });
+        camera.position.copy(position);
+        camera.lookAt(target);
+      }
+
+      async function renderThumbnail(definition) {
+        const scene = new THREE.Scene();
+        addStudioLights(scene);
+
+        const gltf = await loadGltf(`/src/assets/${definition.url}`);
+        const model = gltf.scene;
+        scene.add(model);
+
+        const camera = new THREE.PerspectiveCamera(38, 1, 0.05, 100);
+        frame(camera, model);
+
+        renderer.clear();
+        renderer.render(scene, camera);
+        const dataUrl = renderer.domElement.toDataURL("image/png");
+
+        // Real geometries/materials from a fresh GLTFLoader parse each
+        // time (never the app's own cached AssetLoader instance) - safe
+        // to dispose immediately, nothing else references them.
+        model.traverse((child) => {
+          if (child.isMesh) {
+            child.geometry.dispose();
+            (Array.isArray(child.material) ? child.material : [child.material]).forEach((m) => m.dispose());
+          }
+        });
+
+        return dataUrl;
+      }
+
+      async function run() {
+        const results = {};
+        for (let i = 0; i < ASSET_DEFINITIONS.length; i += 1) {
+          const definition = ASSET_DEFINITIONS[i];
+          statusEl.textContent = `rendering ${i + 1} / ${ASSET_DEFINITIONS.length}: ${definition.id}…`;
+          try {
+            const dataUrl = await renderThumbnail(definition);
+            results[definition.id] = dataUrl;
+            const figure = document.createElement("figure");
+            const img = document.createElement("img");
+            img.src = dataUrl;
+            const caption = document.createElement("figcaption");
+            caption.textContent = definition.id;
+            figure.append(img, caption);
+            gridEl.append(figure);
+          } catch (error) {
+            console.error(`Failed to render ${definition.id}`, error);
+            statusEl.textContent = `FAILED on ${definition.id} - see console`;
+            return;
+          }
+        }
+        statusEl.textContent = `${ASSET_DEFINITIONS.length} / ${ASSET_DEFINITIONS.length} rendered.`;
+        window.__thumbnails__ = results;
+        copyBtn.disabled = false;
+        copyBtn.addEventListener("click", () => {
+          navigator.clipboard.writeText(JSON.stringify(results));
+          copyBtn.textContent = "Copied";
+        });
+        console.log("Thumbnails ready on window.__thumbnails__ - JSON.stringify(window.__thumbnails__) to retrieve.");
+      }
+
+      run();
+    </script>
+  </body>
+</html>

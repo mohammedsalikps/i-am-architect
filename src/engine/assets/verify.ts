@@ -12,7 +12,7 @@
  * AssetLayer's scene wiring - those need a browser (fetch/DOM/WebGL),
  * verified instead by hand in the running app (see the milestone report).
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ASSET_CATEGORIES, ASSET_DEFINITIONS, assetDefinitionsIn, getAssetDefinition, searchAssetDefinitions } from "./catalog.ts";
 import { getMaterial } from "../materials/materialLibrary.ts";
@@ -176,6 +176,21 @@ async function run(): Promise<void> {
           `${definition.id}: catalog defaultDimensions.${axis} (${definition.defaultDimensions[axis]}) matches the file's measured ${axis} (${measured[axis].toFixed(3)})`
         );
       }
+    }
+  });
+
+  check("every asset has a real thumbnail on disk - the conventional <id>.png, or its explicit thumbnailUrl override", () => {
+    // A Node-side filesystem check, not the browser-only
+    // ui/assetThumbnails.ts resolver (import.meta.glob is a Vite/browser
+    // mechanism) - but the same convention: thumbnailUrl wins when set,
+    // otherwise "<id>.png". Failing loudly here (task: "easy to detect
+    // during development") is the whole point - a silently-missing
+    // thumbnail would otherwise only ever surface as the icon fallback
+    // quietly winning, never as a build/test failure.
+    for (const definition of ASSET_DEFINITIONS) {
+      const relativeUrl = definition.thumbnailUrl ?? `${definition.id}.png`;
+      const path = fileURLToPath(new URL(`../../assets/thumbnails/${relativeUrl}`, import.meta.url));
+      assertTrue(existsSync(path), `${definition.id}: no thumbnail at src/assets/thumbnails/${relativeUrl} - run scripts/generate-thumbnails.html`);
     }
   });
 
