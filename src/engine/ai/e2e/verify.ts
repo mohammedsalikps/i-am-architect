@@ -42,7 +42,7 @@ import { resolveConstructionObject } from "../../objects/resolveConstructionObje
 import { parseAIProjectSnapshot } from "../parseProjectSnapshot.ts";
 import type { ProjectContext } from "../../project/ProjectContext.ts";
 import { AIService } from "../AIService.ts";
-import { AiPromptController } from "../AiPromptController.ts";
+import { AiPromptController, isNetworkUnreachable } from "../AiPromptController.ts";
 import { BackendAIProvider } from "../providers/BackendAIProvider.ts";
 import { createMockBackend } from "./mockBackend.ts";
 import { MockAIProvider } from "../MockAIProvider.ts";
@@ -468,14 +468,19 @@ async function run(): Promise<void> {
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
   });
 
-  await check("an unreachable backend reaches the UI error state", async () => {
+  await check("an unreachable backend reaches the UI error state, offering Demo Mode (urgent APK milestone)", async () => {
     const app = wireApp(() => ({ kind: "networkError", message: "Failed to fetch" }));
 
     await app.controller.submit("Build a wall");
 
     assertEqual(app.controller.getState().status, "error", "controller status");
-    assertEqual(app.controller.getState().message, FRIENDLY_AI_FAILURE_MESSAGE, "controller message should be the friendly, normal-user-safe line");
     assertIncludes(app.controller.getState().details, "Backend request failed", "the technical detail should still be available as details");
+    assertTrue(isNetworkUnreachable(app.controller.getState().details ?? ""), "a real connectivity failure (never reached the server) is recognized as Demo-Mode-eligible");
+    assertEqual(
+      app.controller.getState().message,
+      "Unable to connect to the AI server. You can retry, or continue in Demo Mode.",
+      "controller message should be the friendly, normal-user-safe, Demo-Mode-aware line - never the generic 'temporarily unavailable' text, which implies the server WAS reached"
+    );
     assertEqual(app.context.wallStore.getAll().length, 0, "no mutation");
   });
 

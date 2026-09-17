@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#FFFFFF</color>
+    <!-- EAVARA brand gold - matches the color-brand token in src/ui/styles.css and the header's brand-mark badge. -->
+    <color name="ic_launcher_background">#C9A769</color>
 </resources>

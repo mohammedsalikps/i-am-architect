@@ -110,6 +110,30 @@ const RATE_LIMITED_MESSAGE = "EAVARA AI is receiving a lot of requests right now
 const TIMED_OUT_MESSAGE = "The AI service is taking too long to respond. Please try again. Your design was not changed.";
 /** Unchanged from before this milestone - pinned by ai/e2e/verify.ts's FRIENDLY_AI_FAILURE_MESSAGE across several existing failure-category tests, so this exact string is never changed casually. */
 const UNAVAILABLE_MESSAGE = "AI service temporarily unavailable. Please try again.";
+/**
+ * The request never reached the server at all (no HTTP status of any
+ * kind in the raw message) - a real client-side connectivity failure
+ * (offline, DNS, TLS, or a blocked cross-origin request), distinct from
+ * "the server answered with an error" (UNAVAILABLE_MESSAGE) or a timeout
+ * waiting for a response that WAS in flight. This is the one failure
+ * category where Demo Mode (deterministic-only, no backend) is offered -
+ * see isNetworkUnreachable()/commandBar.ts's error card.
+ */
+const NETWORK_UNREACHABLE_MESSAGE = "Unable to connect to the AI server. You can retry, or continue in Demo Mode.";
+/** Matches only a connectivity-level failure with no HTTP status attached - see NETWORK_UNREACHABLE_MESSAGE. */
+const NETWORK_UNREACHABLE_PATTERNS: readonly RegExp[] = [/fetch failed/i, /failed to fetch/i, /network ?error/i, /\bECONNREFUSED\b/];
+
+/**
+ * True only for a genuine connectivity failure (never reached the
+ * server) - never for an HTTP error status the server actually sent, a
+ * timeout, or an already-friendly message. Used to decide whether the
+ * error card offers "Continue in Demo Mode" (see commandBar.ts) - Demo
+ * Mode is never offered for a request that DID reach the backend, since
+ * that is not "the backend is unreachable", just an error it returned.
+ */
+export function isNetworkUnreachable(raw: string): boolean {
+  return NETWORK_UNREACHABLE_PATTERNS.some((pattern) => pattern.test(raw)) && !STATUS_CODE_PATTERN.test(raw);
+}
 
 /**
  * Turns one AICommandPipeline/provider error message into something a
@@ -138,6 +162,9 @@ const UNAVAILABLE_MESSAGE = "AI service temporarily unavailable. Please try agai
 export function friendlyAiErrorMessage(raw: string): string {
   if (TIMEOUT_PATTERNS.some((pattern) => pattern.test(raw))) {
     return TIMED_OUT_MESSAGE;
+  }
+  if (isNetworkUnreachable(raw)) {
+    return NETWORK_UNREACHABLE_MESSAGE;
   }
   const statusMatch = STATUS_CODE_PATTERN.exec(raw);
   if (statusMatch) {

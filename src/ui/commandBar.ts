@@ -1,6 +1,6 @@
 import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
-import { AiPromptController, isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
+import { AiPromptController, isAiPromptSubmitKey, isNetworkUnreachable } from "../engine/ai/AiPromptController";
 import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState, AiUpdateSummary } from "../engine/ai/AiPromptController";
 import type { HouseDesignSummary } from "../engine/ai/houseDesign.ts";
 import { buildConstructionMethodTab, type HighlightConstructionObjects } from "./constructionMethodPanel.ts";
@@ -155,6 +155,8 @@ export interface AiErrorActions {
   onRetry: () => void;
   /** Clears this error back to the idle state (AiPromptController.reset()) and empties the input, so a dismissed failure doesn't linger. */
   onDismiss: () => void;
+  /** Present only when this specific failure was a genuine connectivity failure (see isNetworkUnreachable) - shows "Continue in Demo Mode" alongside Retry/Dismiss. Absent for every other error category (a real HTTP error, a timeout, an already-friendly pipeline refusal), since those mean the backend IS reachable. */
+  onEnterDemoMode?: () => void;
 }
 
 /**
@@ -205,7 +207,17 @@ function buildAiErrorCard(message: string, details: string | null, actions: AiEr
     attrs: { type: "button", title: "Clear this message" }
   });
   dismissButton.addEventListener("click", actions.onDismiss);
-  children.push(el("div", { className: "ai-result__actions" }, [retryButton, dismissButton]));
+  const rowButtons = [retryButton, dismissButton];
+  if (actions.onEnterDemoMode) {
+    const demoButton = el("button", {
+      className: "toolbar-button ai-result__action",
+      text: "Continue in Demo Mode",
+      attrs: { type: "button", title: "Try deterministic commands (Build a wall, a full house description) without the AI server" }
+    });
+    demoButton.addEventListener("click", actions.onEnterDemoMode);
+    rowButtons.push(demoButton);
+  }
+  children.push(el("div", { className: "ai-result__actions" }, rowButtons));
 
   return el("div", { className: "ai-result ai-result--error" }, children);
 }
@@ -374,7 +386,8 @@ function buildAiPromptTab(
                 input.value = "";
                 controller.reset();
                 input.focus();
-              }
+              },
+              onEnterDemoMode: state.details && isNetworkUnreachable(state.details) ? enterDemoMode : undefined
             })
           : null;
     resultContainer.replaceChildren(...(card ? [card] : []));
@@ -414,9 +427,25 @@ function buildAiPromptTab(
     }
   });
 
+  // Set once the user explicitly chooses "Continue in Demo Mode" on a
+  // network-unreachable error (see buildAiErrorCard below) - never on
+  // its own, and never claims the user is authenticated (task: "Do NOT
+  // pretend that the user is authenticated"). Purely a label: it does
+  // not change what AICommandPipeline does - a deterministic instruction
+  // ("Build a wall", a whole-house description) already never touches
+  // the network either way (see houseIntent.ts/deterministicIntent.ts),
+  // this only sets the user's expectation that anything needing the
+  // real AI provider will fail again until the connection is back.
+  const demoModeBadge = el("span", { className: "ai-panel__demo-badge", text: "Demo Mode" });
+  demoModeBadge.hidden = true;
+  function enterDemoMode(): void {
+    demoModeBadge.hidden = false;
+  }
+
   const header = el("div", { className: "ai-panel__header" }, [
     el("span", { className: "ai-panel__mark", text: "✦", attrs: { "aria-hidden": "true" } }),
-    el("span", { className: "ai-panel__title", text: "EAVARA AI" })
+    el("span", { className: "ai-panel__title", text: "EAVARA AI" }),
+    demoModeBadge
   ]);
 
   const element = el("div", { className: "command-bar__column ai-panel" }, [

@@ -119,6 +119,18 @@ button {
  */
 .app-shell {
   width: 100%;
+  /* Without this, the shell's one implicit grid column defaults to
+     `min-width: auto` - it refuses to shrink below its widest row's own
+     min-content width (the header/mainnav/ribbon's un-shrunk button
+     rows). On a phone-width viewport that widest row is wider than the
+     screen, so the whole shell silently rendered past the edge - caught
+     only by index.html's `overflow-x: hidden` on html/body, with no
+     scrollbar and no way to reach the clipped part. `minmax(0, 1fr)`
+     lets the column actually respect the viewport width, so each row's
+     own `overflow-x: auto` (header/mainnav/ribbon/command-bar tabs) gets
+     a real, viewport-sized box to scroll within instead of overflowing
+     past it. */
+  grid-template-columns: minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
   display: grid;
@@ -2030,6 +2042,26 @@ button {
   color: var(--color-brand);
 }
 
+/* Shown only after the user explicitly picks "Continue in Demo Mode" on
+   a network-unreachable AI error (see commandBar.ts's enterDemoMode) -
+   an honest label, never implying the user is signed in or that Gemini
+   is being called. */
+.ai-panel__demo-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+}
+
+.ai-panel__demo-badge[hidden] {
+  display: none;
+}
+
 /* Example instructions (task section 20) - a starting point shown only
    while the input is empty and idle (see commandBar.ts's
    updateExamplesVisibility()), never a fixed row of decoration. Each is
@@ -2450,5 +2482,35 @@ button {
      room for its scrollbar inside the fixed ribbon row. */
   .app-ribbon__group-label {
     display: none;
+  }
+}
+
+/* ---------- Phone-width fixes (urgent APK milestone) ---------- */
+/* Everything above already scrolls its own row instead of overflowing
+   the page (see .app-shell's grid-template-columns: minmax(0, 1fr) -
+   the actual root cause of "doesn't fit on mobile": without it, the
+   header/mainnav/ribbon's un-shrunk content forced the whole shell
+   wider than the viewport, silently clipped by index.html's
+   overflow-x: hidden with no way to reach it). This block only handles
+   the one component that was still genuinely too CRAMPED, not clipped,
+   at a real phone width: Construction Method's side-by-side step
+   list + detail, which leaves the detail pane a sliver once the list's
+   fixed 220px is subtracted from a ~360-390px screen. */
+@media (max-width: 600px) {
+  .construction-method__body {
+    flex-direction: column;
+  }
+
+  .construction-method__list {
+    width: 100%;
+    max-height: 160px;
+  }
+
+  .construction-method__detail {
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+    padding-left: 0;
+    padding-top: var(--space-3);
+    max-height: none;
   }
 }

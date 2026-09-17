@@ -155,6 +155,12 @@ export function createAuthDialog(options: AuthDialogOptions): AuthDialog {
       mode = "sign-in";
       submitted = false;
       reason.textContent = why ?? DEFAULT_REASON;
+      // The AI assistant alone has a real fallback (Demo Mode - see
+      // AiPromptController.isNetworkUnreachable/commandBar.ts): skipping
+      // sign-in elsewhere (saving, opening a project) just means those
+      // features stay unavailable, so only this one reason gets the
+      // more specific label.
+      skip.textContent = why === "Sign in to use the AI assistant." ? "Continue in Demo Mode" : "Continue without an account";
       overlay.hidden = false;
       render();
       email.focus();
