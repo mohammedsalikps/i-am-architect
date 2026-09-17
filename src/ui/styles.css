@@ -745,13 +745,13 @@ button {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  min-width: 60px;
+  gap: 3px;
+  min-width: 62px;
   flex-shrink: 0;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
-  padding: 3px 6px;
+  padding: 2px 6px;
   cursor: pointer;
   color: var(--color-text);
   transition: background-color 0.12s ease, border-color 0.12s ease, transform 0.12s ease, box-shadow 0.12s ease;
@@ -787,12 +787,16 @@ button {
   color: var(--color-accent);
 }
 
+/* Sized to be the card's dominant element (task: "icon clearly visible") -
+   28px is as large as this tile can go without the label or the group
+   caption below it pushing the group past --ribbon-height (see the
+   layout math in this rule's own history). */
 .app-ribbon__icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius-md);
   background: var(--color-accent-soft);
   border: 1px solid var(--color-border);
@@ -807,8 +811,8 @@ button {
    not-yet-drawn tool's plain-text iconFor() letters are untouched by
    this - it only targets an actual injected <svg>. */
 .app-ribbon__icon svg {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   stroke: currentColor;
 }
 
@@ -820,6 +824,7 @@ button {
 
 .app-ribbon__label {
   font-size: 10.5px;
+  font-weight: 500;
   color: var(--color-text-muted);
   white-space: nowrap;
 }

@@ -168,7 +168,11 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
     return ROOM_PRESETS.map((preset) => ({
       id: `room-preset:${preset.name}`,
       label: preset.name,
-      icon: iconFor(preset.name),
+      // Every preset places an ordinary "room" element (roomPresets.ts) -
+      // the same room icon for all of them is accurate, not a
+      // simplification, and replaces the two-letter fallback ("LR", "Ma", ...)
+      // this was the last ribbon tool still showing (Phase 2).
+      icon: constructionIconSvg("room") ?? iconFor(preset.name),
       title: `Click, then click in the viewport to place ${withArticle(preset.name)} (${preset.length} × ${preset.width} m)`,
       group,
       run: () => actions.addRoom(preset),
