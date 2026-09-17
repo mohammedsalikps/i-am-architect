@@ -53,6 +53,8 @@ export interface AiPromptState {
   notes: string | null;
   /** What got created, for the result card - null when nothing was (an edit-only instruction, or a failed attempt). */
   summary: AiBuildSummary | null;
+  /** What got MODIFIED, for the result card's "Design updated" variant - null when `summary` is present (a response that created anything shows the CREATE card, never both) or when nothing was successfully changed. */
+  updateSummary: AiUpdateSummary | null;
   /** The original, unfiltered error text `message` was simplified from - null unless it actually differs (nothing to hide behind "Show details" otherwise). Developer/debugging detail only - never shown by default. */
   details: string | null;
   /** Present only for a successful whole-house/design-intent response (see AIPipelineResult.houseSummary) - lets the result card show a structured architectural summary (footprint, room breakdown, element count) instead of only the generic byType/notes text. Null for every other kind of response. */
@@ -64,7 +66,15 @@ export type AiPromptListener = (state: AiPromptState) => void;
 /** What AiPromptController delegates the actual work to - `AIService.submit` in the running app, a fake async function in tests. */
 export type AiInstructionSubmitter = (instruction: string) => Promise<AIPipelineResult>;
 
-const IDLE_STATE: AiPromptState = { status: "idle", message: null, notes: null, summary: null, details: null, houseSummary: null };
+const IDLE_STATE: AiPromptState = {
+  status: "idle",
+  message: null,
+  notes: null,
+  summary: null,
+  updateSummary: null,
+  details: null,
+  houseSummary: null
+};
 
 /**
  * Raw text substrings that mark a message as an internal/technical
@@ -172,6 +182,41 @@ export function summarizeCreatedObjects(
   return { total: objectIds.length, byType, objectIds };
 }
 
+/** What a successful, create-free AI response modified - the "Design updated" counterpart to summarizeCreatedObjects()'s "Design generated". */
+export interface AiUpdateSummary {
+  total: number;
+  objectIds: string[];
+}
+
+/**
+ * Pure and exported for the same reason summarizeCreatedObjects() is.
+ * The AI provider is instructed to only ever emit "<type>.add" or
+ * "update_object" (see ai/providers/promptSchema.ts's own "Supported
+ * commands" line), but CommandExecutor itself accepts any "<type>.update"
+ * too (SUPPORTED_ACTIONS includes "update" generally) - so, like
+ * summarizeCreatedObjects()'s generic ".add" check, this recognizes
+ * either shape rather than hardcoding just "update_object". Deduplicates
+ * by objectId: an instruction that edits the same object twice (e.g. two
+ * separate property changes) still counts as one modified object, not
+ * two.
+ */
+export function summarizeUpdatedObjects(outcomes: readonly { command: unknown; result: { success: boolean; objectId?: string } }[]): AiUpdateSummary | null {
+  const objectIds: string[] = [];
+  for (const outcome of outcomes) {
+    if (!outcome.result.success || !outcome.result.objectId) {
+      continue;
+    }
+    const type = commandTypeOf(outcome.command);
+    if (type !== "update_object" && !type?.endsWith(".update")) {
+      continue;
+    }
+    if (!objectIds.includes(outcome.result.objectId)) {
+      objectIds.push(outcome.result.objectId);
+    }
+  }
+  return objectIds.length === 0 ? null : { total: objectIds.length, objectIds };
+}
+
 /**
  * Decides whether one keydown in the AI Prompt input should submit.
  * DOM-free (it takes only the two fields it reads) so the rule is
@@ -277,7 +322,7 @@ export class AiPromptController {
       return;
     }
 
-    this.setState({ status: "submitting", message: null, notes: null, summary: null, details: null, houseSummary: null });
+    this.setState({ status: "submitting", message: null, notes: null, summary: null, updateSummary: null, details: null, houseSummary: null });
 
     let result: AIPipelineResult;
     try {
@@ -290,6 +335,7 @@ export class AiPromptController {
         message: friendly,
         notes: null,
         summary: null,
+        updateSummary: null,
         details: friendly === raw ? null : raw,
         houseSummary: null
       });
@@ -297,6 +343,10 @@ export class AiPromptController {
     }
 
     const summary = result.success ? summarizeCreatedObjects(result.outcomes) : null;
+    // A response that created anything shows the CREATE card - MODIFY is
+    // only its own distinct card when nothing was created at all (task:
+    // "distinguish between CREATE / MODIFY / ANALYZE").
+    const updateSummary = result.success && !summary ? summarizeUpdatedObjects(result.outcomes) : null;
     const rawMessage = summarizeResult(result);
     const friendlyMessage = friendlyAiErrorMessage(rawMessage);
     this.setState({
@@ -304,11 +354,14 @@ export class AiPromptController {
       message: friendlyMessage,
       notes: result.notes ?? null,
       summary,
+      updateSummary,
       details: friendlyMessage === rawMessage ? null : rawMessage,
       houseSummary: (result.success && result.houseSummary) || null
     });
     if (summary) {
       this.onCreated?.(summary.objectIds);
+    } else if (updateSummary) {
+      this.onCreated?.(updateSummary.objectIds);
     }
   }
 

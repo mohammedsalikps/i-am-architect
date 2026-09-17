@@ -4,12 +4,20 @@ import { AssetLoader } from "../assets/AssetLoader";
 import { getAssetDefinition } from "../../engine/assets/catalog";
 import type { AssetDefinition } from "../../engine/assets/catalog";
 import type { PlacementHudState } from "../../ui/placementHud";
+import type { AssetPlacementSnapResult } from "../../engine/snapping/assetPlacementSnapper";
+
+/** The narrow shape this module needs from createAssetPlacementSnapper() - structural, so a test double never needs the real engine/snapping wiring. */
+export interface AssetPlacementSnapperLike {
+  snap(candidate: { x: number; z: number }, dimensions: { width: number; height: number; depth: number }, rotationRadians: number): AssetPlacementSnapResult;
+}
 
 export interface AssetPlacementPreviewOptions {
   scene: THREE.Scene;
   camera: THREE.Camera;
   canvas: HTMLCanvasElement;
   placementController: PlacementController;
+  /** Initial-placement snapping (Phase 6) - see engine/snapping/assetPlacementSnapper.ts for why this is a separate adapter from the manipulation-time one. */
+  snapper: AssetPlacementSnapperLike;
   onHudChange(state: PlacementHudState | null): void;
 }
 
@@ -22,6 +30,16 @@ export interface AssetPlacementPreview {
    * itself calls CommandExecutor.
    */
   getCurrentRotation(): number;
+  /**
+   * The preview's current (already-snapped) ground position, read at the
+   * moment of a confirmed placement click and used INSTEAD OF
+   * PlacementController's own raw click point - so what actually gets
+   * placed matches exactly what was previewed and snapped, not the raw,
+   * unsnapped point under the cursor. Null before the first pointermove
+   * (or when nothing is armed) - main.ts falls back to the raw click
+   * point in that case.
+   */
+  getCurrentPosition(): { x: number; z: number } | null;
   /** Removes every listener this module added and any in-scene preview - main.ts constructs one for the app's lifetime, so this exists mainly for completeness/tests. */
   dispose(): void;
 }
@@ -96,7 +114,10 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
   let rotationSteps = 0;
   /** Bumped on every arm/disarm/tool-switch so a load that resolves after the tool moved on is discarded - the same pattern AssetLayer.ts's own requestId already uses. */
   let generation = 0;
+  /** The raw (unsnapped) cursor ground point - what a fresh rotation re-snaps from. */
   let lastPoint: THREE.Vector3 | null = null;
+  /** The last computed placement position (after snapping) - what positionPreview()/getCurrentPosition() actually use. */
+  let lastSnapped: AssetPlacementSnapResult | null = null;
 
   function groundPointFor(event: PointerEvent): THREE.Vector3 | null {
     const rect = options.canvas.getBoundingClientRect();
@@ -125,22 +146,35 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
       label: armedDefinition.label,
       dimensions: armedDefinition.defaultDimensions,
       rotationDegrees: rotationSteps * 90,
-      anchor: screenAnchorFor(lastPoint)
+      anchor: screenAnchorFor(lastPoint),
+      snapped: lastSnapped?.snapped ?? false
     });
   }
 
   /** Same floor-anchor convention as the eventual real asset (createAsset.ts's own position.y = dimensions.height/2), so there is no visual "pop" the instant a confirmed placement becomes the real object. */
-  function positionPreview(point: THREE.Vector3): void {
+  function positionPreview(x: number, z: number): void {
     if (!previewGroup || !armedDefinition) {
       return;
     }
-    previewGroup.position.set(point.x, armedDefinition.defaultDimensions.height / 2, point.z);
+    previewGroup.position.set(x, armedDefinition.defaultDimensions.height / 2, z);
   }
 
   function applyRotation(): void {
     if (previewGroup) {
       previewGroup.rotation.y = rotationSteps * ROTATION_STEP;
     }
+  }
+
+  /** Re-snaps `lastPoint` against the armed asset's current rotation, positions the preview at the result, and refreshes the HUD - the one place placement position ever changes, so cursor movement and in-place rotation always agree on where "here" is. */
+  function updatePlacement(): void {
+    if (!armedDefinition || !lastPoint) {
+      lastSnapped = null;
+      emitHud();
+      return;
+    }
+    lastSnapped = options.snapper.snap({ x: lastPoint.x, z: lastPoint.z }, armedDefinition.defaultDimensions, rotationSteps * ROTATION_STEP);
+    positionPreview(lastSnapped.position.x, lastSnapped.position.z);
+    emitHud();
   }
 
   function clearPreviewGroup(): void {
@@ -158,6 +192,7 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
     armedDefinition = definition;
     rotationSteps = 0; // every new placement session starts at 0 degrees
     lastPoint = null;
+    lastSnapped = null;
     emitHud();
 
     if (!definition) {
@@ -195,8 +230,8 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
         previewGroup = group;
         options.scene.add(group);
         applyRotation();
-        if (lastPoint) {
-          positionPreview(lastPoint);
+        if (lastSnapped) {
+          positionPreview(lastSnapped.position.x, lastSnapped.position.z);
         }
         options.placementController.setGhostVisible(false);
       })
@@ -219,8 +254,7 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
       return;
     }
     lastPoint = point;
-    positionPreview(point);
-    emitHud();
+    updatePlacement();
   };
   options.canvas.addEventListener("pointermove", handlePointerMove);
 
@@ -231,12 +265,13 @@ export function createAssetPlacementPreview(options: AssetPlacementPreviewOption
     event.preventDefault();
     rotationSteps = (rotationSteps + (event.shiftKey ? 3 : 1)) % 4;
     applyRotation();
-    emitHud();
+    updatePlacement(); // rotating changes the asset's own footprint corners, so re-snap at the same cursor point
   };
   window.addEventListener("keydown", handleKeyDown);
 
   return {
     getCurrentRotation: () => rotationSteps * ROTATION_STEP,
+    getCurrentPosition: () => (lastSnapped ? { x: lastSnapped.position.x, z: lastSnapped.position.z } : null),
     dispose: () => {
       unsubscribe();
       options.canvas.removeEventListener("pointermove", handlePointerMove);

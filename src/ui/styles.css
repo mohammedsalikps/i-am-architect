@@ -1349,6 +1349,21 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* Shown only while the current placement point actually snapped to
+   something (a grid line, a corner/endpoint, an alignment) - the same
+   accent color the ribbon/asset-card active states already use, so
+   "snapped" reads as a positive, expected state rather than a warning. */
+.placement-hud__snap {
+  margin-top: 2px;
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.placement-hud__snap[hidden] {
+  display: none;
+}
+
 /* ---------- Left rail + hierarchy ---------- */
 
 .sidebar-rail {

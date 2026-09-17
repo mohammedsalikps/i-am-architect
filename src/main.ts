@@ -24,6 +24,8 @@ import type { AssetDefinition } from "./engine/assets/catalog";
 import type { PlacementTool } from "./scene/placement/PlacementController";
 import { createAssetPlacementPreview } from "./scene/placement/assetPlacementPreview";
 import type { AssetPlacementPreview } from "./scene/placement/assetPlacementPreview";
+import { createAssetPlacementSnapper } from "./engine/snapping/assetPlacementSnapper";
+import { createElementPlacementHud } from "./scene/placement/elementPlacementHud";
 import { createPlacementHud } from "./ui/placementHud";
 import { roomPresetOptions } from "./engine/elements/roomPresets";
 import type { CreateElementOptions } from "./engine/elements/createElement";
@@ -366,16 +368,21 @@ function addAsset(assetId: string): void {
   if (!definition) {
     return;
   }
-  armPlacement(`asset:${assetId}`, definition.label, assetGhostSize(definition), (point) => ({
-    type: "asset.add",
-    // The preview's own current rotation (R/Shift+R while armed - see
+  armPlacement(`asset:${assetId}`, definition.label, assetGhostSize(definition), (point) => {
+    // The preview's own current (already-snapped) position and rotation
+    // (R/Shift+R, and Phase 6 initial-placement snapping - see
     // scene/placement/assetPlacementPreview.ts), read at the moment of
     // this confirmed click so the real placed object matches exactly
-    // what was previewed. Falls back to 0 if the preview module hasn't
-    // been constructed yet (getViewportContext() only exists once
-    // sceneManager.current is set - see below).
-    asset: { assetId, position: { x: point.x, z: point.z }, rotation: assetPlacementPreview?.getCurrentRotation() ?? 0 }
-  }));
+    // what was previewed - never the raw, unsnapped click point. Falls
+    // back to the raw point/0° only if the preview module hasn't been
+    // constructed yet or has no position yet (getViewportContext() only
+    // exists once sceneManager.current is set - see below).
+    const position = assetPlacementPreview?.getCurrentPosition() ?? { x: point.x, z: point.z };
+    return {
+      type: "asset.add",
+      asset: { assetId, position, rotation: assetPlacementPreview?.getCurrentRotation() ?? 0 }
+    };
+  });
 }
 
 /** Whether the selection is an object Paint can repaint - any construction object. */
@@ -713,6 +720,22 @@ sceneManager.current.placementController.subscribe((tool) => {
 const placementHud = createPlacementHud();
 document.body.append(placementHud.element);
 assetPlacementPreview = createAssetPlacementPreview({
+  ...sceneManager.current.getViewportContext(),
+  placementController: sceneManager.current.placementController,
+  // Phase 6: initial-placement snapping against the real construction
+  // elements already in the project - see engine/snapping/
+  // assetPlacementSnapper.ts for why this is a separate adapter from
+  // the manipulation-time createStoreSnapper(), not a change to it.
+  snapper: createAssetPlacementSnapper(objectStores, snapSettings),
+  onHudChange: placementHud.update
+});
+
+// Phase 6: the same compact placement HUD, extended to every other
+// placement tool (wall/pillar/beam/slab/door/window/roof/stair/room/...) -
+// the two modules never both claim the same armed tool (see
+// elementPlacementHud.ts's own ASSET_TOOL_PREFIX check), so sharing one
+// HUD element between them is safe.
+createElementPlacementHud({
   ...sceneManager.current.getViewportContext(),
   placementController: sceneManager.current.placementController,
   onHudChange: placementHud.update

@@ -1,7 +1,7 @@
 import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
 import { AiPromptController, isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
-import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState } from "../engine/ai/AiPromptController";
+import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState, AiUpdateSummary } from "../engine/ai/AiPromptController";
 import type { HouseDesignSummary } from "../engine/ai/houseDesign.ts";
 
 function pluralize(count: number, noun: string): string {
@@ -93,22 +93,28 @@ function buildAiResultCard(summary: AiBuildSummary, notes: string | null, houseS
     );
   }
 
+  children.push(buildResultActions(actions, "Frame everything this response just created", "Select the first object this response created, and open its properties"));
+  return el("div", { className: "ai-result" }, children);
+}
+
+/** The View/Modify/Undo/Save row both the CREATE and MODIFY result cards share - only the first two buttons' tooltips differ, since "created" and "modified" are different verbs for the same real actions. */
+function buildResultActions(actions: AiResultActions, focusTitle: string, reviewTitle: string): HTMLElement {
   const focusButton = el("button", {
     className: "toolbar-button toolbar-button--primary ai-result__action",
     text: "View",
-    attrs: { type: "button", title: "Frame everything this response just created" }
+    attrs: { type: "button", title: focusTitle }
   });
   focusButton.addEventListener("click", actions.onFocusBuilding);
   const reviewButton = el("button", {
     className: "toolbar-button ai-result__action",
     text: "Modify",
-    attrs: { type: "button", title: "Select the first object this response created, and open its properties" }
+    attrs: { type: "button", title: reviewTitle }
   });
   reviewButton.addEventListener("click", actions.onReviewChanges);
   const undoButton = el("button", {
     className: "toolbar-button ai-result__action",
     text: "Undo",
-    attrs: { type: "button", title: "Undo this generation" }
+    attrs: { type: "button", title: "Undo this AI change" }
   });
   undoButton.addEventListener("click", actions.onUndo);
   const saveButton = el("button", {
@@ -117,7 +123,28 @@ function buildAiResultCard(summary: AiBuildSummary, notes: string | null, houseS
     attrs: { type: "button", title: "Save the project" }
   });
   saveButton.addEventListener("click", actions.onSave);
-  children.push(el("div", { className: "ai-result__actions" }, [focusButton, reviewButton, undoButton, saveButton]));
+  return el("div", { className: "ai-result__actions" }, [focusButton, reviewButton, undoButton, saveButton]);
+}
+
+/**
+ * "EAVARA AI - Design updated" - the MODIFY counterpart to
+ * buildAiResultCard()'s CREATE card (task section 15: "distinguish
+ * between CREATE / MODIFY / ANALYZE"), shown instead of it whenever a
+ * successful response changed existing objects but created none.
+ * `notes`, when the provider supplied any, is its own explanation of
+ * what it changed (e.g. "Made the living room wider"); the object count
+ * below it is always real, derived from summarizeUpdatedObjects() -
+ * never invented.
+ */
+function buildAiUpdateResultCard(updateSummary: AiUpdateSummary, notes: string | null, actions: AiResultActions): HTMLElement {
+  const eyebrow = el("p", { className: "ai-result__eyebrow", text: "EAVARA AI" });
+  const heading = el("p", { className: "ai-result__heading", text: "Design updated" });
+  const children: HTMLElement[] = [eyebrow, heading];
+  if (notes) {
+    children.push(el("p", { className: "ai-result__line ai-result__line--notes", text: notes }));
+  }
+  children.push(el("p", { className: "ai-result__line", text: `${pluralize(updateSummary.total, "object")} updated.` }));
+  children.push(buildResultActions(actions, "Frame everything this response just changed", "Select the first object this response changed, and open its properties"));
   return el("div", { className: "ai-result" }, children);
 }
 
@@ -280,6 +307,7 @@ function buildAiPromptTab(
   const controller = new AiPromptController(onSubmitAiInstruction, onFocusCreated);
   controller.subscribe((state) => {
     const summary = state.status === "success" ? state.summary : null;
+    const updateSummary = state.status === "success" ? state.updateSummary : null;
     const card = summary
       ? buildAiResultCard(summary, state.notes, state.houseSummary, {
           onFocusBuilding: () => onFocusCreated(summary.objectIds),
@@ -292,9 +320,21 @@ function buildAiPromptTab(
           onUndo,
           onSave: onSaveProject
         })
-      : state.status === "error" && state.message
-        ? buildAiErrorCard(state.message, state.details)
-        : null;
+      : updateSummary
+        ? buildAiUpdateResultCard(updateSummary, state.notes, {
+            onFocusBuilding: () => onFocusCreated(updateSummary.objectIds),
+            onReviewChanges: () => {
+              const firstId = updateSummary.objectIds[0];
+              if (firstId) {
+                onSelectObject(firstId);
+              }
+            },
+            onUndo,
+            onSave: onSaveProject
+          })
+        : state.status === "error" && state.message
+          ? buildAiErrorCard(state.message, state.details)
+          : null;
     resultContainer.replaceChildren(...(card ? [card] : []));
     renderAiPromptState(state, input, aiButton, status, card !== null);
     updateExamplesVisibility();

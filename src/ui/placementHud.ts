@@ -3,9 +3,12 @@ import { el } from "./dom";
 export interface PlacementHudState {
   label: string;
   dimensions: { width: number; height: number; depth: number };
-  rotationDegrees: number;
+  /** Omitted for a construction element (wall/pillar/beam/...): none of them support pre-placement rotation, so showing a static, uneditable "Rotation 0°" would be noise rather than information. Present only for an asset, where R/Shift+R actually changes it. */
+  rotationDegrees?: number;
   /** Viewport-relative (client) pixel position to anchor near - the on-screen projection of the ground point under the preview. */
   anchor: { x: number; y: number };
+  /** Whether the current placement point snapped to something (a grid line, a wall corner/endpoint, an alignment) - task section 6/3: "provide a clear indication when an object is snapped." Omitted or false shows no indicator at all, never a misleading one. */
+  snapped?: boolean;
 }
 
 export interface PlacementHud {
@@ -48,7 +51,8 @@ export function createPlacementHud(): PlacementHud {
   const name = el("div", { className: "placement-hud__name" });
   const dimensions = el("div", { className: "placement-hud__dimensions" });
   const rotation = el("div", { className: "placement-hud__rotation" });
-  const panel = el("div", { className: "placement-hud", attrs: { role: "status" } }, [name, dimensions, rotation]);
+  const snapIndicator = el("div", { className: "placement-hud__snap", text: "Snapped" });
+  const panel = el("div", { className: "placement-hud", attrs: { role: "status" } }, [name, dimensions, rotation, snapIndicator]);
   panel.hidden = true;
 
   function update(state: PlacementHudState | null): void {
@@ -60,7 +64,9 @@ export function createPlacementHud(): PlacementHud {
     name.textContent = state.label;
     const { width, height, depth } = state.dimensions;
     dimensions.textContent = `${formatMeters(width)} × ${formatMeters(height)} × ${formatMeters(depth)} m`;
-    rotation.textContent = `Rotation ${state.rotationDegrees}°`;
+    rotation.hidden = state.rotationDegrees === undefined;
+    rotation.textContent = state.rotationDegrees === undefined ? "" : `Rotation ${state.rotationDegrees}°`;
+    snapIndicator.hidden = !state.snapped;
     panel.hidden = false;
 
     const margin = 12;

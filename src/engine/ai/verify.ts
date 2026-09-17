@@ -46,7 +46,7 @@ import type {
 import type { Command } from "../commands/types.ts";
 import type { AIProvider } from "./AIProvider.ts";
 import { AIService } from "./AIService.ts";
-import { AiPromptController, isAiPromptSubmitKey } from "./AiPromptController.ts";
+import { AiPromptController, isAiPromptSubmitKey, summarizeUpdatedObjects } from "./AiPromptController.ts";
 import type { AiPromptState } from "./AiPromptController.ts";
 import { CommandExecutor } from "../commands/CommandExecutor.ts";
 import { WallStore } from "../wall/WallStore.ts";
@@ -1201,7 +1201,7 @@ async function run(): Promise<void> {
     const controller = new AiPromptController(async () => makeResult());
     assertDeepEqual(
       controller.getState(),
-      { status: "idle", message: null, notes: null, summary: null, details: null, houseSummary: null },
+      { status: "idle", message: null, notes: null, summary: null, updateSummary: null, details: null, houseSummary: null },
       "initial state"
     );
   });
@@ -1373,6 +1373,67 @@ async function run(): Promise<void> {
     );
     await failed.submit("Create a wall");
     assertEqual(failed.getState().summary, null, "a failed build has nothing to summarize");
+  });
+
+  // --- CREATE vs MODIFY (Phase 6) ---
+
+  await check("summarizeUpdatedObjects reports what a create-free response modified, deduplicated by id", () => {
+    const summary = summarizeUpdatedObjects([
+      { command: { type: "update_object", objectId: "wall-1", changes: {} }, result: { success: true, objectId: "wall-1" } },
+      // A second edit to the SAME wall - still one modified object, not two.
+      { command: { type: "update_object", objectId: "wall-1", changes: {} }, result: { success: true, objectId: "wall-1" } },
+      { command: { type: "door.update", id: "door-1", changes: {} }, result: { success: true, objectId: "door-1" } },
+      // Failed and create outcomes are never counted as a modify.
+      { command: { type: "update_object", objectId: "wall-2", changes: {} }, result: { success: false } },
+      { command: { type: "wall.add", wall: {} }, result: { success: true, objectId: "wall-3" } }
+    ]);
+    assertTrue(summary !== null, "a response with successful updates has something to summarize");
+    assertEqual(summary?.total, 2, "wall-1 (once) and door-1");
+    assertDeepEqual(summary?.objectIds, ["wall-1", "door-1"], "in outcome order, deduplicated");
+  });
+
+  await check("summarizeUpdatedObjects reports null when nothing was actually modified", () => {
+    assertEqual(summarizeUpdatedObjects([]), null, "no outcomes at all");
+    assertEqual(
+      summarizeUpdatedObjects([{ command: { type: "wall.add", wall: {} }, result: { success: true, objectId: "wall-1" } }]),
+      null,
+      "a create is not a modify"
+    );
+  });
+
+  await check("AiPromptController reports updateSummary (not summary) for a successful create-free response, and still calls onCreated to focus what changed", async () => {
+    const focused: string[][] = [];
+    const controller = new AiPromptController(
+      async () =>
+        makeResult({
+          outcomes: [{ command: { type: "update_object", objectId: "wall-1", changes: {} }, result: { success: true, objectId: "wall-1" } }]
+        }),
+      (objectIds) => focused.push([...objectIds])
+    );
+
+    await controller.submit("Make the wall longer");
+
+    const state = controller.getState();
+    assertEqual(state.summary, null, "nothing was created, so the CREATE card has nothing to show");
+    assertTrue(state.updateSummary !== null, "a successful modify reports an updateSummary");
+    assertEqual(state.updateSummary?.total, 1, "one object modified");
+    assertDeepEqual(state.updateSummary?.objectIds, ["wall-1"], "the modified object's id");
+    assertDeepEqual(focused, [["wall-1"]], "onCreated is still called, so the viewport frames what was modified");
+  });
+
+  await check("a response that both creates and modifies shows the CREATE card, never both at once", async () => {
+    const controller = new AiPromptController(async () =>
+      makeResult({
+        outcomes: [
+          { command: { type: "wall.add", wall: {} }, result: { success: true, objectId: "wall-2" } },
+          { command: { type: "update_object", objectId: "wall-1", changes: {} }, result: { success: true, objectId: "wall-1" } }
+        ]
+      })
+    );
+    await controller.submit("Add a wall and make the other one longer");
+    const state = controller.getState();
+    assertTrue(state.summary !== null, "the create should still be reported");
+    assertEqual(state.updateSummary, null, "updateSummary is suppressed whenever summary (create) is present");
   });
 
   // --- AI Prompt submit key ---
