@@ -1,11 +1,15 @@
 import { createServer } from "./createServer.ts";
-import { readServerConfig } from "./config.ts";
+import { readServerConfig, supabaseUrlWarnings } from "./config.ts";
 import { OpenAIProvider } from "../../src/engine/ai/providers/OpenAIProvider.ts";
 import { GeminiProvider } from "../../src/engine/ai/providers/GeminiProvider.ts";
+import { DEFAULT_ANTHROPIC_EFFORT, DEFAULT_ANTHROPIC_MODEL } from "../../src/engine/ai/providers/anthropicSettings.ts";
+import type { AnthropicFetch } from "../../src/engine/ai/providers/AnthropicProvider.ts";
 import type { AIProvider } from "../../src/engine/ai/AIProvider.ts";
 import { InMemoryProjectStore } from "../../src/engine/project/InMemoryProjectRepository.ts";
 import { InMemoryAuthService } from "./auth/InMemoryAuthService.ts";
 import { SupabaseAuthService } from "./auth/SupabaseAuthService.ts";
+import { checkAuthProvider } from "./supabase/authProviderCheck.ts";
+import type { AuthProviderReport } from "./supabase/authProviderCheck.ts";
 import type { AuthService } from "./auth/AuthService.ts";
 import { SupabaseProjectStore } from "./projects/SupabaseProjectRepository.ts";
 import type { ProjectStore } from "./projects/ProjectStore.ts";
@@ -43,12 +47,39 @@ const nodeFetch = (url: string, init: { method: "POST"; headers: Record<string, 
 
 // AI_PROVIDER (config.ts) decides which one gets constructed - only its
 // own key was read from the environment; see readServerConfig().
-const provider: AIProvider =
-  config.ai.provider === "gemini"
-    ? new GeminiProvider({ apiKey: config.ai.apiKey, fetch: nodeFetch })
-    : new OpenAIProvider({ apiKey: config.ai.apiKey, fetch: nodeFetch });
+// Claude goes through the official Anthropic SDK, which takes the same
+// kind of injected fetch (its own wider signature) - the key reaches it
+// only here, from ANTHROPIC_API_KEY, and never leaves the server. The
+// provider (and so the SDK package) is loaded ONLY when AI_PROVIDER is
+// "anthropic": a Gemini or OpenAI deployment never needs it installed.
+let provider: AIProvider;
+if (config.ai.provider === "anthropic") {
+  const { AnthropicProvider } = await import("../../src/engine/ai/providers/AnthropicProvider.ts");
+  const anthropicFetch: AnthropicFetch = (input, init) => fetch(input, init);
+  provider = new AnthropicProvider({
+    apiKey: config.ai.apiKey,
+    fetch: anthropicFetch,
+    model: config.ai.model,
+    effort: config.ai.effort,
+    // One JSON line per answered Claude request - which model served it and
+    // Anthropic's request id (to find it in the Claude Console), never the
+    // user's instruction, the project or the answer.
+    onMessage: (summary) => console.log(JSON.stringify({ time: new Date().toISOString(), event: "ai.anthropic", ...summary }))
+  });
+} else {
+  provider =
+    config.ai.provider === "gemini"
+      ? new GeminiProvider({ apiKey: config.ai.apiKey, fetch: nodeFetch })
+      : new OpenAIProvider({ apiKey: config.ai.apiKey, fetch: nodeFetch });
+}
+// Names only, never a key: which model a provider runs is what an operator needs to see.
+const providerDescription =
+  config.ai.provider === "anthropic"
+    ? `anthropic (${config.ai.model ?? DEFAULT_ANTHROPIC_MODEL}, effort ${config.ai.effort ?? DEFAULT_ANTHROPIC_EFFORT})`
+    : config.ai.provider;
 
 let authService: AuthService;
+let authProviderCheck: (() => Promise<AuthProviderReport>) | undefined;
 let projectStore: ProjectStore;
 let storageDescription: string;
 if (config.storage.mode === "supabase") {
@@ -59,7 +90,15 @@ if (config.storage.mode === "supabase") {
   const supabase = { url: config.storage.url, anonKey: config.storage.anonKey, fetch: supabaseFetch };
   authService = new SupabaseAuthService(supabase);
   projectStore = new SupabaseProjectStore(supabase);
+  // GET /health/auth: Supabase Auth's own health endpoint only - no token
+  // probes from a public route (`npm run check:supabase` runs those locally).
+  authProviderCheck = () => checkAuthProvider(supabase, { tokenProbes: false });
   storageDescription = `Accounts and projects: Supabase (${new URL(config.storage.url).host}).`;
+  // A SUPABASE_URL that validates but doesn't look like a project URL is
+  // the first thing to rule out when sign-in fails - say so at startup.
+  for (const warning of supabaseUrlWarnings(config.storage.url)) {
+    console.warn(`Warning: ${warning}`);
+  }
 } else {
   authService = new InMemoryAuthService();
   projectStore = new InMemoryProjectStore();
@@ -72,14 +111,15 @@ const server = createServer({
   authService,
   projectStore,
   // One JSON line per request - route, status, timing, signed-in or not. Never tokens, emails or bodies.
-  requestLog: (line) => console.log(line)
+  requestLog: (line) => console.log(line),
+  authProviderCheck
 });
 
 server.listen(config.port, () => {
   console.log(`Backend listening on port ${config.port}${config.production ? " (production)" : ""}`);
   console.log(`Accepting browser requests from: ${config.frontendOrigins.join(", ")}`);
   console.log(storageDescription);
-  console.log(`AI provider: ${config.ai.provider}.`);
+  console.log(`AI provider: ${providerDescription}.`);
 });
 
 // Hosts stop containers with SIGTERM: finish in-flight requests, then exit.

@@ -1,7 +1,7 @@
 import { AuthError } from "./AuthService.ts";
 import type { AuthService, AuthSession, AuthUser, SignUpOutcome } from "./AuthService.ts";
-import { SupabaseUnavailableError, supabaseErrorCode, supabaseMessage, supabaseRequest } from "../supabase/supabaseHttp.ts";
-import type { SupabaseConfig } from "../supabase/supabaseHttp.ts";
+import { SupabaseUnavailableError, describeUpstream, supabaseErrorCode, supabaseMessage, supabaseRequest } from "../supabase/supabaseHttp.ts";
+import type { SupabaseConfig, UpstreamShape } from "../supabase/supabaseHttp.ts";
 
 export interface SupabaseAuthServiceOptions extends SupabaseConfig {
   /** Defaults to Date.now - used only when Supabase sends expires_in without expires_at. */
@@ -19,6 +19,43 @@ function toUser(value: unknown): AuthUser | null {
     return null;
   }
   return { id: value.id, email: value.email };
+}
+
+/**
+ * Why a 200 from the sign-in service couldn't be used, for the log:
+ * - not-supabase-auth: the body wasn't JSON (a web page) - SUPABASE_URL
+ *   points at something other than Supabase Auth.
+ * - unexpected-json: JSON, but nothing of a session or user in it.
+ * - missing-session-fields: a session without its access or refresh token.
+ * - missing-user-fields: no user, or a user without an id or email.
+ */
+export type AuthFailureCategory = "not-supabase-auth" | "unexpected-json" | "missing-session-fields" | "missing-user-fields";
+
+const has = (value: unknown): string => (typeof value === "string" && value.length > 0 ? "yes" : "no");
+
+/** Which user fields an answer has - "yes"/"no" only, never a value. */
+function userFields(user: unknown): string {
+  const record = isPlainObject(user) ? user : {};
+  return `user id ${has(record.id)}, user email ${has(record.email)}`;
+}
+
+function sessionFindings(payload: unknown): { fields: string; category: AuthFailureCategory } {
+  const record = isPlainObject(payload) ? payload : {};
+  const fields =
+    `access_token ${has(record.access_token)}, refresh_token ${has(record.refresh_token)}, ` +
+    `user ${isPlainObject(record.user) ? "yes" : "no"}, ${userFields(record.user)}`;
+  if (!isPlainObject(payload) || !("access_token" in payload || "refresh_token" in payload || "user" in payload)) {
+    return { fields, category: "unexpected-json" };
+  }
+  if (typeof payload.access_token !== "string" || typeof payload.refresh_token !== "string") {
+    return { fields, category: "missing-session-fields" };
+  }
+  return { fields, category: "missing-user-fields" };
+}
+
+function userFindings(payload: unknown): { fields: string; category: AuthFailureCategory } {
+  const unexpected = !isPlainObject(payload) || !("id" in payload || "email" in payload);
+  return { fields: userFields(payload), category: unexpected ? "unexpected-json" : "missing-user-fields" };
 }
 
 /**
@@ -42,10 +79,10 @@ export class SupabaseAuthService implements AuthService {
   }
 
   async signUp(email: string, password: string): Promise<SignUpOutcome> {
-    const { status, payload } = await this.call("POST", "/auth/v1/signup", { body: { email, password } });
+    const { status, payload, shape } = await this.call("POST", "/auth/v1/signup", { body: { email, password } });
     if (status === 200 || status === 201) {
       if (isPlainObject(payload) && typeof payload.access_token === "string") {
-        return { session: this.session(payload) };
+        return { session: this.session(payload, shape) };
       }
       // Email confirmation is on. Supabase answers an address that is
       // already registered the same way, so this never reveals whether an
@@ -56,19 +93,19 @@ export class SupabaseAuthService implements AuthService {
   }
 
   async signIn(email: string, password: string): Promise<AuthSession> {
-    const { status, payload } = await this.call("POST", "/auth/v1/token?grant_type=password", { body: { email, password } });
+    const { status, payload, shape } = await this.call("POST", "/auth/v1/token?grant_type=password", { body: { email, password } });
     if (status === 200) {
-      return this.session(payload);
+      return this.session(payload, shape);
     }
     throw this.refusal(status, payload, "Could not sign in.");
   }
 
   async refresh(refreshToken: string): Promise<AuthSession> {
-    const { status, payload } = await this.call("POST", "/auth/v1/token?grant_type=refresh_token", {
+    const { status, payload, shape } = await this.call("POST", "/auth/v1/token?grant_type=refresh_token", {
       body: { refresh_token: refreshToken }
     });
     if (status === 200) {
-      return this.session(payload);
+      return this.session(payload, shape);
     }
     if (status >= 400 && status < 500 && status !== 429) {
       throw new AuthError(401, EXPIRED);
@@ -85,11 +122,11 @@ export class SupabaseAuthService implements AuthService {
   }
 
   async getUser(accessToken: string): Promise<AuthUser> {
-    const { status, payload } = await this.call("GET", "/auth/v1/user", { accessToken });
+    const { status, payload, shape } = await this.call("GET", "/auth/v1/user", { accessToken });
     if (status === 200) {
       const user = toUser(payload);
       if (!user) {
-        throw new AuthError(502, "The sign-in service sent a malformed user.");
+        throw new AuthError(502, "The sign-in service sent a malformed user.", this.diagnose(shape, userFindings(payload)));
       }
       return user;
     }
@@ -103,7 +140,7 @@ export class SupabaseAuthService implements AuthService {
     method: "GET" | "POST",
     path: string,
     options: { body?: unknown; accessToken?: string }
-  ): Promise<{ status: number; payload: unknown }> {
+  ): Promise<{ status: number; payload: unknown; shape: UpstreamShape }> {
     try {
       return await supabaseRequest(this.config, method, path, options);
     } catch (error) {
@@ -114,14 +151,20 @@ export class SupabaseAuthService implements AuthService {
     }
   }
 
-  private session(payload: unknown): AuthSession {
+  /** The log diagnostic for an unusable 200: what answered, which fields it had, and the failure category - see AuthFailureCategory. */
+  private diagnose(shape: UpstreamShape, findings: { fields: string; category: AuthFailureCategory }): string {
+    const category = shape.body === "not-json" ? "not-supabase-auth" : findings.category;
+    return `${describeUpstream(this.config, shape)}; fields: ${findings.fields}; category: ${category}`;
+  }
+
+  private session(payload: unknown, shape: UpstreamShape): AuthSession {
     if (
       !isPlainObject(payload) ||
       typeof payload.access_token !== "string" ||
       typeof payload.refresh_token !== "string" ||
       !toUser(payload.user)
     ) {
-      throw new AuthError(502, "The sign-in service sent a malformed session.");
+      throw new AuthError(502, "The sign-in service sent a malformed session.", this.diagnose(shape, sessionFindings(payload)));
     }
     const expiresAt =
       typeof payload.expires_at === "number"

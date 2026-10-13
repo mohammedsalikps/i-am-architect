@@ -4,10 +4,13 @@
  * browser, and no secret from it is ever echoed back in an error message.
  *
  * AI_PROVIDER chooses which real AIProvider server.ts constructs -
- * "openai" (the default, unchanged from before AI_PROVIDER existed) or
- * "gemini". Only the chosen provider's own key is required: OPENAI_API_KEY
- * for "openai", GEMINI_API_KEY for "gemini" - the other is never read. See
- * src/engine/ai/providers/OpenAIProvider.ts and GeminiProvider.ts.
+ * "openai" (the default, unchanged from before AI_PROVIDER existed),
+ * "gemini", or "anthropic" (Claude). Only the chosen provider's own key is
+ * required: OPENAI_API_KEY for "openai", GEMINI_API_KEY for "gemini",
+ * ANTHROPIC_API_KEY for "anthropic" - the others are never read. Claude
+ * also takes optional ANTHROPIC_MODEL and ANTHROPIC_EFFORT. See
+ * src/engine/ai/providers/OpenAIProvider.ts, GeminiProvider.ts and
+ * AnthropicProvider.ts.
  *
  * Accounts and projects are kept in ONE of two places:
  *
@@ -28,7 +31,12 @@
  * non-local origin must use https.
  */
 
-export type StorageConfig = { mode: "supabase"; url: string; anonKey: string } | { mode: "memory" };
+import { describeProjectUrl } from "./supabase/supabaseHttp.ts";
+// The SDK-free settings module - config never loads the Anthropic SDK.
+import { ANTHROPIC_EFFORTS } from "../../src/engine/ai/providers/anthropicSettings.ts";
+import type { AnthropicEffort } from "../../src/engine/ai/providers/anthropicSettings.ts";
+
+export type StorageConfig ={ mode: "supabase"; url: string; anonKey: string } | { mode: "memory" };
 
 /**
  * Which real AIProvider to construct, and its own (only) API key -
@@ -37,7 +45,11 @@ export type StorageConfig = { mode: "supabase"; url: string; anonKey: string } |
  * the unused provider's key is never read from the environment at all,
  * so it need not even be set.
  */
-export type AIProviderConfig = { provider: "openai"; apiKey: string } | { provider: "gemini"; apiKey: string };
+export type AIProviderConfig =
+  | { provider: "openai"; apiKey: string }
+  | { provider: "gemini"; apiKey: string }
+  /** Claude, through the Anthropic SDK. `model` (ANTHROPIC_MODEL) and `effort` (ANTHROPIC_EFFORT) are optional - AnthropicProvider defaults them. */
+  | { provider: "anthropic"; apiKey: string; model?: string; effort?: AnthropicEffort };
 
 export interface ServerConfig {
   ai: AIProviderConfig;
@@ -116,7 +128,33 @@ export function parseFrontendOrigins(value: string | undefined): { ok: true; ori
   return { ok: true, origins };
 }
 
-function supabaseUrlProblem(value: string): string | null {
+/**
+ * Warnings - never refusals - for a SUPABASE_URL that passes validation
+ * but doesn't look like a project's API base URL (Supabase dashboard →
+ * Project Settings → API → Project URL, "https://<ref>.supabase.co"):
+ * this server appends /auth/v1/... and /rest/v1/... itself, so any path
+ * sends every request somewhere else. Custom domains are legitimate, hence
+ * a warning. (A dashboard link, or a *.supabase.co URL with a path, is
+ * refused outright by supabaseUrlProblem below.) The messages never
+ * include the value.
+ */
+export function supabaseUrlWarnings(value: string): string[] {
+  const { supabaseHost, hasPath } = describeProjectUrl(value);
+  const warnings: string[] = [];
+  if (!supabaseHost) {
+    warnings.push(
+      "SUPABASE_URL's host is not a *.supabase.co project host. That is fine for a custom domain; otherwise use the Project URL from Supabase → Project Settings → API."
+    );
+  }
+  if (hasPath) {
+    warnings.push(
+      "SUPABASE_URL has a path, query or fragment. Use the bare Project URL (https://<ref>.supabase.co) - this server adds /auth/v1/... itself, so a path sends every sign-in request elsewhere."
+    );
+  }
+  return warnings;
+}
+
+export function supabaseUrlProblem(value: string): string | null {
   let url: URL;
   try {
     url = new URL(value);
@@ -126,6 +164,26 @@ function supabaseUrlProblem(value: string): string | null {
   const local = url.hostname === "localhost" || url.hostname === "127.0.0.1";
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
     return "SUPABASE_URL must use https:// (http:// is allowed only for a local Supabase on localhost).";
+  }
+  // Refusals, not warnings: no Supabase API lives on these, so the server
+  // could only ever fail. The dashboard (supabase.com/dashboard/project/...,
+  // app.supabase.com/project/...) answers every request - sign-in and
+  // refresh included - with HTTP 200 and a web page, which reached users
+  // as "The sign-in service sent a malformed session."
+  const host = url.hostname.toLowerCase();
+  if (host === "supabase.com" || host.endsWith(".supabase.com")) {
+    return (
+      "SUPABASE_URL is a Supabase dashboard or website link, not the project's API URL - the dashboard answers sign-in " +
+      "with a web page. Use Supabase → Project Settings → API → Project URL: https://<ref>.supabase.co, where <ref> is " +
+      "the id after /project/ in the dashboard link."
+    );
+  }
+  const { supabaseHost, hasPath } = describeProjectUrl(value);
+  if (supabaseHost && !local && hasPath) {
+    return (
+      "SUPABASE_URL must be the bare Project URL, https://<ref>.supabase.co, with no path, query or fragment - this " +
+      "server adds /auth/v1/... and /rest/v1/... itself."
+    );
   }
   return null;
 }
@@ -138,8 +196,36 @@ function supabaseUrlProblem(value: string): string | null {
 function readAIProviderConfig(env: Record<string, string | undefined>): { ok: true; ai: AIProviderConfig } | { ok: false; error: string } {
   const raw = env.AI_PROVIDER?.trim().toLowerCase();
   const provider = raw || "openai";
-  if (provider !== "openai" && provider !== "gemini") {
-    return { ok: false, error: 'AI_PROVIDER must be "openai" or "gemini".' };
+  if (provider !== "openai" && provider !== "gemini" && provider !== "anthropic") {
+    return { ok: false, error: 'AI_PROVIDER must be "openai", "gemini" or "anthropic".' };
+  }
+
+  if (provider === "anthropic") {
+    const apiKey = env.ANTHROPIC_API_KEY?.trim();
+    if (!apiKey) {
+      return {
+        ok: false,
+        error:
+          "Missing ANTHROPIC_API_KEY environment variable (AI_PROVIDER=anthropic). Copy backend/.env.example to " +
+          "backend/.env, fill in an Anthropic API key from the Claude Console (Settings -> API keys), and start this " +
+          "server with: node --env-file=.env src/server.ts"
+      };
+    }
+    if (apiKey.startsWith("sk-ant-admin")) {
+      return { ok: false, error: "ANTHROPIC_API_KEY holds an Admin API key, which can't call the Messages API. Use a regular API key." };
+    }
+    const model = env.ANTHROPIC_MODEL?.trim();
+    if (model && !/^claude-[a-z0-9][a-z0-9.-]*$/.test(model)) {
+      return { ok: false, error: 'ANTHROPIC_MODEL must be a Claude model id such as "claude-sonnet-5-5" - or leave it unset for the default.' };
+    }
+    const effort = env.ANTHROPIC_EFFORT?.trim().toLowerCase();
+    if (effort && !ANTHROPIC_EFFORTS.includes(effort as AnthropicEffort)) {
+      return { ok: false, error: `ANTHROPIC_EFFORT must be one of ${ANTHROPIC_EFFORTS.join(", ")} - or leave it unset for the default.` };
+    }
+    return {
+      ok: true,
+      ai: { provider: "anthropic", apiKey, ...(model ? { model } : {}), ...(effort ? { effort: effort as AnthropicEffort } : {}) }
+    };
   }
 
   if (provider === "gemini") {

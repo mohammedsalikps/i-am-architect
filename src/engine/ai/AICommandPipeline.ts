@@ -461,7 +461,10 @@ export class AICommandPipeline {
       };
     }
 
-    const occupied = projectContext.geometry.objects.map((object) => object.aabb);
+    // Ground surfaces (a site's landscape, a path) are what a house stands
+    // on, not obstacles - counting them would push every house off its site.
+    const ground = new Set(projectContext.objects.filter((object) => object.kind === "landscape" || object.kind === "path").map((object) => object.id));
+    const occupied = projectContext.geometry.objects.filter((object) => !ground.has(object.id)).map((object) => object.aabb);
     const planned = planHouseDesign(houseIntent.request, occupied);
     if (!planned.ok) {
       return { success: false, instruction, outcomes: [], errors: [{ stage: "design", message: planned.error }] };

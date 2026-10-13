@@ -3,7 +3,7 @@
 # file describes only the Node backend.
 #
 # No secret belongs in this file. AI_PROVIDER is a plain, non-secret
-# value (which of the two already-implemented AIProvider classes to use -
+# value (which of the already-implemented AIProvider classes to use -
 # see src/engine/ai/providers/); every OTHER environment variable below
 # is declared with `sync: false` and no value: Render asks for each value
 # when the Blueprint is applied, and stores it encrypted in the dashboard
@@ -27,13 +27,18 @@ services:
     branch: master
     healthCheckPath: /health
     envVars:
-      # Staging defaults to Gemini (no paid OpenAI key required) - see
-      # backend/src/config.ts. To use OpenAI instead, change this value to
-      # "openai" and add an OPENAI_API_KEY variable in Render -> Environment
-      # (this Blueprint does not declare one; OpenAIProvider stays fully
-      # supported in the code either way - see src/engine/ai/providers/).
+      # Staging uses Claude (Anthropic) - see backend/src/config.ts. The model
+      # is pinned here (also the code's default); ANTHROPIC_EFFORT (default
+      # medium) can be set in Render -> Environment. Gemini stays declared as
+      # the rollback: change AI_PROVIDER back to "gemini" (GEMINI_API_KEY is
+      # kept). OpenAI also remains supported: "openai" plus an
+      # OPENAI_API_KEY added by hand (this Blueprint does not declare one).
       - key: AI_PROVIDER
-        value: gemini
+        value: anthropic
+      - key: ANTHROPIC_MODEL
+        value: claude-sonnet-5-5
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: SUPABASE_URL

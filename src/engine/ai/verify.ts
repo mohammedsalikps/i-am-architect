@@ -1643,6 +1643,25 @@ async function run(): Promise<void> {
     assertEqual(message, "AI service temporarily unavailable. Please try again.", "502 (the real status) wins over 401 (upstream text) mentioned later in the body");
   });
 
+  // The backend's own 401 refusals arrive without a "status 401" (BackendAIProvider
+  // relays the message itself) and wrapped by the pipeline as "Provider threw an
+  // error: ..." - they used to read as "AI service temporarily unavailable".
+  await check("a signed-out AI request the backend refused asks the user to sign in, not 'unavailable'", () => {
+    const message = friendlyAiErrorMessage("Provider threw an error: Error: Sign in to use the AI assistant.");
+    assertTrue(message.startsWith("Sign in to use EAVARA AI"), message);
+  });
+
+  await check("an expired session the backend refused asks the user to sign in again", () => {
+    assertEqual(friendlyAiErrorMessage("Provider threw an error: Error: Your session expired - sign in again."), "Please sign in again to continue using EAVARA AI.", "expired");
+  });
+
+  await check("the hosted backend's broken sign-in service (502 'malformed user') is named, not a generic outage", () => {
+    // The exact response the staging backend gave for an invalid token on 2026-10-13.
+    const message = friendlyAiErrorMessage("Provider threw an error: Error: Backend request failed with status 502: The sign-in service sent a malformed user.");
+    assertTrue(message.includes("sign-in service"), message);
+    assertTrue(message !== "AI service temporarily unavailable. Please try again.", "distinct from the generic outage message");
+  });
+
   await check("a clean pipeline/validation message with no technical markers passes through completely unchanged", () => {
     assertEqual(friendlyAiErrorMessage('Unsupported object type: "roof".'), 'Unsupported object type: "roof".', "unchanged");
     assertEqual(friendlyAiErrorMessage("Nothing is selected. Select a wall, then try again."), "Nothing is selected. Select a wall, then try again.", "unchanged");

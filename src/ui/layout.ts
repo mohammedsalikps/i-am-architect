@@ -81,6 +81,8 @@ export type AppShellOptions = {
   onAddAsset: (assetId: string) => void;
   /** The Construction Method tab's viewport highlight - see SceneManager.highlightConstructionObjects() and constructionMethodPanel.ts. */
   onHighlightConstructionObjects: HighlightConstructionObjects;
+  /** The EAVARA Architect conversation (ui/architectPanel.ts), floated over the viewport. When present, the empty state's "Ask AI to Design" opens it. */
+  architect?: { element: HTMLElement; focusInput: () => void };
 };
 
 /** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
@@ -283,7 +285,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // not a heavy splash screen. Its own panel captures clicks
   // (pointer-events) so the grid behind it stays orbitable even while
   // it's showing.
-  const emptyState = buildEmptyState(options, commandBar.focusAiInput);
+  const emptyState = buildEmptyState(options, options.architect?.focusInput ?? commandBar.focusAiInput);
   const updateEmptyState = (): void => {
     emptyState.hidden = !isProjectEmpty(options);
   };
@@ -301,7 +303,12 @@ export function createAppShell(options: AppShellOptions): AppShell {
     store.subscribe(updateEmptyState);
   }
 
-  const viewportArea = el("main", { className: "viewport-area" }, [viewportContainer, viewControlsOverlay, emptyState]);
+  const viewportArea = el("main", { className: options.architect ? "viewport-area viewport-area--with-architect" : "viewport-area" }, [
+    viewportContainer,
+    viewControlsOverlay,
+    emptyState,
+    ...(options.architect ? [options.architect.element] : [])
+  ]);
 
   const body = el("div", { className: "app-body" }, [leftSidebar.element, viewportArea, rightSidebar]);
 

@@ -159,6 +159,28 @@ function readNamedRooms(instruction: string): string[] | undefined {
 }
 
 /**
+ * The house parameters an instruction mentions - footprint, size,
+ * bedrooms, named rooms, floors - without the "is this a build-a-house
+ * request at all" gate parseHouseIntent() applies first. The architect
+ * conversation (engine/architect/) reads these from a clarification
+ * answer ("3 bedrooms, 12 x 9 m") that names no house at all.
+ */
+export function readHouseRequest(instruction: string): HouseDesignRequest {
+  const footprint = readFootprint(instruction);
+  const size = readSize(instruction);
+  const bedrooms = readBedrooms(instruction);
+  const rooms = readNamedRooms(instruction);
+  const floors = readFloors(instruction);
+  return {
+    ...(footprint && isFinite(footprint.length) && isFinite(footprint.width) ? { footprint } : {}),
+    ...(size ? { size } : {}),
+    ...(bedrooms !== undefined ? { bedrooms } : {}),
+    ...(rooms ? { rooms } : {}),
+    ...(floors !== undefined ? { floors } : {})
+  };
+}
+
+/**
  * Classifies one instruction. `{kind:"none"}` for anything that isn't a
  * whole-house request (including every ordinary single-object
  * instruction, which must keep working exactly as before - see task
