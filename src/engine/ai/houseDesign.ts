@@ -159,7 +159,18 @@ function resolveRooms(request: HouseDesignRequest): string[] {
     // intentional list, used verbatim.
     const onlyBedrooms = request.rooms.every((name) => name === "Bedroom");
     if (!onlyBedrooms) {
-      return numberDuplicates(request.rooms);
+      // A bedroom COUNT given alongside the list ("a 3-bedroom house with a
+      // living room, kitchen and two bathrooms") still counts: bedrooms the
+      // list doesn't name are added, before the bathrooms - never dropped.
+      const named = request.rooms.filter((name) => name === "Bedroom" || name === "Master Bedroom").length;
+      const missing = Math.max(0, (request.bedrooms ?? 0) - named);
+      if (missing === 0) {
+        return numberDuplicates(request.rooms);
+      }
+      const rooms = [...request.rooms];
+      const firstBathroom = rooms.indexOf("Bathroom");
+      rooms.splice(firstBathroom === -1 ? rooms.length : firstBathroom, 0, ...Array.from({ length: missing }, () => "Bedroom"));
+      return numberDuplicates(rooms);
     }
     return ["Living Room", "Kitchen", ...bedroomList(request.rooms.length), "Bathroom"];
   }

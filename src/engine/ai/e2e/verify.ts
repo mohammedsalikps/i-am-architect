@@ -1919,7 +1919,8 @@ async function run(): Promise<void> {
   // commands in one answer - large and slow enough to hit the AI deadline.
   // Now the AI returns a small plan and the house builder builds it.
 
-  const AI_ONLY_HOUSE = "I want a complete 3-bedroom house on a 10 m × 8 m plot";
+  // No house noun at all - so only the AI can tell this is a whole house.
+  const AI_ONLY_HOUSE = "I need somewhere for a family of five to live, about 10 m × 8 m";
   const AI_HOUSE_PLAN = { bedrooms: 3, footprint: { length: 10, width: 8 } };
 
   await check("AI Prompt tab: a whole house only the AI recognizes comes back as a small plan and is built by the house builder - one request, one undo step", async () => {
@@ -2031,6 +2032,87 @@ async function run(): Promise<void> {
       assertTrue((state.message ?? "").includes(fragment), `${name}: says why (${state.message})`);
       assertEqual(objectsJson(app.context), before, `${name}: nothing changed`);
     }
+  });
+
+  // --- The reported request (staging, after PR #2): "Design not changed" with a plan description as the reason ---
+  // Live, the 10 October frontend dropped the backend's `house` plan, so its
+  // pipeline saw a notes-only answer and reported Claude's plan description
+  // as the reason nothing changed. These pin what the current code does with
+  // the exact request, and with that notes-only answer.
+
+  const REPORTED_PROMPT =
+    "I want a complete 3-bedroom house on this 10 m × 8 m plot, with a living room, kitchen, two bathrooms, doors, windows, and a roof.";
+  const REPORTED_NOTE =
+    "Planned as a whole house: 3 bedrooms, living room, kitchen, two bathrooms on a 10 x 8 m footprint. The application will generate walls, doors, windows and roof in stages. The existing wall-1 is left untouched.";
+  const REPORTED_ROOMS = ["Living Room", "Kitchen", "Bedroom 1", "Bedroom 2", "Bedroom 3", "Bathroom 1", "Bathroom 2"];
+  /** The wall main.ts adds to every fresh project (z = -4), not undoable - the "existing wall-1". */
+  const addStartupWallLikeMain = (context: ProjectContext): string => {
+    const id = addThroughExecutor(context, { type: "wall.add", wall: { position: { z: -4 } } });
+    context.history.clearHistory();
+    return id;
+  };
+  const roomLabels = (context: ProjectContext) =>
+    context.elementStore.getAll().filter((element) => element.kind === "room").map((element) => element.label ?? "");
+
+  await check("the reported request builds the house: 3 bedrooms, 2 bathrooms, doors, windows and a roof, beside the existing wall - no AI call needed", async () => {
+    // Answers the way the failed request was answered, if it were ever asked.
+    const app = wireApp(() => ({ kind: "ok", commands: [], notes: REPORTED_NOTE }));
+    const wallId = addStartupWallLikeMain(app.context);
+    const wallBefore = JSON.stringify(app.context.wallStore.get(wallId));
+
+    await app.controller.submit(REPORTED_PROMPT);
+
+    const state = app.controller.getState();
+    assertEqual(state.status, "success", `built, not just described: ${state.message}`);
+    assertEqual(app.backend.requests.length, 0, "recognized as a whole house locally - the AI isn't needed for it");
+    assertEqual(roomLabels(app.context).join(", "), REPORTED_ROOMS.join(", "), "every requested room, including all three bedrooms");
+    const slab = app.context.slabStore.getAll()[0];
+    assertEqual(`${slab.dimensions.length} x ${slab.dimensions.width}`, "10 x 8", "on the 10 m x 8 m plot size");
+    assertTrue(app.context.doorStore.getAll().length > 0 && app.context.windowStore.getAll().length > 0, "with doors and windows");
+    assertEqual(app.context.elementStore.getAll().filter((element) => element.kind === "roof").length, 1, "and a roof");
+
+    // wall-1 is kept exactly as it was, and the house stands clear of it.
+    assertEqual(JSON.stringify(app.context.wallStore.get(wallId)), wallBefore, "the existing wall is untouched");
+    const wall = app.context.wallStore.get(wallId)!;
+    const apart = (aMin: number, aMax: number, bMin: number, bMax: number) => aMax <= bMin || bMax <= aMin;
+    const clear =
+      apart(slab.position.x - slab.dimensions.length / 2, slab.position.x + slab.dimensions.length / 2, wall.position.x - wall.dimensions.length / 2, wall.position.x + wall.dimensions.length / 2) ||
+      apart(slab.position.z - slab.dimensions.width / 2, slab.position.z + slab.dimensions.width / 2, wall.position.z - wall.dimensions.thickness / 2, wall.position.z + wall.dimensions.thickness / 2);
+    assertTrue(clear, "the house doesn't overlap the existing wall");
+    assertTrue(state.notes?.includes("clear of the existing objects, which were left as they are"), `the result says where the house went and why: ${state.notes}`);
+
+    app.context.history.undo();
+    assertEqual(buildAIProjectSnapshot(app.context).objects.length, 1, "one undo removes the whole house and leaves only the existing wall");
+  });
+
+  await check("the reported failure, reproduced: an AI answer that only describes a plan builds nothing - and says so plainly instead of presenting the plan as the reason", async () => {
+    // What the stale frontend's pipeline effectively received: no commands, no plan, only a description.
+    const app = wireApp(() => ({ kind: "ok", commands: [], notes: REPORTED_NOTE }));
+    addStartupWallLikeMain(app.context);
+    const before = objectsJson(app.context);
+
+    await app.controller.submit(AI_ONLY_HOUSE);
+
+    const state = app.controller.getState();
+    assertEqual(state.status, "error", "a failure - nothing was built");
+    assertTrue(state.message?.startsWith("Nothing was built"), `the reason leads with what happened: ${state.message}`);
+    assertTrue(state.message?.includes(REPORTED_NOTE), "the AI's own words are still shown, quoted");
+    assertEqual(objectsJson(app.context), before, "the design is exactly as it was");
+  });
+
+  await check("a valid AI plan with a bedroom count AND named rooms builds every bedroom (they used to be dropped)", async () => {
+    const app = wireApp(() => ({
+      kind: "ok",
+      commands: [],
+      house: { bedrooms: 3, footprint: { length: 10, width: 8 }, rooms: ["Living Room", "Kitchen", "Bathroom", "Bathroom"] },
+      notes: REPORTED_NOTE
+    }));
+    addStartupWallLikeMain(app.context);
+
+    await app.controller.submit(AI_ONLY_HOUSE);
+
+    assertEqual(app.controller.getState().status, "success", `built: ${app.controller.getState().message}`);
+    assertEqual(roomLabels(app.context).join(", "), REPORTED_ROOMS.join(", "), "three bedrooms plus the named rooms");
   });
 
   // --- Secrets and harness discipline ---

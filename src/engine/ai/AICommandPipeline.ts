@@ -301,7 +301,14 @@ export class AICommandPipeline {
         errors: [
           {
             stage: "provider",
-            message: notes ?? "Provider produced no recognizable commands for this instruction."
+            // Never the AI's note on its own: a note can describe what the AI
+            // meant to do ("planned as a whole house...") - the reason must
+            // say plainly that nothing was built.
+            message: !notes
+              ? "Provider produced no recognizable commands for this instruction."
+              : notes.trim().endsWith("?")
+                ? `Nothing was built yet - the AI needs more detail: “${notes}”`
+                : `Nothing was built - the AI returned nothing to construct for this request. The AI said: “${notes}”`
           }
         ],
         notes
@@ -557,6 +564,13 @@ export class AICommandPipeline {
     }
 
     this.history?.endGroup();
-    return { success: true, instruction, outcomes, errors: [], notes: summarizeHouseDesign(built.summary), houseSummary: built.summary };
+    // The planner moves a house clear of what's already there rather than
+    // building over it or removing it - say so, so the house is found.
+    const { center } = built.summary;
+    const placement =
+      occupied.length > 0 && (center.x !== 0 || center.z !== 0)
+        ? ` Placed at (${center.x}, ${center.z}) m to stay clear of the existing objects, which were left as they are.`
+        : "";
+    return { success: true, instruction, outcomes, errors: [], notes: `${summarizeHouseDesign(built.summary)}${placement}`, houseSummary: built.summary };
   }
 }

@@ -81,7 +81,7 @@ const ROOM_KEYWORDS: readonly { pattern: RegExp; label: string }[] = [
   { pattern: /studies?|home\s*offices?/i, label: "Study" }
 ];
 /** "2 bedrooms", "a kitchen" - an optional count before a room keyword within a "with ..." list. */
-const ROOM_ITEM_COUNT = /^(?:a|an|one)\b|^\d+\b/i;
+const ROOM_ITEM_COUNT = new RegExp(String.raw`^(?:a|an|\d+|${Object.keys(WORD_NUMBERS).join("|")})\b`, "i");
 
 function wordToNumber(text: string): number {
   return WORD_NUMBERS[text.toLowerCase()] ?? Number(text);
@@ -89,6 +89,9 @@ function wordToNumber(text: string): number {
 
 /** "Build a simple 2-bedroom house ..." - a build verb whose object is a new house (not some other object mentioned near the word "house"). */
 function asksForHouse(instruction: string): boolean {
+  if (wantsNewHouse(instruction)) {
+    return true;
+  }
   const verb = BUILD_VERB.exec(instruction);
   if (!verb) {
     return false;
@@ -100,6 +103,24 @@ function asksForHouse(instruction: string): boolean {
   }
   const between = rest.slice(0, noun.index).trim();
   return between.split(/\s+/).filter(Boolean).length <= MAX_WORDS_BEFORE_HOUSE && !OBJECT_NOUN.test(between);
+}
+
+/**
+ * "I want a complete 3-bedroom house", "we'd like a small home", "give me a
+ * 2 bedroom cottage", "plan a house": asking for A new house without a
+ * build verb. Only "a"/"an" plus a few describing words before the noun -
+ * so "I want the house to have a red roof" or "I need a bigger kitchen in
+ * the house" (an edit) never reads as a request for a new house.
+ */
+const WANT_NEW_HOUSE = new RegExp(
+  String.raw`\b(?:(?:i|we)(?:\s+(?:want|need|would\s+like)|['’]d\s+like)|give\s+(?:me|us)|plan)\s+(?:a|an)\s+((?:[\w-]+\s+){0,6}?)(?:house|home|bungalow|cottage)\b`,
+  "i"
+);
+const NOT_A_DESCRIBING_WORD = /\b(?:the|this|that|these|my|our|your|its|in|on|at|to|of|for|into|inside|onto|from|by|near|beside|behind)\b/i;
+
+function wantsNewHouse(instruction: string): boolean {
+  const match = WANT_NEW_HOUSE.exec(instruction);
+  return match !== null && !NOT_A_DESCRIBING_WORD.test(match[1]) && !OBJECT_NOUN.test(match[1]);
 }
 
 function readFootprint(instruction: string): HouseFootprint | undefined {
@@ -150,7 +171,8 @@ function readNamedRooms(instruction: string): string[] | undefined {
       continue; // an item this milestone doesn't recognize as a room - silently not added, never guessed at
     }
     const countMatch = ROOM_ITEM_COUNT.exec(item.trim());
-    const count = countMatch && /^\d+$/.test(countMatch[0]) ? Number(countMatch[0]) : 1;
+    // "2 bathrooms" and "two bathrooms" alike; "a"/"an" is one.
+    const count = countMatch && !/^an?$/i.test(countMatch[0]) ? wordToNumber(countMatch[0]) : 1;
     for (let i = 0; i < count; i += 1) {
       rooms.push(found.label);
     }

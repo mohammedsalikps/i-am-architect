@@ -685,7 +685,10 @@ async function run(): Promise<void> {
 
     assertEqual(result.success, false, "result.success");
     assertEqual(result.errors[0].stage, "provider", "error stage");
-    assertEqual(result.errors[0].message, "nothing matched", "error message");
+    // Says plainly that nothing was built, then quotes the provider's note -
+    // never the note alone, which could read as if something was planned.
+    assertEqual(result.errors[0].message, "Nothing was built - the AI returned nothing to construct for this request. The AI said: “nothing matched”", "error message");
+    assertEqual(result.notes, "nothing matched", "the note itself is still available as notes");
   });
 
   await check("AICommandPipeline catches a throwing provider without throwing itself", async () => {

@@ -854,6 +854,25 @@ async function main(): Promise<void> {
     assertTrue(context.wallStore.getAll().length > 4, "the retry raises the walls");
   });
 
+  await check("the reported request in the panel plans every requested room and builds it stage by stage", async () => {
+    const app = wire();
+    r = await app.say("I want a complete 3-bedroom house on this 10 m × 8 m plot, with a living room, kitchen, two bathrooms, doors, windows, and a roof.");
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "Where should the house go", "asks where first");
+    r = await app.say("At the origin");
+    assertIncludes(r.text, "Here's the plan", "planned - and says so");
+    assertIncludes(r.text, "Bedroom 3", "three bedrooms");
+    assertIncludes(r.text, "Bathroom 2", "two bathrooms");
+    r = await app.say("yes");
+    assertEqual(app.stageStatus().foundation, "done", "being built: the foundation is done");
+    assertEqual(app.stageStatus().structure, "next", "and the walls are next");
+    r = await app.say("Build everything");
+    assertEqual(r.tone, "success", r.text);
+    assertEqual(app.count().rooms, 7, "fully built: all seven rooms");
+    assertEqual(app.count().roofs, 1, "with its roof");
+    assertTrue(Object.values(app.stageStatus()).every((status) => status === "done"), "every stage done");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} architect check(s) failed`);
