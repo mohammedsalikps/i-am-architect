@@ -125,7 +125,12 @@ async function main(): Promise<void> {
     ["Add a window to the selected wall", "single-opening"],
     ["Clear them and build here", "clear-conflicts"],
     // Left to the existing AI pipeline, exactly as before:
-    ["Add a wall 5m long", "unknown"],
+    ["Add a wall 5m long", "build-wall"],
+    ["Build a 4 m long, 3 m high, 200 mm thick concrete block wall at 2, 3 running north-south", "build-wall"],
+    ["I need a new wall", "build-wall"],
+    ["make the back wall of the kitchen 4 metres long", "wall-length"],
+    ["Add a window to the kitchen wall", "single-opening"],
+    ["Raise the walls", "stage"],
     ["Make the selected wall 5 meters long", "unknown"]
   ];
   for (const [text, kind, stage] of expectations) {
@@ -282,10 +287,16 @@ async function main(): Promise<void> {
   });
   await check("“next” raises the walls and columns", async () => {
     r = await app.say("next");
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "what should the house walls be built of", "asks for the wall material instead of assuming one");
+    assertTrue(["Brick", "Concrete block", "Stone masonry"].every((label) => r.choices.some((choice) => choice.label === label)), "offers the library's masonry materials");
+    assertEqual(app.count().walls, 0, "nothing raised until it's chosen");
+    r = await app.say("brick");
     assertEqual(r.tone, "success", r.text);
     const counts = app.count();
     assertEqual(counts.pillars, 4, "pillars");
     assertTrue(counts.walls >= 7, `exterior + interior walls (${counts.walls})`);
+    assertTrue(app.context.wallStore.getAll().every((wall) => wall.material === "brick" && wall.color === "#a0522d"), "every wall in brick, with the library colour");
   });
   await check("“add a window” with no wall selected asks which is meant", async () => {
     app.context.selectionStore.clear();
@@ -371,6 +382,8 @@ async function main(): Promise<void> {
   });
   await check("“build everything” builds the full house in one go", async () => {
     r = await bare.say("Build everything");
+    assertIncludes(r.text, "built of", "asks for the material first");
+    r = await bare.say("concrete block");
     const counts = bare.count();
     assertEqual(counts.slabs, 1, "slab");
     assertEqual(counts.roofs, 1, "roof");
@@ -405,7 +418,8 @@ async function main(): Promise<void> {
   /** A finished 12 × 9 m, 3-bedroom house at the origin - every stage built, through the real conversation. */
   async function builtHouse(): Promise<Wired> {
     const wired = wire();
-    await wired.say("Build a 12m x 9m house with 3 bedrooms at 0, 0");
+    // The material named up front is used - nothing to ask.
+    await wired.say("Build a 12m x 9m brick house with 3 bedrooms at 0, 0");
     const done = await wired.say("Build everything");
     assertEqual(done.tone, "success", done.text);
     wired.context.history.clearHistory();
@@ -693,10 +707,10 @@ async function main(): Promise<void> {
   }
   await check("a typed command the architect doesn't know goes to the backend, and its commands really change the scene", async () => {
     const app = wireBackend(() => ({ kind: "ok", commands: [{ type: "wall.add", wall: { length: 5, position: { x: 30, z: 30 } } }], notes: "A 5 m garden wall." }));
-    r = await app.say("Add a garden wall 5m long by the gate");
+    r = await app.say("Add a garden pergola by the gate");
     assertEqual(app.backend.requests.length, 1, "one request reached the backend");
     assertTrue(app.backend.requests[0].url.endsWith("/api/ai/interpret"), "on the real endpoint");
-    assertEqual(app.backend.requests[0].instruction, "Add a garden wall 5m long by the gate", "the user's words, unchanged");
+    assertEqual(app.backend.requests[0].instruction, "Add a garden pergola by the gate", "the user's words, unchanged");
     assertEqual(r.tone, "success", r.text);
     assertIncludes(r.text, "1 wall", "reports what was created");
     const wall = app.context.wallStore.getAll().find((candidate) => candidate.position.x === 30);
@@ -741,6 +755,7 @@ async function main(): Promise<void> {
     const app = wireBackend(() => ({ kind: "networkError", message: "Failed to fetch" }));
     r = await app.say("Build a 10m x 8m house with 2 bedrooms at 0, 0");
     r = await app.say("Build everything");
+    r = await app.say("stone masonry");
     assertEqual(r.tone, "success", r.text);
     assertEqual(app.backend.requests.length, 0, "no backend request");
   });
@@ -772,6 +787,8 @@ async function main(): Promise<void> {
     assertEqual(app.session.getState().stages?.find((stage) => stage.id === "foundation")?.status, "done", "progress: foundation done");
 
     r = await app.say("Build everything");
+    assertIncludes(r.text, "built of", "asks for the wall material");
+    r = await app.say("brick");
     assertEqual(r.tone, "success", r.text);
     const walls = app.context.wallStore.getAll().length;
     assertTrue(walls > 4 && roofs(app.context) === 1 && app.context.assetStore.getAll().length > 0, "every stage built");
@@ -835,7 +852,7 @@ async function main(): Promise<void> {
           : context.commandExecutor.execute(command as Parameters<typeof context.commandExecutor.execute>[0])
     };
     const session = new ArchitectSession({ commandExecutor, history: context.history, snapshot: () => buildAIProjectSnapshot(context), undo: () => context.history.undo() });
-    r = await session.handle("Build a 10m x 8m house with 3 bedrooms at 0, 0");
+    r = await session.handle("Build a 10m x 8m brick house with 3 bedrooms at 0, 0");
     r = await session.handle("yes");
     assertEqual(context.slabStore.getAll().length, 1, "foundation built");
 
@@ -867,10 +884,87 @@ async function main(): Promise<void> {
     assertEqual(app.stageStatus().foundation, "done", "being built: the foundation is done");
     assertEqual(app.stageStatus().structure, "next", "and the walls are next");
     r = await app.say("Build everything");
+    assertIncludes(r.text, "built of", "asks for the wall material");
+    r = await app.say("concrete block");
     assertEqual(r.tone, "success", r.text);
     assertEqual(app.count().rooms, 7, "fully built: all seven rooms");
     assertEqual(app.count().roofs, 1, "with its roof");
     assertTrue(Object.values(app.stageStatus()).every((status) => status === "done"), "every stage done");
+  });
+
+  // --- One wall, by conversation (wallBuilder.ts): asked, never assumed ---
+
+  await check("a wall is specified by conversation - a library material, then length, height, thickness, direction and position - and nothing is built until it's confirmed", async () => {
+    const app = wire();
+    const turns: [string, string][] = [
+      ["Add a wall", "built of"],
+      ["brick", "How long"],
+      ["5 metres", "How high"],
+      ["standard", "How thick"],
+      ["230", "Which way"],
+      ["east-west", "Where should its centre be"],
+      ["at 2, 3", "Ready to build a 5 m long, 2.7 m high, 230 mm thick brick wall, running east–west (along X), centred at (2, 3)"]
+    ];
+    for (const [said, asked] of turns) {
+      r = await app.say(said);
+      assertEqual(r.tone, "question", `${said}: ${r.text}`);
+      assertIncludes(r.text, asked, `after “${said}”`);
+      assertEqual(app.count().walls, 0, `nothing built after “${said}”`);
+    }
+    r = await app.say("yes");
+    assertEqual(r.tone, "success", r.text);
+    assertIncludes(r.text, "3.105 m³ of masonry", "says how much masonry");
+    const wall = app.context.wallStore.getAll()[0];
+    assertEqual(JSON.stringify(wall.dimensions), JSON.stringify({ length: 5, height: 2.7, thickness: 0.23 }), "the dimensions asked for");
+    assertEqual(`${wall.material} ${wall.color}`, "brick #a0522d", "brick, in the library's brick colour");
+    assertEqual(JSON.stringify(wall.position), JSON.stringify({ x: 2, y: 1.35, z: 3 }), "centred where asked, standing on the ground");
+    assertEqual(wall.rotation, 0, "running east-west");
+    assertTrue(r.focusIds?.includes(wall.id), "the new wall is framed");
+    r = await app.say("undo");
+    assertEqual(app.count().walls, 0, "one undo removes it");
+  });
+
+  await check("one sentence with every detail goes straight to confirmation; a detail left out is asked for, never defaulted", async () => {
+    const app = wire();
+    r = await app.say("Build a 4 m long, 3 m high, 200 mm thick concrete block wall at 2, 3 running north-south");
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "Ready to build a 4 m long, 3 m high, 200 mm thick concrete block wall, running north–south (along Z), centred at (2, 3)", "everything was said");
+    r = await app.say("yes");
+    const wall = app.context.wallStore.getAll()[0];
+    assertEqual(`${wall.material} ${wall.dimensions.length}x${wall.dimensions.height}x${wall.dimensions.thickness}`, "concrete-block 4x3x0.2", "as said");
+    assertEqual(wall.rotation, Math.PI / 2, "turned to run north-south");
+
+    const other = wire();
+    r = await other.say("Add a 5 m brick wall");
+    assertIncludes(r.text, "How high", "the height wasn't said, so it's asked - no 2.7 m default");
+  });
+
+  await check("a wall's position can be picked in the 3D view, with a preview of its real footprint", async () => {
+    const app = wire();
+    r = await app.say("add a 6 m stone wall 2.7 m high 300 mm thick east-west");
+    assertIncludes(r.text, "Where should its centre be", "only the position is missing");
+    r = await app.say("pick a location");
+    assertEqual(JSON.stringify(r.pickLocation), JSON.stringify({ footprint: { length: 6, width: 0.3 } }), "the pick previews a 6 m x 0.3 m wall");
+    r = app.session.pickedLocation({ x: 10.04, z: -4.97 });
+    assertIncludes(r.text, "centred at (10, -5)", "the clicked spot, rounded to 10 cm");
+    r = await app.say("yes");
+    assertEqual(JSON.stringify(app.context.wallStore.getAll()[0].position), JSON.stringify({ x: 10, y: 1.35, z: -5 }), "built where it was clicked");
+  });
+
+  await check("an impossible size is refused and asked again; an overlap is flagged before building; cancel builds nothing", async () => {
+    const app = wire();
+    r = await app.say("Add a 100 m brick wall");
+    assertIncludes(r.text, "A wall length must be 0.3 m–50 m", "out of range");
+    assertIncludes(r.text, "How long", "asked again");
+
+    const crowded = wire();
+    const existing = addStartupWall(crowded.context);
+    r = await crowded.say("Build a 4 m long, 3 m high, 200 mm thick brick wall at 0, -4 running east-west");
+    assertIncludes(r.text, `overlap ${existing}`, "the existing wall in the way is named");
+    assertTrue(r.focusIds?.includes(existing), "and framed");
+    r = await crowded.say("cancel");
+    assertIncludes(r.text, "no wall was built", "cancelled");
+    assertEqual(crowded.count().walls, 1, "only the existing wall");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

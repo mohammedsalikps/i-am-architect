@@ -24,6 +24,22 @@ import { parseUtterance } from "./parseUtterance.ts";
 import { addOpeningToRoom, furnishRooms, moveOpening, setWallLength, showRoom } from "./roomEdits.ts";
 import type { PendingOption, RoomEditContext, RoomEditResult } from "./roomEdits.ts";
 import { listRooms } from "./roomModel.ts";
+import {
+  describeWall,
+  fmtMeters,
+  missingWallSlot,
+  readSlotAnswer,
+  readWallDraft,
+  readWallMaterial,
+  wallCommand,
+  wallMaterial,
+  WALL_MATERIALS,
+  wallFootprint,
+  wallQuestion,
+  wallSizeProblem,
+  wallVolume
+} from "./wallBuilder.ts";
+import type { WallDraft, WallSlot } from "./wallBuilder.ts";
 import type { ArchitectStage, LocationRef, PlanPoint, Utterance } from "./parseUtterance.ts";
 
 /**
@@ -145,7 +161,11 @@ type Pending =
   | { kind: "which-room"; options: string[] }
   | { kind: "opening-scope" }
   /** A room-edit question (roomEdits.ts): a typed answer naming exactly one option's key runs that option. */
-  | { kind: "options"; options: PendingOption[] };
+  | { kind: "options"; options: PendingOption[] }
+  /** One new wall being specified (wallBuilder.ts): the slot asked about, or "confirm" once nothing is missing. */
+  | { kind: "wall"; draft: WallDraft; slot: WallSlot | "confirm" }
+  /** The house's wall material, asked just before its walls go up - then these stages are built. */
+  | { kind: "house-material"; stages: ArchitectStage[] };
 
 interface SiteRecord {
   id: string;
@@ -198,6 +218,10 @@ export class ArchitectSession {
   private readonly furnished = new Map<string, string[]>();
   private refs: HouseStructureRefs | null = null;
   private pending: Pending | null = null;
+  /** The material library id every wall of the house is built in - asked for, never assumed. */
+  private houseWallMaterial: string | null = null;
+  /** A wall waiting for a click in the 3D view (see pickedLocation). */
+  private wallPick: WallDraft | null = null;
   /** Roofs hidden to show a room ("show me the living room") - a view setting this session can undo with "show the roof". */
   private hiddenRoofs: string[] = [];
   /** What room edits (roomEdits.ts) work through: a fresh snapshot, and one undoable batch per edit. */
@@ -259,7 +283,15 @@ export class ArchitectSession {
   /** The user clicked the ground to choose a location (see pickLocation). */
   pickedLocation(point: PlanPoint): ArchitectReply {
     this.pending = null;
-    const result = this.setLocation({ x: Math.round(point.x * 10) / 10, z: Math.round(point.z * 10) / 10 });
+    const picked = { x: Math.round(point.x * 10) / 10, z: Math.round(point.z * 10) / 10 };
+    if (this.wallPick) {
+      const draft = this.wallPick;
+      this.wallPick = null;
+      const result = this.continueWall({ ...draft, location: { kind: "point", point: picked } });
+      this.emit();
+      return result;
+    }
+    const result = this.setLocation(picked);
     this.emit();
     return result;
   }
@@ -313,6 +345,18 @@ export class ArchitectSession {
         return null;
       case "options":
         return null;
+      case "wall":
+        return this.answerWall(pending, u, text);
+      case "house-material": {
+        const material = readWallMaterial(text);
+        if (material) {
+          this.houseWallMaterial = material;
+          return this.buildStages(pending.stages);
+        }
+        if (u.kind === "no") return this.status("OK — the walls wait until you choose a material.");
+        if (u.kind !== "unknown" && u.kind !== "details") return null;
+        return this.askHouseMaterial(pending.stages, "I didn't catch the material.");
+      }
     }
   }
 
@@ -362,6 +406,7 @@ export class ArchitectSession {
       case "site":
         return this.siteRequest(u.dimensions, u.area, u.location);
       case "house":
+        this.houseWallMaterial = readWallMaterial(text) ?? null;
         return this.startHouse(u.request, u.location, u.unsupported);
       case "details":
         return this.request ? this.updateRequest(u.request, u.location) : this.startHouse(u.request, u.location, undefined);
@@ -391,6 +436,8 @@ export class ArchitectSession {
       case "clear-conflicts":
       case "nearest-free":
         return this.status("Nothing is in the way right now.");
+      case "build-wall":
+        return this.continueWall(readWallDraft(u.text));
       case "unknown":
         return this.fallback(text);
     }
@@ -852,8 +899,20 @@ export class ArchitectSession {
     return this.buildStages([stage]);
   }
 
+  private askHouseMaterial(stages: readonly ArchitectStage[], lead = "Before I raise the walls:"): ArchitectReply {
+    this.pending = { kind: "house-material", stages: [...stages] };
+    return reply(
+      `${lead} what should the house walls be built of? ${WALL_MATERIALS.map((material) => material.label).join(", ")}.`,
+      "question",
+      WALL_MATERIALS.map((material) => ({ label: material.label, say: material.label.toLowerCase() }))
+    );
+  }
+
   /** Runs `stages` in order, each as its own undo step, stopping at the first failure. */
   private buildStages(stages: readonly ArchitectStage[]): ArchitectReply {
+    if (stages.includes("structure") && !this.houseWallMaterial) {
+      return this.askHouseMaterial(stages);
+    }
     const lines: string[] = [];
     const focusIds: string[] = [];
     for (const stage of stages) {
@@ -906,9 +965,14 @@ export class ArchitectSession {
       case "foundation":
         commands = foundationStageCommands(layout);
         break;
-      case "structure":
-        commands = structureStageCommands(layout);
+      case "structure": {
+        // Every wall in the chosen material, with its library colour; the planned thickness is kept.
+        const material = wallMaterial(this.houseWallMaterial ?? undefined);
+        commands = structureStageCommands(layout).map((command) =>
+          command.type === "wall.add" && material ? { ...command, wall: { ...command.wall, material: material.id, color: material.color } } : command
+        );
         break;
+      }
       case "openings": {
         if (!this.refs) return { ok: false, line: "Doors & windows: I can't find the walls to put them in.", ids: [] };
         const planned = openingsStageCommands(layout, this.refs);
@@ -1052,6 +1116,132 @@ export class ArchitectSession {
 
   // --- everything else ---
 
+  // --- one wall, by conversation (wallBuilder.ts) ---
+
+  /** Asks for the first thing the draft is missing - or, once nothing is, confirms it. Nothing is assumed. */
+  private continueWall(draft: WallDraft, lead = ""): ArchitectReply {
+    const prefix = lead ? `${lead} ` : "";
+    this.wallPick = null;
+    for (const slot of ["length", "height", "thickness"] as const) {
+      const value = draft[slot];
+      const problem = value === undefined ? null : wallSizeProblem(slot, value);
+      if (problem) return this.continueWall({ ...draft, [slot]: undefined }, `${prefix}${problem}`);
+    }
+    const slot = missingWallSlot(draft);
+    if (slot) {
+      const question = wallQuestion(slot, draft);
+      this.pending = { kind: "wall", draft, slot };
+      return reply(`${prefix}${question.text}`, "question", [...question.choices, { label: "Cancel", say: "cancel" }]);
+    }
+    const center = this.resolveRef(draft.location!);
+    if (!center) {
+      return this.continueWall({ ...draft, location: undefined }, `${prefix}I can't place it there.`);
+    }
+    const complete = draft as Required<Omit<WallDraft, "location">>;
+    const overlaps = this.wallOverlaps(wallFootprint(draft), center);
+    const warning = overlaps.length > 0 ? ` Heads-up: it would overlap ${list(overlaps.map((object) => object.label ?? object.id))}.` : "";
+    this.pending = { kind: "wall", draft, slot: "confirm" };
+    return reply(
+      `${prefix}Ready to build ${describeWall({ ...complete, center })} - ${fmtMeters(wallVolume(complete)).replace(" m", " m³")} of masonry.${warning} Build it?`,
+      "question",
+      [
+        { label: overlaps.length > 0 ? "Build anyway" : "Build it", say: "yes" },
+        { label: "📍 Pick another spot", say: "pick a location" },
+        { label: "Cancel", say: "cancel" }
+      ],
+      overlaps.length > 0 ? { focusIds: overlaps.map((object) => object.id) } : {}
+    );
+  }
+
+  private answerWall(pending: Extract<Pending, { kind: "wall" }>, u: Utterance, text: string): ArchitectReply | null {
+    const { draft, slot } = pending;
+    if (u.kind === "no") {
+      return reply("OK — no wall was built.", "info", [{ label: "Start a wall again", say: "add a wall" }]);
+    }
+    if (u.kind === "pick-location" && (slot === "position" || slot === "confirm")) {
+      return this.askWallPick({ ...draft, location: undefined });
+    }
+    if (slot === "confirm" && u.kind === "yes") {
+      return this.buildWall(draft);
+    }
+    // Another request altogether: let it through (this wall is dropped).
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "next"].includes(u.kind)) {
+      return null;
+    }
+    const stated = readWallDraft(text);
+    const answer = slot === "confirm" ? undefined : readSlotAnswer(slot, text, draft);
+    const merged: WallDraft = { ...draft };
+    for (const [key, value] of Object.entries({ ...stated, ...answer })) {
+      if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+    }
+    if (JSON.stringify(merged) === JSON.stringify(draft)) {
+      if (slot === "confirm") {
+        this.pending = pending;
+        return reply("Say “yes” to build it, change a value (e.g. “make it 4 m long”), or “cancel”.", "question", [
+          { label: "Build it", say: "yes" },
+          { label: "Cancel", say: "cancel" }
+        ]);
+      }
+      return this.continueWall(draft, `I didn't catch the ${slot === "position" ? "position" : slot}.`);
+    }
+    return this.continueWall(merged);
+  }
+
+  private askWallPick(draft: WallDraft): ArchitectReply {
+    this.wallPick = draft;
+    this.pending = { kind: "wall", draft, slot: "position" };
+    return reply(
+      "Click where the wall's centre should go in the 3D view - or say coordinates like “at 2, 3”.",
+      "question",
+      [{ label: "Cancel", say: "cancel" }],
+      { pickLocation: { footprint: wallFootprint(draft) } }
+    );
+  }
+
+  /** Builds a complete draft as ONE validated, undoable wall.add, and says exactly what was built. */
+  private buildWall(draft: WallDraft): ArchitectReply {
+    const center = draft.location ? this.resolveRef(draft.location) : null;
+    if (!center) return this.continueWall({ ...draft, location: undefined }, "I need a position first.");
+    const complete = draft as Required<Omit<WallDraft, "location">>;
+    const result = this.runBatch([wallCommand(complete, center)]);
+    if (!result.ok) {
+      this.pending = { kind: "wall", draft, slot: "confirm" };
+      return reply(`The wall wasn't built: ${result.message} Nothing was changed.`, "error", [{ label: "Try again", say: "yes" }, { label: "Cancel", say: "cancel" }]);
+    }
+    const id = result.results[0]?.objectId ?? "the wall";
+    return reply(
+      `Built ${id}: ${describeWall({ ...complete, center })} - ${fmtMeters(wallVolume(complete)).replace(" m", " m³")} of masonry. Select it to inspect or edit its dimensions; undo removes it in one step.`,
+      "success",
+      [
+        { label: "Undo", say: "undo" },
+        { label: "Add another wall", say: "add a wall" }
+      ],
+      result.results[0]?.objectId ? { focusIds: [result.results[0].objectId] } : {}
+    );
+  }
+
+  /** Objects a new wall would overlap - butting against another wall (touching faces) is fine. */
+  private wallOverlaps(footprint: HouseFootprint, center: PlanPoint): { id: string; label?: string }[] {
+    const snapshot = this.options.snapshot();
+    const geometry = analyzeConstructionGeometry(snapshot);
+    const byId = new Map(snapshot.objects.map((object) => [object.id, object]));
+    const tolerance = 0.01;
+    const x0 = center.x - footprint.length / 2 + tolerance;
+    const x1 = center.x + footprint.length / 2 - tolerance;
+    const z0 = center.z - footprint.width / 2 + tolerance;
+    const z1 = center.z + footprint.width / 2 - tolerance;
+    const overlaps: { id: string; label?: string }[] = [];
+    for (const entry of geometry.objects) {
+      const object = byId.get(entry.id);
+      if (!object || (object.kind && GROUND_KINDS.has(object.kind)) || object.kind === "room") continue;
+      const { min, max } = entry.aabb;
+      if (min.x < x1 && max.x > x0 && min.z < z1 && max.z > z0) {
+        overlaps.push({ id: object.id, ...(object.label ? { label: object.label } : {}) });
+      }
+    }
+    return overlaps;
+  }
+
   private async fallback(text: string): Promise<ArchitectReply> {
     if (!this.options.fallback) {
       return this.help("I didn't catch that.");
@@ -1105,7 +1295,8 @@ export class ArchitectSession {
     if (this.layout) return [...this.nextChoices(exists), { label: "Status", say: "status" }];
     return [
       { label: "Set up a 30 × 20 m site", say: "Set up a 30 x 20 m site" },
-      { label: "Build a 3-bedroom house", say: "Build a 3 bedroom house" }
+      { label: "Build a 3-bedroom house", say: "Build a 3 bedroom house" },
+      { label: "Build a wall", say: "Add a wall" }
     ];
   }
 
@@ -1114,7 +1305,8 @@ export class ArchitectSession {
       `${lead ? `${lead} ` : ""}Here's how we work:\n` +
         "1. Site — “My plot is 30 × 20 m”.\n" +
         "2. Location — click 📍 or say “at 4, -2”.\n" +
-        "3. House — “Build a 3-bedroom house” (I'll ask about anything unclear).\n" +
+        "3. House — “Build a 3-bedroom house” (I'll ask about anything unclear, including the wall material).\n" +
+        "   Or one wall at a time — “add a 5 m brick wall at 2, 3”: I'll ask for any material, size or position you don't say.\n" +
         "4. Build — stage by stage (“lay the foundation”, “next”) or “build everything”. Each stage is one undo step.\n" +
         "5. Edit — select anything to move or resize it, or say “make the selected wall 5 metres long”, “add a window” with a wall selected, “furnish the living room”.\n" +
         "Use the 🎤 button to speak instead of typing.",
@@ -1141,6 +1333,7 @@ export class ArchitectSession {
   }
 
   private reset(): ArchitectReply {
+    this.houseWallMaterial = null;
     this.request = null;
     this.layout = null;
     this.location = null;

@@ -39,13 +39,18 @@ export interface VoiceInputOptions {
   onInterim: (text: string) => void;
   /** The finished utterance. */
   onFinal: (text: string) => void;
-  onState: (state: VoiceState, message?: string) => void;
+  /** `code` is the Web Speech API's own error name ("not-allowed", "no-speech"...) when state is "error". */
+  onState: (state: VoiceState, message?: string, code?: string) => void;
+  /** Listening ended on its own (a result, silence, or an error) - not when stop() ended it. For hands-free turn-taking. */
+  onEnd?: () => void;
 }
 
 export interface VoiceInput {
   readonly supported: boolean;
   /** Starts listening, or stops if already listening. */
   toggle(): void;
+  /** Starts listening (no-op while already listening; queued if a stop is still finishing). */
+  start(): void;
   stop(): void;
 }
 
@@ -65,17 +70,33 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
 export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
   const Recognition = recognitionConstructor();
   if (!Recognition) {
-    return { supported: false, toggle: () => undefined, stop: () => undefined };
+    return { supported: false, toggle: () => undefined, start: () => undefined, stop: () => undefined };
   }
 
   let recognition: SpeechRecognitionLike | null = null;
   let finalText = "";
+  /** stop() was asked for: this session's end is ours, not the user's. */
+  let stopRequested = false;
+  /** start() arrived while a stopped session was still finishing - begin again once it has. */
+  let startQueued = false;
 
   const stop = (): void => {
-    recognition?.stop();
+    startQueued = false;
+    if (recognition) {
+      stopRequested = true;
+      recognition.stop();
+    }
   };
 
   const start = (): void => {
+    if (recognition) {
+      if (stopRequested) startQueued = true;
+      return;
+    }
+    begin();
+  };
+
+  const begin = (): void => {
     finalText = "";
     let errored = false;
     const instance = new Recognition();
@@ -97,13 +118,22 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
     };
     instance.onerror = (event) => {
       errored = true;
-      options.onState("error", ERROR_MESSAGES[event.error] ?? `Speech recognition stopped (${event.error}).`);
+      // Our own stop() can surface as "aborted" - not an error worth showing.
+      if (event.error === "aborted" && stopRequested) return;
+      options.onState("error", ERROR_MESSAGES[event.error] ?? `Speech recognition stopped (${event.error}).`, event.error);
     };
     instance.onend = () => {
       recognition = null;
       const text = finalText.trim();
-      if (!errored) options.onState("idle");
+      const stoppedByUs = stopRequested;
+      stopRequested = false;
+      if (!errored || stoppedByUs) options.onState("idle");
       if (text) options.onFinal(text);
+      if (!stoppedByUs) options.onEnd?.();
+      if (startQueued) {
+        startQueued = false;
+        begin();
+      }
     };
     recognition = instance;
     try {
@@ -118,6 +148,7 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
   return {
     supported: true,
     toggle: () => (recognition ? stop() : start()),
+    start,
     stop
   };
 }
