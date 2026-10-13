@@ -300,6 +300,47 @@ async function run(): Promise<void> {
     assertTrue(huge.ok && huge.intent.kind === "unsupported" && huge.intent.reason === (parseHouseIntent("build a 100m x 8m house") as { reason: string }).reason, "out of range: the same reason as when typed");
   });
 
+  await check("the reported request parses as a whole house: footprint, bedroom count and every named room, two bathrooms included", () => {
+    const intent = parseHouseIntent("I want a complete 3-bedroom house on this 10 m × 8 m plot, with a living room, kitchen, two bathrooms, doors, windows, and a roof.");
+    assertEqual(
+      JSON.stringify(intent),
+      JSON.stringify({ kind: "house", request: { footprint: { length: 10, width: 8 }, bedrooms: 3, rooms: ["Living Room", "Kitchen", "Bathroom", "Bathroom"] } }),
+      "the exact request"
+    );
+  });
+
+  await check("asking for a new house without a build verb is recognized; editing an existing house never is", () => {
+    for (const text of ["I want a house", "We'd like a small home", "I need a 2 bedroom cottage", "give me a 3-bedroom bungalow", "Plan a complete 3-bedroom house for a 10 m x 8 m plot"]) {
+      assertEqual(parseHouseIntent(text).kind, "house", `a new house: "${text}"`);
+    }
+    for (const text of [
+      "I want the house to have a red roof",
+      "I need a bigger kitchen in the house",
+      "I want a window on the house",
+      "I want a door for my house",
+      "I want an extension to the house",
+      "Give me a plan of the house"
+    ]) {
+      assertEqual(parseHouseIntent(text).kind, "none", `not a new house: "${text}"`);
+    }
+  });
+
+  await check("a bedroom count given with named rooms adds the missing bedrooms - before the bathrooms - instead of dropping them", () => {
+    const rooms = (request: Parameters<typeof planHouseDesign>[0]) => {
+      const planned = planHouseDesign(request, []);
+      assertTrue(planned.ok, `planned: ${planned.ok ? "" : planned.error}`);
+      return planned.ok ? planned.layout.rooms.map((room) => room.name) : [];
+    };
+    assertEqual(
+      rooms({ bedrooms: 3, footprint: { length: 10, width: 8 }, rooms: ["Living Room", "Kitchen", "Bathroom", "Bathroom"] }).join(", "),
+      "Living Room, Kitchen, Bedroom 1, Bedroom 2, Bedroom 3, Bathroom 1, Bathroom 2",
+      "three bedrooms added"
+    );
+    assertEqual(rooms({ bedrooms: 2, rooms: ["Living Room", "Master Bedroom", "Bathroom"] }).join(", "), "Living Room, Master Bedroom, Bedroom, Bathroom", "a named bedroom counts toward the total");
+    assertEqual(rooms({ bedrooms: 1, rooms: ["Living Room", "Kitchen", "Bedroom"] }).join(", "), "Living Room, Kitchen, Bedroom", "already enough bedrooms: the list as given");
+    assertEqual(rooms({ rooms: ["Living Room", "Kitchen", "Bathroom"] }).join(", "), "Living Room, Kitchen, Bathroom", "no count: the list as given");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} verification check(s) failed`);

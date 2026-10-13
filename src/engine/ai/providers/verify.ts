@@ -1893,7 +1893,11 @@ async function run(): Promise<void> {
     const executor = makeExecutorSpy();
     const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Add a window", emptySnapshot);
     assertEqual(result.success, false, "nothing built");
-    assertEqual(result.errors[0].message, "Which wall should the window go in - the north or the south one?", "Claude's own words are the message");
+    assertEqual(
+      result.errors[0].message,
+      "Nothing was built yet - the AI needs more detail: “Which wall should the window go in - the north or the south one?”",
+      "Claude's own words, framed so nothing reads as built or planned"
+    );
     assertEqual(executor.calls.length, 0, "nothing executed");
   });
 
