@@ -14,6 +14,7 @@ import { SlabLayer } from "./slab/SlabLayer";
 import { DoorLayer } from "./door/DoorLayer";
 import { WindowLayer } from "./window/WindowLayer";
 import { ElementLayer } from "./elements/ElementLayer";
+import { FittingLayer } from "./elements/FittingLayer";
 import { AssetLayer } from "./assets/AssetLayer";
 import { AssetLoader } from "./assets/AssetLoader";
 import { SelectionRaycaster } from "./SelectionRaycaster";
@@ -209,8 +210,9 @@ export class SceneManager {
     // Close enough to inspect a room from the inside (section 18's
     // "interior view" - no separate first-person system, just letting
     // OrbitControls get close), far enough out that "Fit House" on a
-    // large project never asks for more distance than this allows.
-    this.controls.minDistance = 1.2;
+    // large project never asks for more distance than this allows. 0.3 m
+    // lets a pipe fitting (a few centimetres across) be inspected up close.
+    this.controls.minDistance = 0.3;
     this.controls.maxDistance = 80;
     // Stops just short of the horizon rather than letting the camera dip
     // underneath the ground plane and look up at the building's
@@ -233,6 +235,8 @@ export class SceneManager {
     const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore, visibilityStore);
     const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore, visibilityStore);
     const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore, visibilityStore);
+    // Pipe fittings, worked out from the pipes' connections. A click on one selects the visible pipe whose leg it's on.
+    const fittingLayer = new FittingLayer(this.scene, elementStore, visibilityStore);
     const assetLoader = new AssetLoader();
     const assetLayer = new AssetLayer(this.scene, assetStore, selectionStore, visibilityStore, assetLoader);
     this.getAllMeshes = () => [
@@ -243,6 +247,7 @@ export class SceneManager {
       ...doorLayer.getMeshes(),
       ...windowLayer.getMeshes(),
       ...elementLayer.getMeshes(),
+      ...fittingLayer.getMeshes(),
       ...assetLayer.getMeshes()
     ];
 
@@ -257,6 +262,7 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
     selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
     selectionRaycaster.registerLayer(() => elementLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => fittingLayer.getMeshes());
     selectionRaycaster.registerLayer(() => assetLayer.getMeshes());
 
     // Mouse manipulation of the selected object: handles render from the
@@ -465,13 +471,24 @@ export class SceneManager {
    * of a room or wall before it is built - with a margin of `margin`
    * metres around it so its neighbours stay in view. Camera only.
    */
-  focusOnRegion(region: { center: { x: number; z: number }; sizeX: number; sizeZ: number; height: number }, margin = 2): void {
+  focusOnRegion(region: { center: { x: number; z: number }; sizeX: number; sizeZ: number; height: number }, margin = 2, minimum: { x: number; y: number; z: number } = MIN_FOCUS_EXTENT): void {
     const { center, sizeX, sizeZ, height } = region;
     const framed = new THREE.Box3(
       new THREE.Vector3(center.x - sizeX / 2 - margin, 0, center.z - sizeZ / 2 - margin),
       new THREE.Vector3(center.x + sizeX / 2 + margin, height, center.z + sizeZ / 2 + margin)
     );
-    this.applyFit(withMinimumExtent(framed, MIN_FOCUS_EXTENT));
+    this.applyFit(withMinimumExtent(framed, minimum));
+  }
+
+  /**
+   * A close-up of one point - a pipe fitting at its joint, which is a few
+   * centimetres across and invisible at house scale. Camera only.
+   */
+  focusOnPoint(point: { x: number; y: number; z: number }, extent = 0.25): void {
+    const half = extent / 2;
+    // No ground clamp: a joint can be below ground (an under-slab drain), and the box must stay around it.
+    const box = new THREE.Box3(new THREE.Vector3(point.x - half, point.y - half, point.z - half), new THREE.Vector3(point.x + half, point.y + half, point.z + half));
+    this.applyFit(box, this.controls.minDistance);
   }
 
   /**
@@ -547,12 +564,12 @@ export class SceneManager {
   }
 
   /** Keeps the camera's current viewing angle, moving only its distance and look-at target to frame `box`. */
-  private applyFit(box: THREE.Box3 | null): void {
+  private applyFit(box: THREE.Box3 | null, minDistance?: number): void {
     if (!box) {
       return;
     }
     const direction = this.camera.position.clone().sub(this.controls.target);
-    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.visibleAspect() });
+    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.visibleAspect(), ...(minDistance !== undefined ? { minDistance } : {}) });
     this.camera.position.copy(position);
     this.controls.target.copy(target);
     this.camera.lookAt(target);

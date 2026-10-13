@@ -210,12 +210,19 @@ function roomSection(
  * supports one yet (see the milestone's own known-limitations note); a
  * multi-story project still lists every room flatly under "Building".
  */
+/** The tree's own search, for the top bar to drive (see LeftSidebar.searchProject). */
+interface ProjectSearchHandle {
+  setQuery(query: string): void;
+  pickFirst(): boolean;
+}
+
 function buildProjectHierarchy(
   selectionStore: SelectionStore,
   visibilityStore: VisibilityStore,
   sources: readonly ObjectSource[],
   elementStore: ElementStore,
-  onFocusObjects: (objectIds: string[]) => void
+  onFocusObjects: (objectIds: string[]) => void,
+  exposeSearch?: (handle: ProjectSearchHandle) => void
 ): HTMLElement {
   const root = el("div", { className: "hierarchy-objects" });
   const expandedRooms = new Set<string>();
@@ -352,6 +359,17 @@ function buildProjectHierarchy(
   selectionStore.subscribe(render);
   visibilityStore.subscribe(render);
   search.addEventListener("input", render);
+  exposeSearch?.({
+    setQuery(query) {
+      search.value = query;
+      render();
+    },
+    pickFirst() {
+      if (matches.length === 0) return false;
+      pick(matches[0]);
+      return true;
+    }
+  });
   search.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && matches.length > 0) {
       event.preventDefault();
@@ -390,6 +408,10 @@ export interface LeftSidebar {
   element: HTMLElement;
   /** Re-checks the Assets tab's own card active-states - see AssetLibrary.refresh()'s own docs. A no-op if the Assets tab has never been built (nothing to refresh yet). */
   refreshAssetLibrary(): void;
+  /** Runs the Project tree's search for `query` (the top bar's search box drives it), showing the Project tab. */
+  searchProject(query: string): void;
+  /** Selects and frames the first search result; false when there is none. */
+  pickFirstSearchResult(): boolean;
 }
 
 export function createLeftSidebar(
@@ -427,12 +449,16 @@ export function createLeftSidebar(
   // unconditionally, the same way it already refreshes the ribbon).
   const assetLibrary = createAssetLibrary({ onPlaceAsset: onAddAsset, isPlacementActive });
 
-  const { strip, panel } = createTabStrip(
+  let projectSearch: ProjectSearchHandle | null = null;
+  const { strip, panel, activate } = createTabStrip(
     [
       {
         id: "project",
         label: "Project",
-        build: () => buildProjectHierarchy(selectionStore, visibilityStore, objectSources, elementStore, onFocusObjects)
+        build: () =>
+          buildProjectHierarchy(selectionStore, visibilityStore, objectSources, elementStore, onFocusObjects, (handle) => {
+            projectSearch = handle;
+          })
       },
       {
         id: "assemblies",
@@ -463,6 +489,15 @@ export function createLeftSidebar(
 
   return {
     element: el("aside", { className: "sidebar sidebar--left" }, [strip, panel]),
-    refreshAssetLibrary: assetLibrary.refresh
+    refreshAssetLibrary: assetLibrary.refresh,
+    searchProject(query) {
+      // Clearing the search leaves whichever panel is open.
+      if (query.trim()) activate("project");
+      projectSearch?.setQuery(query);
+    },
+    pickFirstSearchResult() {
+      activate("project");
+      return projectSearch?.pickFirst() ?? false;
+    }
   };
 }

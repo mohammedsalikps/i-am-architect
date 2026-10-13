@@ -20,6 +20,7 @@ import { getAssetDefinition } from "../assets/catalog.ts";
 import { ArchitectSession } from "./ArchitectSession.ts";
 import { buildRecordBook } from "../records/recordBook.ts";
 import { roomPartsOf } from "./roomBuilder.ts";
+import { resolveJoints } from "../plumbing/fittings.ts";
 import type { ArchitectReply } from "./ArchitectSession.ts";
 import { planFurnishings } from "./interiors.ts";
 import { parseUtterance } from "./parseUtterance.ts";
@@ -74,6 +75,7 @@ function wire(): Wired {
     commandExecutor: context.commandExecutor,
     history: context.history,
     snapshot: () => buildAIProjectSnapshot(context),
+    elementParams: (id) => context.elementStore.get(id)?.params,
     undo: () => context.history.undo(),
     fallback: (instruction, options) => service.submit(instruction, options)
   });
@@ -1189,6 +1191,82 @@ async function main(): Promise<void> {
     assertEqual(wall().dimensions.length, 4.5, "5 m - 0.5 m");
     r = await walls.say("make it 3 m long");
     assertEqual(wall().dimensions.length, 3, "an absolute size still sets it");
+  });
+
+  await check("a pipe run by conversation: sheet-size pipes joined end to end in one undo step, the fittings named; a branch at a joint makes the reducing tee; a size not on the sheet is asked about", async () => {
+    const app = wire();
+    r = await app.say("Run a 25 mm water pipe from 0, 0 to 6, 0");
+    assertTrue(r.applied === true, `built: ${r.text}`);
+    r = await app.say("Run a 25 mm water pipe from 6, 0 to 6, 3");
+    assertIncludes(r.text, "1 × 25 mm 90° elbow (sheet p.2)", "the corner takes the sheet's 90° elbow");
+    assertIncludes(r.text, "Joined to water-pipe-", "joined to the first run's end");
+    r = await app.say("Run a 25 mm water pipe from 0, 0 to -3, 0");
+    assertIncludes(r.text, "1 × 25 mm coupler", "a straight continuation takes a coupler");
+    r = await app.say("Run a 20 mm water pipe from 0, 0 to 0, 2");
+    assertIncludes(r.text, "1 × 25 × 20 mm reducing tee (sheet p.1)", "a 20 mm branch at the coupler's joint makes it a reducing tee");
+    const pipes = () => app.context.elementStore.getAll().filter((element) => element.kind === "water-pipe").length;
+    assertEqual(pipes(), 4, "four pipes");
+    r = await app.say("Run a 32 mm water pipe from 8, 0 to 9, 0");
+    assertIncludes(r.text, "has no 32 mm clean-water pipe", "32 mm isn't on the sheet: asked, not guessed");
+    assertTrue(r.choices.some((choice) => choice.label === "20 mm") && !r.applied, "the sheet sizes offered, nothing built");
+    await app.say("undo");
+    assertEqual(pipes(), 3, "one undo removes the last run");
+    const joints = resolveJoints(buildAIProjectSnapshot(app.context).objects).map((joint) => joint.fitting?.label ?? "unresolved");
+    assertEqual([...joints].sort().join(" | "), "25 mm 90° elbow | 25 mm coupler", "the tee is a coupler again");
+  });
+
+  await check("pipe runs by conversation, as built: a pending question lets a run through, two sizes are lined up, a loop closes, a said height or 'hot' isn't lost, and look/cancel phrases build nothing", async () => {
+    for (const [text, kind] of [
+      ["cancel the pipe from 0, 0 to 3, 0", "location"],
+      ["focus on the pipe from 0, 0 to 3, 0", "show"],
+      ["Add a 3 m wall next to the water pipe from 0, 0 to 3, 0", "build-wall"]
+    ] as const) {
+      assertEqual(parseUtterance(text).kind, kind, `"${text}" is still ${kind}, not a pipe run`);
+    }
+
+    let app = wire();
+    const pipes = () => app.context.elementStore.getAll().filter((element) => element.kind === "water-pipe");
+    await app.say("add a 5 m brick wall 3 m high 230 mm thick");
+    await app.say("east-west");
+    r = await app.say("at 9, 9");
+    assertIncludes(r.text, "centred at (9, 9)", "a wall waiting for its Build it");
+    r = await app.say("Run a 25 mm water pipe from 4, 4 to 7, 4");
+    assertTrue(r.applied === true && pipes().length === 1, `the pipe run is let through, not read as the wall's position: ${r.text}`);
+    assertEqual(app.context.wallStore.getAll().length, 0, "and the wall isn't built somewhere else");
+
+    app = wire();
+    await app.say("Run a 25 mm water pipe from 0, 0 to 3, 0");
+    await app.say("Run a 20 mm water pipe from 5, 0 to 8, 0");
+    const twenty = pipes()[1];
+    const before = twenty.position.y;
+    r = await app.say("Run a 25 mm water pipe from 3, 0 to 5, 0");
+    assertTrue(r.applied === true, `a run between a 25 mm and a 20 mm pipe is built: ${r.text}`);
+    assertIncludes(r.text, "raised 3.4 mm to line up", "the 20 mm pipe is lined up, and the reply says so");
+    assertIncludes(r.text, "reducer", "a reducer where the sizes meet");
+    assertTrue(Math.abs(app.context.elementStore.get(twenty.id)!.position.y - pipes()[0].position.y) < 1e-6, "at the run's height");
+    await app.say("undo");
+    assertTrue(Math.abs(app.context.elementStore.get(twenty.id)!.position.y - before) < 1e-6, "undo puts it back");
+    assertEqual(pipes().length, 2, "and removes the run");
+
+    r = await app.say("Run a 25 mm water pipe from 3.03, 0 to 4.5, 0");
+    assertIncludes(r.text, "1.5 m, from (3, 0) to (4.5, 0)", "the reply gives the run as built, from the end it joined");
+    await app.say("undo");
+    r = await app.say("Run a 25 mm water pipe from 3, 0 to 3, 2 at a height of 2 m");
+    assertTrue(!r.applied && /You asked for 2 m/.test(r.text) && pipes().length === 2, `a said height the join can't keep is refused: ${r.text}`);
+
+    r = await app.say("Run a 25 mm water pipe from 10, 10 to 13, 10 to 13, 12 to 10, 12 to 10, 10");
+    assertIncludes(r.text, "4 × 25 mm 90° elbow", "a rectangle has four corners");
+    assertIncludes(r.text, "Closed back on its start", "and says it's closed");
+
+    r = await app.say("Run a 25 mm hot water pipe from 20, 0 to 22, 0");
+    assertIncludes(r.text, "25 mm hot-water pipe", "hot water is said back");
+    assertEqual(pipes()[pipes().length - 1].params.system, "hot", "and stored as System: hot");
+    r = await app.say("Run a 25 mm water pipe from 22, 0 to 22, 2");
+    assertIncludes(r.text, "25 mm hot-water pipe", "a run from the hot pipe's end continues hot (read through elementParams)");
+    assertEqual(pipes()[pipes().length - 1].params.system, "hot", "stored hot");
+    const before2 = pipes().length;
+    r = await app.say("Run a 25 mm cold water pipe from 20, 0 to 20, -2");
+    assertTrue(!r.applied && /never joined/.test(r.text) && pipes().length === before2, `a cold run from a hot pipe's end is refused: ${r.text}`);
   });
 
   // --- a room after save and reopen: nothing remembered, everything read from the saved scene ---

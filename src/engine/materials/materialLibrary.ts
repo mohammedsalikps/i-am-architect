@@ -86,6 +86,9 @@ export const MATERIAL_LIBRARY: readonly MaterialDefinition[] = Object.freeze([
   material("asphalt-shingle", "Asphalt shingle", "roofing", "#4a4a4a", { roughness: 0.95 }),
   material("pvc", "PVC", "plumbing", "#e9e9e9", { roughness: 0.6 }),
   material("cpvc", "CPVC", "plumbing", "#ddd6c4", { roughness: 0.6 }),
+  // The uPVC fittings sheet's two systems: white clean-water pipe (blue identification band) and grey sanitation pipe.
+  material("upvc", "uPVC (clean water)", "plumbing", "#f2f2ee", { roughness: 0.45 }),
+  material("upvc-grey", "uPVC (sanitation)", "plumbing", "#8b9096", { roughness: 0.55 }),
   material("hdpe", "HDPE", "plumbing", "#2d2d2d", { roughness: 0.6 }),
   material("copper", "Copper", "plumbing", "#b87333", { roughness: 0.35, metalness: 0.9 }),
   material("pvc-conduit", "PVC conduit", "electrical", "#d9d9d9", { roughness: 0.6 }),

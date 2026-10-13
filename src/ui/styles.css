@@ -3277,7 +3277,10 @@ button {
 
 /* Narrower desktops: a slimmer copilot, and the view controls kept on the
    right edge of the viewport so the copilot never hides them. */
-@media (max-width: 1280px) {
+/* Up to 1420px the AI panel and the view controls would meet at the top of the
+   viewport (measured: overlapping from 1281px to about 1394px, the common 1366px
+   laptop included) - the panel moves below the controls instead. */
+@media (max-width: 1420px) {
   .architect {
     width: 320px;
     min-width: 260px;
@@ -3359,4 +3362,20 @@ button {
 .hierarchy-objects__item--selected .hierarchy-search__where {
   color: inherit;
   opacity: 0.8;
+}
+
+/* Record book: a pipe's sheet size, a fitting's sheet source, or why a joint has no part - under the dimensions. */
+.record-book__source {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+.record-book__source--warn {
+  color: var(--color-danger);
+}
+
+.record-book__row--derived td:first-child .record-book__id {
+  font-style: italic;
 }

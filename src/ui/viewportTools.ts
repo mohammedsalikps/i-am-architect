@@ -53,7 +53,8 @@ export function createViewportTools(actions: ViewportToolActions): ViewportTools
   measure.addEventListener("click", () => actions.onMeasure());
 
   return {
-    elements: [select, measure, annotate],
+    // Annotate stays built (disabled) but out of the demo toolbar until there's an annotation model behind it.
+    elements: [select, measure],
     setMode(mode) {
       select.classList.toggle("is-active", mode === "select");
       select.setAttribute("aria-pressed", String(mode === "select"));

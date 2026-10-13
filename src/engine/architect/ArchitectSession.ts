@@ -1,6 +1,10 @@
 // Explicit .ts extensions on value imports let Node run this file directly
 // (engine/architect/verify.ts does). Harmless for Vite.
 import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
+import { resolveCommandReferences } from "../ai/referenceResolution.ts";
+import { resolveJoints } from "../plumbing/fittings.ts";
+import { describeSource, pipeOutsideDiameter, pipeSizesFor } from "../plumbing/upvcSheet.ts";
+import { planPipeRun, readPipeRun, sheetSizesText } from "./pipeRun.ts";
 import type { HistoryGroupLike } from "../commands/executeCommandBatch";
 import type { CommandResult } from "../commands/types";
 import { analyzeConstructionGeometry } from "../ai/geometry/analyzeConstructionGeometry.ts";
@@ -158,6 +162,8 @@ export interface ArchitectSessionOptions {
   history?: HistoryGroupLike;
   /** A fresh read-only snapshot of the model (buildAIProjectSnapshot). */
   snapshot: () => AIProjectSnapshot;
+  /** An element's params (the snapshot doesn't carry them) - a water pipe's hot/cold System, so a run never joins hot to cold. */
+  elementParams?: (id: string) => Readonly<Record<string, unknown>> | undefined;
   /** The app's Undo. */
   undo?: () => void;
   /**
@@ -273,6 +279,11 @@ function describeReversal(before: readonly AIContextObject[], after: readonly AI
     ...(changed.length > 0 ? [`changed ${name(changed)} back`] : [])
   ];
   return parts.length > 0 ? parts.join("; ") : null;
+}
+
+/** The sheet's nominal sizes for a system, largest first. */
+function readPipeRunSizes(system: "clean-water" | "sanitation"): number[] {
+  return pipeSizesFor(system).map((size) => size.nominal);
 }
 
 export class ArchitectSession {
@@ -548,6 +559,8 @@ export class ArchitectSession {
         return this.adjustElement(u.text);
       case "build-room":
         return this.startRoom(u.text);
+      case "pipe-run":
+        return this.pipeRun(u.text);
       case "unknown":
         return this.namedRoomEdit(text) ?? this.fallback(text);
     }
@@ -1060,8 +1073,14 @@ export class ArchitectSession {
     );
   }
 
-  private runBatch(commands: readonly unknown[]): { ok: true; results: CommandResult[] } | { ok: false; message: string } {
-    const batch = executeCommandBatch(this.options.commandExecutor, commands, this.options.history);
+  /** `references`: resolve "$step:N" ids in later commands to the N-th command's new object (a pipe run's connections). */
+  private runBatch(commands: readonly unknown[], references = false): { ok: true; results: CommandResult[] } | { ok: false; message: string } {
+    const batch = executeCommandBatch(
+      this.options.commandExecutor,
+      commands,
+      this.options.history,
+      references ? (command, index, prior) => resolveCommandReferences(command, index, prior, null) : undefined
+    );
     if (batch.success) return { ok: true, results: batch.results };
     const failed = batch.failedIndex !== undefined ? batch.results[batch.failedIndex] : undefined;
     return { ok: false, message: batch.message ?? failed?.message ?? "a command failed" };
@@ -1315,6 +1334,66 @@ export class ArchitectSession {
     return reply(`Changed ${target}: ${said.join("; ")}. One undo reverses it.`, "success", [{ label: "Undo", say: "undo" }], { focusIds: [target] });
   }
 
+  // --- a pipe run, by conversation (pipeRun.ts) ---
+
+  /**
+   * "Run a 25 mm water pipe from 0, 0 to 3, 0 to 3, 2": the legs as pipes
+   * of the sheet's real size, joined end to end - and to an existing pipe
+   * end the run starts or finishes on - in one undoable batch. The reply
+   * names the fittings the joints now take (worked out, not built), and
+   * any joint the sheet has no part for.
+   */
+  private pipeRun(text: string): ArchitectReply {
+    const request = readPipeRun(text);
+    const system = request.system === "clean-water" ? "clean-water" : "sanitation";
+    if (!request.size) {
+      return reply(
+        `The uPVC fittings sheet has no ${request.requested} mm ${system} pipe - its ${system} sizes are ${sheetSizesText(request.system)}. Which size should the run be?`,
+        "question",
+        readPipeRunSizes(request.system).map((nominal) => ({ label: `${nominal} mm`, say: text.replace(/(\d+(?:\.\d+)?)\s*(?:mm|millimet(?:er|re)s?)\b/i, `${nominal} mm`) }))
+      );
+    }
+    const snapshot = this.options.snapshot();
+    const existing = snapshot.objects
+      .filter((object) => object.type === "element" && (object.kind === "water-pipe" || object.kind === "drain-pipe"))
+      .map((object) => {
+        const system = this.options.elementParams?.(object.id)?.system;
+        return { ...object, kind: object.kind!, ...(typeof system === "string" ? { system } : {}) };
+      });
+    const plan = planPipeRun(request, existing);
+    if (!plan.ok) return reply(`${plan.reason} Nothing was built.`, "error");
+    const result = this.runBatch(plan.commands, true);
+    if (!result.ok) return reply(`The pipe run wasn't built: ${result.message} Nothing was changed.`, "error");
+    const ids = result.results.slice(0, plan.legs.length).map((entry) => entry.objectId).filter((id): id is string => !!id);
+    this.lastBuiltId = ids[ids.length - 1] ?? null;
+
+    const size = request.size;
+    const touched = new Set([...ids, ...plan.joins.map((join) => join.id)]);
+    const joints = resolveJoints(this.options.snapshot().objects).filter((joint) => joint.members.some((member) => ids.includes(member.id)));
+    const counts = new Map<string, { label: string; page: number; count: number }>();
+    for (const joint of joints) {
+      if (!joint.fitting) continue;
+      const entry = counts.get(joint.fitting.id) ?? { label: joint.fitting.label, page: joint.fitting.source.page, count: 0 };
+      entry.count += 1;
+      counts.set(joint.fitting.id, entry);
+    }
+    const fittings = [...counts.values()].map((entry) => `${entry.count} × ${entry.label} (sheet p.${entry.page})`);
+    const problems = joints.filter((joint) => joint.problem).map((joint) => `the joint at ${fmtPoint(joint.point)}: ${joint.problem}`);
+    const notes = joints.filter((joint) => joint.note).map((joint) => joint.note!);
+    const route = plan.points.map(fmtPoint);
+    const lead = `Laid ${plan.legs.length} × ${size.nominal} mm ${plan.temperature === "hot" ? "hot-water" : system} pipe${plan.legs.length === 1 ? "" : "s"} (uPVC, ${Math.round(pipeOutsideDiameter(size) * 10000) / 10} mm OD - ${describeSource(size.source, size.system)}): ${plan.legs.map((leg) => `${leg} m`).join(" + ")}, from ${route[0]}${route.length > 2 ? ` via ${route.slice(1, -1).join(", ")}` : ""} to ${route[route.length - 1]}, ${Math.round(plan.y * 1000) / 1000} m above the ground.`;
+    const joined =
+      (plan.joins.length > 0 ? ` Joined to ${plan.joins.map((join) => `${join.id}'s ${join.endpoint}`).join(" and ")}.` : "") +
+      (plan.closed ? " Closed back on its start." : "") +
+      (plan.realigned
+        ? ` ${plan.realigned.id} and the pipes joined to it were ${plan.realigned.by > 0 ? "raised" : "lowered"} ${Math.round(Math.abs(plan.realigned.by) * 10000) / 10} mm to line up (a smaller size sits lower by default).`
+        : "");
+    const fittingLine = fittings.length > 0 ? ` Fittings: ${fittings.join(", ")}.` : " No fittings needed.";
+    const problemLine = problems.length > 0 ? ` Needs attention - ${problems.join("; ")}` : "";
+    const noteLine = notes.length > 0 ? ` ${[...new Set(notes)].join(" ")}` : "";
+    return reply(`${lead}${joined}${fittingLine}${problemLine}${noteLine} One undo removes the run.`, problems.length > 0 ? "info" : "success", [{ label: "Undo", say: "undo" }], { focusIds: [...touched] });
+  }
+
   // --- one room, by conversation (roomBuilder.ts) ---
 
   private roomsNow() {
@@ -1440,7 +1519,7 @@ export class ArchitectSession {
       const side = readRoomSide(text);
       if (side && draft.placement?.kind === "beside") return this.continueRoom({ ...draft, placement: { ...draft.placement, side } });
     }
-    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "build-room", "next"].includes(u.kind)) {
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "build-room", "pipe-run", "next"].includes(u.kind)) {
       return null;
     }
     const corrected = this.roomCorrection(draft, slot, text);
@@ -1769,7 +1848,7 @@ export class ArchitectSession {
       return this.buildWall(draft);
     }
     // Another request altogether: let it through (this wall is dropped).
-    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "next"].includes(u.kind)) {
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "pipe-run", "next"].includes(u.kind)) {
       return null;
     }
     const stated = readWallDraft(text);

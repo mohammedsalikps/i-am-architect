@@ -31,6 +31,14 @@ export type TabStrip = {
  * or side-effecting `build()` (e.g. one that subscribes to a store)
  * only runs once even if the user switches tabs back and forth.
  */
+/**
+ * Whether disabled ("Coming soon") tabs are shown at all. Off for the demo
+ * workspace: an unfinished section is left out of the UI rather than shown
+ * as a dead button. Their definitions (and builders) stay in place - flip
+ * this to show them again.
+ */
+export const SHOW_COMING_SOON = false;
+
 export function createTabStrip(tabs: TabDefinition[], stripClassName: string, buttonClassName: string): TabStrip {
   if (tabs.length === 0) {
     throw new Error("createTabStrip requires at least one tab");
@@ -61,6 +69,7 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
   }
 
   for (const tab of tabs) {
+    if (tab.disabled && !SHOW_COMING_SOON) continue;
     const button = el("button", {
       className: buttonClassName,
       text: tab.label,

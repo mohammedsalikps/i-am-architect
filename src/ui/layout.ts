@@ -83,6 +83,8 @@ export type AppShellOptions = {
   onAddAsset: (assetId: string) => void;
   /** The Construction Method tab's viewport highlight - see SceneManager.highlightConstructionObjects() and constructionMethodPanel.ts. */
   onHighlightConstructionObjects: HighlightConstructionObjects;
+  /** A close-up of one point - a pipe fitting picked in the record book. See SceneManager.focusOnPoint(). */
+  onFocusPoint?: (point: { x: number; y: number; z: number }) => void;
   /** The EAVARA Architect conversation (ui/architectPanel.ts), floated over the viewport. When present, the empty state's "Ask AI to Design" opens it. */
   architect?: { element: HTMLElement; focusInput: () => void };
 };
@@ -186,7 +188,10 @@ export type AppShell = {
  * how this collapses at narrow widths.
  */
 export function createAppShell(options: AppShellOptions): AppShell {
+  // The top bar's search drives the Project tree's own search (built below - called only after construction).
   const topBar = createTopBar({
+    onSearch: (query) => leftSidebar.searchProject(query),
+    onSearchPick: () => leftSidebar.pickFirstSearchResult(),
     projectMeta: options.projectMeta,
     persistence: options.persistence,
     auth: options.auth,
@@ -279,7 +284,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
         selectionStore: options.selectionStore
       }).objects,
     () => options.projectMeta.get().id,
-    options.onHighlightConstructionObjects
+    options.onHighlightConstructionObjects,
+    options.onFocusPoint
   );
 
   // The viewport's own "nothing built yet" state (task: don't leave an

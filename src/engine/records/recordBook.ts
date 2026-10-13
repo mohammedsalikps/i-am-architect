@@ -3,6 +3,9 @@ import { compareIds } from "../ai/types.ts";
 import { getElementKind } from "../elements/catalog.ts";
 import { getAssetDefinition } from "../assets/catalog.ts";
 import { getMaterial } from "../materials/materialLibrary.ts";
+import { onSheetMaterial, resolveJoints } from "../plumbing/fittings.ts";
+import { describeSource, pipeSizeFor } from "../plumbing/upvcSheet.ts";
+import type { ResolvedJoint } from "../plumbing/fittings";
 
 /**
  * The construction record book: one row per real object in the project,
@@ -41,6 +44,14 @@ export interface RecordRow {
   areaBasis: string | null;
   volume: number | null;
   volumeBasis: string | null;
+  /** Where the row's size comes from, or what to know about it: a pipe's uPVC sheet size, a fitting's sheet part, why a joint has no part. */
+  source?: string | null;
+  /** A row worked out from the model rather than a stored object - a pipe fitting at a joint. */
+  derived?: "fitting";
+  /** For a derived row: the real object a click on it selects (the first pipe it joins). */
+  selectId?: string;
+  /** For a derived row: the pipes it joins. */
+  sourceIds?: string[];
 }
 
 export interface RecordTotal {
@@ -65,8 +76,93 @@ export const RECORD_ASSUMPTIONS: readonly string[] = [
   "Walls: area is one face (length × height) minus the doors and windows hosted in that wall; volume is that net area × thickness. No mortar, wastage or brick/block counts are included.",
   "Slabs, floors, ceilings, paths and landscape: plan area length × width; volume × thickness. Foundations: plan area × depth. Pillars: footprint width × depth; volume × height. Beams: volume length × height × width.",
   "Roofs: sloped area of the gable from its run, span and rise (no overhang beyond what is modelled). Doors and windows: opening area width × height. Rooms: floor area only (a room is a space, not built material). Water tanks: cylinder volume.",
+  "Pipes: length is centre to centre between joints (no fitting take-off is deducted); the nominal size is read from the outside diameter against the uPVC fittings sheet (clean water drawn at 1:5, sanitation at 1:10 - the full-size values are the kit values × the scale). Fittings are worked out from connected pipe ends, not stored: they are counted, with no length, area or volume. Only uPVC (or PVC) pipes take the sheet's sizes and fittings - joints between other pipes (CPVC, copper...) get no fitting row.",
   "“—” means this model doesn't define that quantity for the element type - it is not zero and is not estimated."
 ];
+
+/** A pipe's sheet size, for its row: "25 mm nominal main - Sheet p.5, 25 mm NOMINAL MAIN (1:5 kit)" - or why it has none. */
+function pipeSource(object: AIContextObject): string | null {
+  if (object.type !== "element" || (object.kind !== "water-pipe" && object.kind !== "drain-pipe")) return null;
+  if (!onSheetMaterial(object.material)) return `${materialLabel(object.material)} - not covered by the uPVC fittings sheet, so no sheet size or fittings.`;
+  const size = pipeSizeFor(object.kind, object.dimensions.diameter ?? 0);
+  if (!size) return "Custom size - not a size on the uPVC fittings sheet, so its joints get no sheet fittings.";
+  return `${size.nominal} mm nominal ${size.role} - ${describeSource(size.source, size.system)}, kit OD ${size.kit.od} mm`;
+}
+
+const round1 = (value: number): number => Math.round(value * 10) / 10;
+
+/** One derived row per pipe joint: the sheet fitting it takes, or the joint and why no sheet part fits. */
+function jointRow(joint: ResolvedJoint): RecordRow {
+  const fitting = joint.fitting;
+  // A sheet fitting is uPVC; a joint that also takes in another material is listed under all of them.
+  const sheetMaterial = joint.system === "clean-water" ? "upvc" : "upvc-grey";
+  const others = [...new Set(joint.members.map((member) => member.material).filter((material): material is string => material !== undefined && !onSheetMaterial(material)))].sort();
+  const material = others.length > 0 ? [sheetMaterial, ...others].join("+") : sheetMaterial;
+  const materialText = [sheetMaterial, ...others].map(materialLabel).join(" + ");
+  const ends = joint.members.length;
+  const direction =
+    joint.angle === null
+      ? `${ends} pipe ends`
+      : ends === 2
+        ? joint.angle <= 2
+          ? "straight on"
+          : `turns ${round1(joint.angle)}°`
+        : `branch at ${round1(joint.angle)}° to the run`;
+  return {
+    id: joint.id,
+    label: fitting ? fitting.label : "Unresolved joint",
+    type: fitting ? `fitting-${fitting.id}` : "joint-unresolved",
+    typeLabel: fitting ? fitting.label : "Unresolved joint",
+    material,
+    materialLabel: materialText,
+    length: null,
+    height: null,
+    thickness: null,
+    otherDimensions: [],
+    position: { x: round3(joint.point.x), y: round3(joint.point.y), z: round3(joint.point.z) },
+    direction,
+    area: null,
+    areaBasis: null,
+    volume: null,
+    volumeBasis: null,
+    source: fitting ? `${describeSource(fitting.source, fitting.system)}${joint.note ? ` - ${joint.note}` : ""}` : joint.problem,
+    derived: "fitting",
+    selectId: joint.members[0]?.id,
+    sourceIds: joint.members.map((member) => member.id)
+  };
+}
+
+/** Whether a row's type is quantified by length in the totals (walls, beams, boundary walls, pipes and other linear elements) - never a derived row. */
+function rowMeasuredByLength(row: RecordRow): boolean {
+  if (row.derived) return false;
+  return row.type === "wall" || row.type === "beam" || row.type === "boundary-wall" || !!getElementKind(row.type)?.linear;
+}
+
+/** Totals by type and material over `rows`, in a stable order. */
+function totalsOf(rows: readonly RecordRow[]): RecordTotal[] {
+  const groups = new Map<string, RecordTotal>();
+  for (const row of rows) {
+    const key = JSON.stringify([row.typeLabel, row.materialLabel]);
+    const total = groups.get(key) ?? { typeLabel: row.typeLabel, materialLabel: row.materialLabel, count: 0, length: null, area: null, volume: null };
+    total.count += 1;
+    if (rowMeasuredByLength(row) && row.length !== null) total.length = round3((total.length ?? 0) + row.length);
+    if (row.area !== null) total.area = round3((total.area ?? 0) + row.area);
+    if (row.volume !== null) total.volume = round3((total.volume ?? 0) + row.volume);
+    groups.set(key, total);
+  }
+  return [...groups.values()].sort((a, b) => a.typeLabel.localeCompare(b.typeLabel) || a.materialLabel.localeCompare(b.materialLabel));
+}
+
+/**
+ * The book narrowed to one row type, with its totals recomputed from the
+ * rows kept. Filtering rows (not the objects the book is built from)
+ * keeps every derived value as it is in the full book - a wall's area
+ * still deducts its openings, and fittings still come from all the pipes.
+ */
+export function filterRecordBook(book: RecordBook, type: string): RecordBook {
+  const rows = book.rows.filter((row) => row.type === type);
+  return { rows, totals: totalsOf(rows), assumptions: [...book.assumptions] };
+}
 
 const round3 = (value: number): number => Math.round(value * 1000) / 1000;
 
@@ -161,11 +257,6 @@ function quantities(object: AIContextObject, openingArea: number): Pick<RecordRo
   }
 }
 
-/** Whether a type is quantified by length in the totals. */
-function measuredByLength(object: AIContextObject): boolean {
-  return object.type === "wall" || object.type === "beam" || object.kind === "boundary-wall" || (object.type === "element" && !!getElementKind(object.kind ?? "")?.linear);
-}
-
 /** How a building is read: base and structure first, then openings, roof and rooms; services and furniture last. */
 const TYPE_ORDER: readonly string[] = ["slab", "foundation", "wall", "boundary-wall", "pillar", "beam", "door", "window", "roof", "stair", "room", "flooring", "ceiling"];
 function constructionOrder(object: AIContextObject): number {
@@ -190,7 +281,8 @@ export function buildRecordBook(objects: readonly AIContextObject[]): RecordBook
     .map((object) => {
       const others = Object.entries(object.dimensions)
         .filter(([key, value]) => !["length", "height", "thickness"].includes(key) && typeof value === "number" && isFinite(value))
-        .map(([key, value]) => ({ name: key.charAt(0).toUpperCase() + key.slice(1), value: round3(value) }));
+        // To 0.1 mm: a pipe's outside diameter (33.4 mm) must not round to 33 mm.
+        .map(([key, value]) => ({ name: key.charAt(0).toUpperCase() + key.slice(1), value: Math.round(value * 10000) / 10000 }));
       return {
         id: object.id,
         label: object.label ?? null,
@@ -204,26 +296,14 @@ export function buildRecordBook(objects: readonly AIContextObject[]): RecordBook
         otherDimensions: others,
         position: { x: round3(object.position.x), y: round3(object.position.y), z: round3(object.position.z) },
         direction: directionOf(object),
-        ...quantities(object, openings.get(object.id) ?? 0)
+        ...quantities(object, openings.get(object.id) ?? 0),
+        source: pipeSource(object)
       };
     });
+  // Fittings at the pipe joints, after every stored object - worked out from the pipes and their connections.
+  rows.push(...resolveJoints(objects).map(jointRow));
 
-  // Totals by element type and material, in a stable order.
-  const groups = new Map<string, { total: RecordTotal; byLength: boolean }>();
-  const rowById = new Map(rows.map((row) => [row.id, row]));
-  objects.forEach((object) => {
-    const row = rowById.get(object.id)!;
-    const key = `${row.typeLabel}\u0000${row.materialLabel}`;
-    const group = groups.get(key) ?? { total: { typeLabel: row.typeLabel, materialLabel: row.materialLabel, count: 0, length: null, area: null, volume: null }, byLength: measuredByLength(object) };
-    group.total.count += 1;
-    if (group.byLength && row.length !== null) group.total.length = round3((group.total.length ?? 0) + row.length);
-    if (row.area !== null) group.total.area = round3((group.total.area ?? 0) + row.area);
-    if (row.volume !== null) group.total.volume = round3((group.total.volume ?? 0) + row.volume);
-    groups.set(key, group);
-  });
-  const totals = [...groups.values()]
-    .map(({ total }) => total)
-    .sort((a, b) => a.typeLabel.localeCompare(b.typeLabel) || a.materialLabel.localeCompare(b.materialLabel));
+  const totals = totalsOf(rows);
 
   return { rows, totals, assumptions: [...RECORD_ASSUMPTIONS] };
 }
@@ -253,6 +333,7 @@ export const RECORD_CSV_COLUMNS = [
   "Y (m)",
   "Z (m)",
   "Direction",
+  "Source / note",
   "Area (m²)",
   "Area basis",
   "Volume (m³)",
@@ -277,6 +358,7 @@ export function recordBookCsv(book: RecordBook): string {
         row.position.y,
         row.position.z,
         row.direction,
+        row.source ?? null,
         row.area,
         row.areaBasis,
         row.volume,

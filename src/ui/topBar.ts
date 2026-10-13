@@ -19,6 +19,9 @@ export type TopBarOptions = {
   onUndo: () => void;
   onRedo: () => void;
   history: HistoryManager;
+  /** The search box: each change searches the project (the Project tree shows the matches); Enter picks the first. Without these the box stays disabled. */
+  onSearch?: (query: string) => void;
+  onSearchPick?: () => boolean;
 };
 
 /**
@@ -156,8 +159,28 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
   // labelled as not live yet.
   const search = el("input", {
     className: "app-header__search",
-    attrs: { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true", title: "Coming soon" }
-  });
+    attrs: options.onSearch
+      ? { type: "search", placeholder: "Search the project - name, id, material or room", "aria-label": "Search the project", autocomplete: "off", spellcheck: "false", title: "Matches show in the Project tree; Enter selects and frames the first" }
+      : { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true", title: "Coming soon" }
+  }) as HTMLInputElement;
+  if (options.onSearch) {
+    const onSearch = options.onSearch;
+    search.addEventListener("input", () => onSearch(search.value));
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        // The tree's own box may have been changed since: pick from what this box shows.
+        onSearch(search.value);
+        options.onSearchPick?.();
+      } else if (event.key === "Escape" && search.value) {
+        // Clearing the search: don't let that Escape also disarm a placement tool or cancel a drag.
+        // An Escape in an empty box goes on to them as usual.
+        event.stopPropagation();
+        search.value = "";
+        onSearch("");
+      }
+    });
+  }
 
   const accountName = el("span", { className: "app-header__account-name" });
   const signInButton = el("button", {

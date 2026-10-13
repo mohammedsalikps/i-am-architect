@@ -202,6 +202,7 @@ const architect = new ArchitectSession({
   commandExecutor,
   history,
   snapshot: () => buildAIProjectSnapshot(project),
+  elementParams: (id) => elementStore.get(id)?.params,
   undo: () => history.undo(),
   fallback: submitArchitectFallback
 });
@@ -419,18 +420,19 @@ function addWindow(): void {
  * kind's real dimensions come from (ElementKindDefinition.dimensions +
  * .axes) - never a second, hand-maintained size list.
  */
-function elementGhostSize(definition: ElementKindDefinition): PlacementTool["ghostSize"] {
-  const byKey = new Map(definition.dimensions.map((spec) => [spec.key, spec.default]));
+function elementGhostSize(definition: ElementKindDefinition, dimensions: Record<string, number> = {}): PlacementTool["ghostSize"] {
+  // Preset dimensions (a pipe size's diameter) win over the catalog defaults.
+  const byKey = new Map(definition.dimensions.map((spec) => [spec.key, dimensions[spec.key] ?? spec.default]));
   return { x: byKey.get(definition.axes.x) ?? 0.5, y: byKey.get(definition.axes.y) ?? 0.5, z: byKey.get(definition.axes.z) ?? 0.5 };
 }
 
 /** Arms pick-and-place for one catalog element kind - an element.add command once placed, so it validates and undoes like any other add. */
-function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}): void {
+function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}, placement?: { toolId: string; label: string }): void {
   const definition = getElementKind(kind);
   if (!definition) {
     return;
   }
-  armPlacement(kind, definition.label, elementGhostSize(definition), (point) => ({
+  armPlacement(placement?.toolId ?? kind, placement?.label ?? definition.label, elementGhostSize(definition, options.dimensions), (point) => ({
     type: "element.add",
     element: { ...options, kind, position: { x: point.x, z: point.z } }
   }));
@@ -507,7 +509,7 @@ const ribbonActions: RibbonActions = {
   addSlab,
   addDoor,
   addWindow,
-  addElement: (kind) => addElement(kind),
+  addElement: (kind, options, placement) => addElement(kind, options, placement),
   addRoom: (preset) => {
     const { kind, ...options } = roomPresetOptions(preset);
     addElement(kind, options);
@@ -737,6 +739,7 @@ const shell = createAppShell({
     }
   },
   onFocusObjects: (objectIds) => sceneManager.current?.focusOn(objectIds),
+  onFocusPoint: (point) => sceneManager.current?.focusOnPoint(point),
   visibilityStore,
   ribbonActions,
   onDuplicateSelected: duplicateSelected,

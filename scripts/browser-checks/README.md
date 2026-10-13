@@ -30,6 +30,7 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
    ```bash
    node scripts/browser-checks/save-reopen.mjs
    node scripts/browser-checks/voice-simulated.mjs
+   node scripts/browser-checks/plumbing.mjs
    ```
 
    `WIN=1280x800` (or `1024x768`) changes the window size; an optional first argument is a folder for screenshots (default: `<temp>/iarchitect-browser-checks/shots`).
@@ -37,6 +38,17 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 **Housekeeping.** Each run refuses to start with less than 500 MB free, uses a throwaway Chrome profile under `<temp>/iarchitect-browser-checks/`, keeps Chrome's caches and scratch folders inside it, and deletes it (and kills its own Chrome) on exit - including after a failure or the 8-minute watchdog. `save-reopen.mjs` creates a throwaway account on the mock backend with credentials generated at run time; they are never printed and disappear with the mock.
 
 **`save-reopen.mjs`** builds a kitchen and a bedroom beside it by conversation, saves, reloads the page, opens the project, and checks the record book is identical with no duplicate ids. It then resizes the reopened bedroom by name and checks its own walls follow and the shared wall stays. Undo and Redo from the top bar must restore the record book exactly. Moving the kitchen off its shared wall must be refused with nothing changed. Finally it saves again, reopens, and moves the bedroom once more.
+
+**`plumbing.mjs`** builds uPVC pipe runs by conversation ("Run a 25 mm water pipe from 0, 0 to 4, 0"), then checks:
+- the fittings each run creates: a coupler that becomes a 25 × 20 reducing tee when a branch joins, a 90° elbow, a drain 87.5° bend, and an unsupported 30° turn flagged instead of drawn
+- the record book: each fitting once, pipe sizes in mm with their sheet source
+- clicking a fitting row zooms the camera onto the joint (it takes the close-up screenshots), and clicking the fitting in that close-up selects one of its pipes
+- top-bar Undo/Redo
+- the ribbon's size presets, and Escape in the empty top-bar search still disarming the armed size
+- the hidden "Coming soon" tabs and Annotate
+- the top-bar search driving the Project tree
+- save, reload and reopen with the record book unchanged
+- the AI panel not covering the view controls at 1300, 1366, 1400 and 1440 px
 
 **`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. It checks:
 - hands-free speaking, and barge-in with the mic

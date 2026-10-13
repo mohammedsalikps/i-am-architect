@@ -75,7 +75,15 @@ duplicate → delete → undo → redo → save/reopen lifecycle.
 
 ## Not modeled (yet)
 
-No CSG openings in non-rectangular walls, no fittings or flow between
-pipes, no circuits, no structural, hydraulic, or electrical load
-calculations, no code compliance, and no terrain. Room membership is by
-object center only.
+No CSG openings in non-rectangular walls, no flow between pipes, no
+circuits, no structural, hydraulic, or electrical load calculations, no
+code compliance, and no terrain. Room membership is by object center
+only. Pipes are level runs (no risers or falls yet). Pipe fittings are not
+stored elements: they are worked out from connected water and drain pipe
+ends against the uPVC fittings sheet (engine/plumbing/), drawn by
+scene/elements/FittingLayer.ts and listed in the record book. Only uPVC
+(or PVC, i.e. PVC-U) pipes take the sheet's sizes and fittings; joints
+between other pipe materials (CPVC, copper...) get none, and a uPVC pipe
+joined to one is flagged; a finish such as paint doesn't change a pipe's
+material. Clicking a fitting selects the visible pipe whose leg was clicked.
+Pipe runs by conversation never join hot and cold water pipes.

@@ -142,7 +142,8 @@ function kind(input: KindInput): ElementKindDefinition {
 
 const linearDimensions = (length: number, diameter: number) => [
   dimension("length", "Length", length, 0.05, 0.1),
-  dimension("diameter", "Diameter", diameter, 0.004, 0.005)
+  // Outside diameter; 0.1 mm steps so real pipe ODs (33.4 mm, 26.67 mm...) are exact.
+  dimension("diameter", "Diameter", diameter, 0.004, 0.0001)
 ];
 
 export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
@@ -239,13 +240,13 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     kind: "water-pipe",
     label: "Water Pipe",
     category: "plumbing",
-    description: "A water supply pipe, running along its length.",
+    description: "A clean-water supply pipe, running along its length. Sized by its outside diameter - the default is the uPVC sheet's 25 mm main (33.4 mm OD); see plumbing/upvcSheet.ts.",
     shape: "pipe",
-    dimensions: linearDimensions(3, 0.025),
+    dimensions: linearDimensions(3, 0.0334),
     axes: LINEAR,
     baseY: 0.3,
-    defaultMaterial: "cpvc",
-    defaultColor: "#3b7dd8",
+    defaultMaterial: "upvc",
+    defaultColor: "#f2f2ee",
     materialCategories: ["plumbing", "metal"],
     params: [{ key: "system", label: "System", kind: "choice", default: "cold", options: ["cold", "hot"] }],
     linear: true,
@@ -256,13 +257,13 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     kind: "drain-pipe",
     label: "Drain Pipe",
     category: "plumbing",
-    description: "A waste/drain pipe, running along its length.",
+    description: "A waste/drain (sanitation) pipe, running along its length. Sized by its outside diameter - the default is the uPVC sheet's 110 mm pipe; see plumbing/upvcSheet.ts.",
     shape: "pipe",
-    dimensions: linearDimensions(3, 0.1),
+    dimensions: linearDimensions(3, 0.11),
     axes: LINEAR,
     baseY: 0.05,
-    defaultMaterial: "pvc",
-    defaultColor: "#7c7c7c",
+    defaultMaterial: "upvc-grey",
+    defaultColor: "#8b9096",
     materialCategories: ["plumbing"],
     linear: true,
     connectsWith: ["drain-pipe"],

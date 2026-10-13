@@ -511,7 +511,9 @@ export function createCommandBar(
   /** The project's current real objects, as the AI layer already sees them (buildAIProjectSnapshot) - read fresh each time the Construction Method tab generates, never cached. */
   getConstructionObjects: () => readonly AIContextObject[],
   getProjectId: () => string | null,
-  onHighlightConstructionObjects: HighlightConstructionObjects
+  onHighlightConstructionObjects: HighlightConstructionObjects,
+  /** A close-up of one point (a fitting in the record book). */
+  onFocusPoint?: (point: { x: number; y: number; z: number }) => void
 ): CommandBar {
   // Built up front (not lazily inside the tab strip's own build()) so
   // its `focusInput()` is available regardless of which tab is active -
@@ -539,7 +541,7 @@ export function createCommandBar(
         id: "measurements",
         label: "Measurements",
         build: () => {
-          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject);
+          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject, onFocusPoint);
           return recordBookTab.element;
         }
       },

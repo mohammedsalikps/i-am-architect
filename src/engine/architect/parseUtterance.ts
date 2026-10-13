@@ -2,6 +2,7 @@
 // (engine/architect/verify.ts does). Harmless for Vite.
 import { parseHouseIntent, readHouseRequest } from "../ai/houseIntent.ts";
 import { isAdjustment } from "./adjust.ts";
+import { isPipeRun } from "./pipeRun.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
 
@@ -58,6 +59,7 @@ export type Utterance =
   | { kind: "adjust"; text: string }
   /** One new room, built by conversation (roomBuilder.ts) - "create a 4 m by 5 m kitchen, 3 m high". */
   | { kind: "build-room"; text: string }
+  | { kind: "pipe-run"; text: string }
   | { kind: "unknown" };
 
 const NUMBER = String.raw`(-?\d+(?:\.\d+)?)`;
@@ -244,6 +246,10 @@ export function parseUtterance(raw: string): Utterance {
   if (CLEAR.test(text) && !HOUSE_NOUN.test(text)) return { kind: "clear-conflicts" };
   if (NEAREST.test(text)) return { kind: "nearest-free" };
   if (DEFAULTS.test(text) && !HOUSE_NOUN.test(text)) return { kind: "defaults" };
+
+  // A pipe run with its points ("run a 25 mm water pipe from 0, 0 to 3, 0") - before walls and rooms,
+  // so "a drain pipe from the bathroom ..." isn't taken for a room.
+  if (isPipeRun(text)) return { kind: "pipe-run", text };
 
   // One NEW wall: a build verb and "a/an/another/new ... wall" - never
   // "the ... wall" (an existing one), walls (the structure stage), or

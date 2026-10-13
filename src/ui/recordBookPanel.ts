@@ -1,5 +1,5 @@
 import { el } from "./dom";
-import { buildRecordBook, recordBookCsv } from "../engine/records/recordBook.ts";
+import { buildRecordBook, filterRecordBook, recordBookCsv } from "../engine/records/recordBook.ts";
 import type { RecordBook, RecordRow } from "../engine/records/recordBook.ts";
 import type { AIContextObject } from "../engine/ai/types.ts";
 
@@ -31,21 +31,42 @@ function quantity(value: number | null, basis: string | null, unit: string): HTM
   });
 }
 
-function rowElement(row: RecordRow, onSelect: (id: string) => void): HTMLElement {
-  const tr = el("tr", { className: "record-book__row", attrs: { tabindex: "0", title: "Select this element in the 3D view" } }, [
+/** A dimension for the table: a pipe's diameter, or anything under 10 cm, in millimetres (so a 25 mm and a 32 mm pipe read differently); otherwise metres. */
+function dimensionText(name: string, value: number): string {
+  return value < 0.1 || (name === "Diameter" && value < 0.5) ? `${Number((value * 1000).toFixed(1))} mm` : value.toFixed(2);
+}
+
+function otherCell(row: RecordRow): HTMLElement {
+  const dims = row.otherDimensions.map((entry) => `${entry.name} ${dimensionText(entry.name, entry.value)}`).join(", ");
+  const cell = el("td", { className: "record-book__other", text: dims || (row.source ? "" : "—"), attrs: row.source ? { title: row.source } : {} });
+  if (row.source) {
+    const unresolved = row.type === "joint-unresolved" || row.source.startsWith("Custom size");
+    cell.append(el("span", { className: unresolved ? "record-book__source record-book__source--warn" : "record-book__source", text: row.source }));
+  }
+  return cell;
+}
+
+function rowElement(row: RecordRow, onSelect: (id: string) => void, onFocusPoint?: (point: RecordRow["position"]) => void): HTMLElement {
+  const title = row.derived ? "Worked out from the pipes it joins - zooms in on the joint" : "Select this element in the 3D view";
+  const tr = el("tr", { className: row.derived ? "record-book__row record-book__row--derived" : "record-book__row", attrs: { tabindex: "0", title } }, [
     el("td", {}, [el("span", { className: "record-book__id", text: row.id }), ...(row.label ? [el("span", { className: "record-book__name", text: row.label })] : [])]),
     el("td", { text: row.typeLabel }),
     el("td", { text: row.materialLabel }),
     el("td", { className: "record-book__num", text: meters(row.length) }),
     el("td", { className: "record-book__num", text: meters(row.height) }),
     el("td", { className: "record-book__num", text: meters(row.thickness) }),
-    el("td", { className: "record-book__other", text: row.otherDimensions.map((entry) => `${entry.name} ${entry.value.toFixed(2)}`).join(", ") || "—" }),
+    otherCell(row),
     el("td", { className: "record-book__num", text: `${row.position.x.toFixed(2)}, ${row.position.y.toFixed(2)}, ${row.position.z.toFixed(2)}` }),
     el("td", { text: row.direction }),
     quantity(row.area, row.areaBasis, "m²"),
     quantity(row.volume, row.volumeBasis, "m³")
   ]);
-  const select = (): void => onSelect(row.id);
+  // A derived row (a fitting) isn't a stored object: close in on its joint (a fitting is centimetres across) without
+  // selecting a pipe, whose handles would sit right over it; without a camera, select the first pipe it joins.
+  const select = (): void => {
+    if (row.derived && onFocusPoint) onFocusPoint(row.position);
+    else onSelect(row.selectId ?? row.id);
+  };
   tr.addEventListener("click", select);
   tr.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -71,7 +92,7 @@ function download(csv: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export function buildRecordBookTab(getObjects: () => readonly AIContextObject[], onSelect: (objectId: string) => void): RecordBookPanel {
+export function buildRecordBookTab(getObjects: () => readonly AIContextObject[], onSelect: (objectId: string) => void, onFocusPoint?: (point: { x: number; y: number; z: number }) => void): RecordBookPanel {
   let filter = ALL_TYPES;
   let book: RecordBook = { rows: [], totals: [], assumptions: [] };
 
@@ -113,8 +134,9 @@ export function buildRecordBookTab(getObjects: () => readonly AIContextObject[],
 
   function refresh(): void {
     const objects = getObjects();
+    const full = buildRecordBook(objects);
     // The type filter lists the types actually present.
-    const present = buildRecordBook(objects).rows;
+    const present = full.rows;
     const types = [...new Map(present.map((row) => [row.type, row.typeLabel])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
     if (filter !== ALL_TYPES && !types.some(([type]) => type === filter)) filter = ALL_TYPES;
     typeSelect.replaceChildren(
@@ -124,8 +146,9 @@ export function buildRecordBookTab(getObjects: () => readonly AIContextObject[],
     typeSelect.value = filter;
 
     // What's shown is what's exported: the same filtered book.
-    book = buildRecordBook(filter === ALL_TYPES ? objects : objects.filter((object) => (object.type === "element" ? object.kind ?? "element" : object.type) === filter));
-    tableBody.replaceChildren(...book.rows.map((row) => rowElement(row, onSelect)));
+    // Rows are filtered (not the objects), so a wall keeps its opening deduction and fittings still come from every pipe.
+    book = filter === ALL_TYPES ? full : filterRecordBook(full, filter);
+    tableBody.replaceChildren(...book.rows.map((row) => rowElement(row, onSelect, onFocusPoint)));
     totalsBody.replaceChildren(
       ...book.totals.map((total) =>
         el("tr", {}, [
