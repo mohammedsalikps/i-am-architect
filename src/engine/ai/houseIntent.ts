@@ -199,23 +199,15 @@ export function parseHouseIntent(instruction: string): HouseIntent {
 
   const floors = readFloors(instruction);
   if (floors !== undefined && floors > 1) {
-    return {
-      kind: "unsupported",
-      reason:
-        "This design currently requires a feature that is not available yet: the construction engine doesn't yet support multiple floors. Describe a single-storey house instead - drop the floor count and I'll build the rest of the design."
-    };
+    return { kind: "unsupported", reason: MULTI_FLOOR_REASON };
   }
 
   const footprint = readFootprint(instruction);
   if (footprint && (!isFinite(footprint.length) || !isFinite(footprint.width))) {
     return { kind: "none" };
   }
-  if (footprint && (footprint.length < HOUSE_FOOTPRINT_LIMITS.min || footprint.length > HOUSE_FOOTPRINT_LIMITS.max ||
-      footprint.width < HOUSE_FOOTPRINT_LIMITS.min || footprint.width > HOUSE_FOOTPRINT_LIMITS.max)) {
-    return {
-      kind: "unsupported",
-      reason: `A ${footprint.length} m × ${footprint.width} m footprint is outside what the house planner supports (each side must be ${HOUSE_FOOTPRINT_LIMITS.min}-${HOUSE_FOOTPRINT_LIMITS.max} m).`
-    };
+  if (footprint && !footprintFits(footprint)) {
+    return { kind: "unsupported", reason: footprintReason(footprint) };
   }
 
   return {
@@ -228,4 +220,100 @@ export function parseHouseIntent(instruction: string): HouseIntent {
       ...(floors !== undefined ? { floors } : {})
     }
   };
+}
+
+const MULTI_FLOOR_REASON =
+  "This design currently requires a feature that is not available yet: the construction engine doesn't yet support multiple floors. Describe a single-storey house instead - drop the floor count and I'll build the rest of the design.";
+
+function footprintFits(footprint: HouseFootprint): boolean {
+  const { min, max } = HOUSE_FOOTPRINT_LIMITS;
+  return footprint.length >= min && footprint.length <= max && footprint.width >= min && footprint.width <= max;
+}
+
+function footprintReason(footprint: HouseFootprint): string {
+  return `A ${footprint.length} m × ${footprint.width} m footprint is outside what the house planner supports (each side must be ${HOUSE_FOOTPRINT_LIMITS.min}-${HOUSE_FOOTPRINT_LIMITS.max} m).`;
+}
+
+/** The room names the house planner knows - what a house plan's `rooms` may contain. */
+export const HOUSE_ROOM_LABELS: readonly string[] = [...new Set(ROOM_KEYWORDS.map(({ label }) => label))];
+export const HOUSE_BEDROOM_LIMITS = { min: 1, max: 6 } as const;
+const HOUSE_PLAN_KEYS = new Set(["bedrooms", "footprint", "rooms", "size", "floors"]);
+const MAX_PLAN_ROOMS = 12;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWholeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
+}
+
+/**
+ * Validates a whole-house PLAN an AI provider returned (its response's
+ * `house` - see promptSchema.ts) into the same HouseIntent a recognized
+ * instruction gives, so it is planned and built by exactly the same
+ * deterministic, validated house builder - the provider never supplies
+ * a house's geometry. Anything unexpected (an unknown key, a fractional
+ * bedroom count, a room the planner doesn't know) refuses the whole plan
+ * rather than guessing; a multi-storey or out-of-range plan is
+ * `unsupported`, with the same reasons as parseHouseIntent().
+ */
+export function validateHousePlan(value: unknown): { ok: true; intent: Extract<HouseIntent, { kind: "house" | "unsupported" }> } | { ok: false; error: string } {
+  if (!isRecord(value)) {
+    return { ok: false, error: "the house plan must be an object" };
+  }
+  const unknownKey = Object.keys(value).find((key) => !HOUSE_PLAN_KEYS.has(key));
+  if (unknownKey !== undefined) {
+    return { ok: false, error: `the house plan has an unsupported field "${unknownKey}"` };
+  }
+
+  const request: HouseDesignRequest = {};
+  if (value.floors !== undefined) {
+    if (!isWholeNumber(value.floors) || value.floors < 1) {
+      return { ok: false, error: "floors must be a whole number of at least 1" };
+    }
+    if (value.floors > 1) {
+      return { ok: true, intent: { kind: "unsupported", reason: MULTI_FLOOR_REASON } };
+    }
+    request.floors = value.floors;
+  }
+  if (value.footprint !== undefined) {
+    const footprint = value.footprint;
+    if (!isRecord(footprint) || typeof footprint.length !== "number" || typeof footprint.width !== "number" ||
+        !isFinite(footprint.length) || !isFinite(footprint.width)) {
+      return { ok: false, error: "footprint must be { length, width } in meters" };
+    }
+    const size = { length: footprint.length, width: footprint.width };
+    if (!footprintFits(size)) {
+      return { ok: true, intent: { kind: "unsupported", reason: footprintReason(size) } };
+    }
+    request.footprint = size;
+  }
+  if (value.bedrooms !== undefined) {
+    if (!isWholeNumber(value.bedrooms) || value.bedrooms < HOUSE_BEDROOM_LIMITS.min || value.bedrooms > HOUSE_BEDROOM_LIMITS.max) {
+      return { ok: false, error: `bedrooms must be a whole number from ${HOUSE_BEDROOM_LIMITS.min} to ${HOUSE_BEDROOM_LIMITS.max}` };
+    }
+    request.bedrooms = value.bedrooms;
+  }
+  if (value.size !== undefined) {
+    if (value.size !== "small" && value.size !== "medium" && value.size !== "large") {
+      return { ok: false, error: 'size must be "small", "medium" or "large"' };
+    }
+    request.size = value.size;
+  }
+  if (value.rooms !== undefined) {
+    if (!Array.isArray(value.rooms) || value.rooms.length === 0 || value.rooms.length > MAX_PLAN_ROOMS) {
+      return { ok: false, error: `rooms must list 1-${MAX_PLAN_ROOMS} rooms` };
+    }
+    const rooms: string[] = [];
+    for (const room of value.rooms) {
+      const label = typeof room === "string" ? HOUSE_ROOM_LABELS.find((known) => known.toLowerCase() === room.trim().toLowerCase()) : undefined;
+      if (!label) {
+        return { ok: false, error: `rooms may only name ${HOUSE_ROOM_LABELS.join(", ")}` };
+      }
+      rooms.push(label);
+    }
+    request.rooms = rooms;
+  }
+  return { ok: true, intent: { kind: "house", request } };
 }

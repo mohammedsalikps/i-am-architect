@@ -36,9 +36,10 @@ import { GeminiProvider } from "./GeminiProvider.ts";
 import type { GeminiFetch, GeminiHttpResponse } from "./GeminiProvider.ts";
 import { COMMAND_TYPES, RESPONSE_JSON_SCHEMA, buildContextMessage, buildSystemPrompt } from "./promptSchema.ts";
 import { AnthropicProvider, DEFAULT_ANTHROPIC_MODEL, SUBMIT_TOOL } from "./AnthropicProvider.ts";
+import { ANTHROPIC_TIMEOUT_MS } from "./anthropicSettings.ts";
 import type { AnthropicEffort, AnthropicFetch, AnthropicMessageSummary, AnthropicProviderOptions } from "./AnthropicProvider.ts";
 import { friendlyAiErrorMessage } from "../AiPromptController.ts";
-import { BackendAIProvider } from "./BackendAIProvider.ts";
+import { BACKEND_AI_TIMEOUT_MS, BackendAIProvider } from "./BackendAIProvider.ts";
 import type { BackendFetch, BackendHttpResponse } from "./BackendAIProvider.ts";
 import { AICommandPipeline } from "../AICommandPipeline.ts";
 import type { CommandExecutorLike } from "../AICommandPipeline.ts";
@@ -571,7 +572,11 @@ async function run(): Promise<void> {
     // references/selection/room-aware placement) appended a
     // selection-resolution line after the "Current project" summary, and
     // three more (relative-change/direction convention, reference tokens,
-    // roomId) after the "update_object" explicit-edit line.
+    // roomId) after the "update_object" explicit-edit line. The whole-house
+    // timeout fix reworded line 6 (a house is no longer "every object in
+    // one response"; large builds come in parts) and replaced the simple-
+    // house recipe with the WHOLE HOUSES plan line, keeping its element
+    // sentence as a line of its own.
     assertDeepEqual(
       lines,
       [
@@ -580,7 +585,7 @@ async function run(): Promise<void> {
         "Only these object types are currently available: wall, pillar, beam, slab, door, window, element, asset.",
         'Supported commands: "<type>.add" creates a new object; "update_object" edits an existing one. Never produce delete or duplicate commands.',
         "Every dimension/color/material/rotation/position field is optional - omit a field entirely to use the application's default for it.",
-        'Produce one command per distinct object the user asked for, in the order they were mentioned. A request for a whole structure, such as a house, asks for every object that structure needs: return all of them in one response. If the instruction asks for something outside the available object types or commands, omit it and explain why in "notes" instead of guessing.',
+        'Produce one command per distinct object the user asked for, in the order they were mentioned - except for an entire house (see WHOLE HOUSES below). Keep each response small enough to answer quickly: if an instruction needs more than 40 commands, return only its first coherent part and say in "notes" what to ask for next. If the instruction asks for something outside the available object types or commands, omit it and explain why in "notes" instead of guessing.',
         "Current project: 2 wall(s), 1 pillar(s), 0 beam(s), 0 slab(s), 0 door(s), 0 window(s), 1 assembly/assemblies, selected object: wall-7.",
         `When the instruction says "this", "it", or "the selected <wall/door/window/object/furniture/...>" without naming an id, it means the selected object above (selectedObjectId) - use that id directly. If selectedObjectId is "none" and the instruction depends on a selection, produce no command for that part and say so in "notes" rather than guessing which object was meant.`,
         'The message before the instruction is the CURRENT construction state as JSON (key "currentConstructionState"): the counts and selectedObjectId above, every existing object (id, type, an element\'s kind and label, a hosted door\'s or window\'s hostId, a connected element\'s connections, dimensions, position, rotation, material, color, assemblyIds), and every assembly (id, name, description, objectIds). Positions and dimensions are in meters; rotation is in radians around the vertical axis.',
@@ -598,7 +603,8 @@ async function run(): Promise<void> {
         `Before rotation, an object's dimensions run along these axes: wall length X, height Y, thickness Z; pillar width X, height Y, depth Z; beam length X, height Y, width Z; slab length X, thickness Y, width Z; door and window width X, height Y, thickness Z. "rotation" turns an object around the vertical axis, in radians: 1.5707963267948966 (90 degrees) makes a wall's length run along Z.`,
         `The application gives every new object its own unique id - never put an id in a "<type>.add" command. Ids appear only in "update_object", copied exactly from the current construction state.`,
         `Build coherent geometry: size and place every new object so the parts fit together - walls meet at corners, and everything rests on the ground or on the slab - and never place a new object inside another new or existing object; the geometry section shows what is already occupied. Doors and windows are separate objects: put each flush against the outside face of its wall, not inside the wall.`,
-        `A simple house on an L x W footprint (L along X, W along Z) is: one L x W slab, 0.2 m thick, on the ground; four 0.4 x 0.4 m corner pillars on the slab, flush with its corners; four 0.2 m thick perimeter walls on the slab, running pillar to pillar with their outer faces flush with the slab's edges; one door on the outside face of the front (+Z) wall; and windows on the outside faces of other walls. Center it on the origin unless existing objects are in the way; then move it clear of them. Rooms, finishes, services, furniture, and exterior works are element kinds: add them only when the instruction asks for them.`,
+        `WHOLE HOUSES: when the instruction asks for an entire new house or home - in any wording ("build a 3 bedroom house", "I want a home on a 10 x 8 m plot", "generate the walls, doors and windows for a house") - never list its slab, pillars, walls, doors, windows or rooms yourself. Return an empty "commands" array and a "house" plan holding only what the user specified (bedrooms, footprint, rooms, size, floors); the application plans the layout and builds the house in validated stages. Never use "house" to add to or edit an existing house.`,
+        `Rooms, finishes, services, furniture, and exterior works are element kinds: add them only when the instruction asks for them.`,
         ...expectedElementPromptLines(),
         ...expectedAssetPromptLines(),
         // Relationships (wall hosting, endpoint connections) added these two, and hostId/connections to line 8.
@@ -1003,6 +1009,28 @@ async function run(): Promise<void> {
             notes: {
               type: "string",
               description: "Optional free-text notes, e.g. parts of the instruction that could not be mapped to a command."
+            },
+            // The whole-house plan: the model interprets, the house builder builds.
+            house: {
+              type: "object",
+              description:
+                'ONLY when the instruction asks for an entire new house or home, in any wording. Then "commands" stays empty: the application plans the layout and builds the house itself, in validated stages. Include only what the user specified.',
+              properties: {
+                bedrooms: { type: "integer", description: "Number of bedrooms, 1-6." },
+                footprint: {
+                  type: "object",
+                  description: "The house's outer size in meters, each side 4-40 m: length along X, width along Z. A size the user gives for the house's plot or site is its footprint.",
+                  properties: { length: { type: "number" }, width: { type: "number" } },
+                  required: ["length", "width"]
+                },
+                rooms: {
+                  type: "array",
+                  description: "Only the rooms the user named, one entry per room.",
+                  items: { type: "string", enum: ["Master Bedroom", "Living Room", "Dining Room", "Bathroom", "Bedroom", "Kitchen", "Study"] }
+                },
+                size: { type: "string", enum: ["small", "medium", "large"], description: "Only when the user gave a size word instead of dimensions." },
+                floors: { type: "integer", description: "Only when the user asked for a number of storeys." }
+              }
             }
           },
           required: ["commands"]
@@ -1756,6 +1784,51 @@ async function run(): Promise<void> {
     const failing = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: makeMockAnthropicFetch(() => anthropicError(401, "authentication_error", "invalid x-api-key")), maxRetries: 0, onMessage: (summary) => summaries.push(summary) });
     await failing.interpret({ instruction: "Add a wall", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }).catch(() => undefined);
     assertEqual(summaries.length, 1, "a failed request has no summary - its error says what happened");
+  });
+
+  // --- Whole-house plans and time budgets (the live 3-bedroom-house timeout) ---
+
+  const HOUSE_PLAN = { bedrooms: 3, footprint: { length: 10, width: 8 } };
+
+  await check("a whole-house request comes back from Claude as a small plan, passed on as-is - never as a house's worth of commands", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [], house: HOUSE_PLAN, notes: "A 3-bedroom house." })]));
+    const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl });
+    const response = await provider.interpret({ instruction: "I want a complete 3-bedroom house on a 10 m x 8 m plot", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertDeepEqual(response, { commands: [], notes: "A 3-bedroom house.", house: HOUSE_PLAN }, "the plan, unvalidated here - the pipeline validates it");
+    const body = fetchImpl.calls[0].body as { system: { text: string }[]; tools: { input_schema: { properties: Record<string, unknown> } }[] };
+    assertTrue("house" in body.tools[0].input_schema.properties, "the tool's schema offers the house plan");
+    assertTrue(body.system[0].text.includes("WHOLE HOUSES:"), "and the prompt says to use it instead of listing a house's objects");
+
+    const twice = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [], house: HOUSE_PLAN }), submitCall({ commands: [], house: HOUSE_PLAN })]));
+    await assertRejects(
+      () => new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: twice }).interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "more than one house plan",
+      "two plans in one answer are malformed"
+    );
+  });
+
+  await check("OpenAI, Gemini and the backend client pass a house plan through unchanged; an answer without one has no house field", async () => {
+    const request = { instruction: "a home", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES };
+    const openAI = new OpenAIProvider({ apiKey: "sk-test", fetch: makeMockFetch(() => okChatResponse({ commands: [], house: HOUSE_PLAN })) });
+    assertDeepEqual((await openAI.interpret(request)).house, HOUSE_PLAN, "OpenAI");
+    const gemini = new GeminiProvider({ apiKey: "gm-test", fetch: makeMockGeminiFetch(() => okGeminiResponse({ commands: [], house: HOUSE_PLAN })) });
+    assertDeepEqual((await gemini.interpret(request)).house, HOUSE_PLAN, "Gemini");
+    const backend = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: makeMockBackendFetch(() => okBackendResponse({ commands: [], house: HOUSE_PLAN })) });
+    assertDeepEqual((await backend.interpret(request)).house, HOUSE_PLAN, "the browser's backend client");
+    const plain = new BackendAIProvider({ baseUrl: "http://localhost:8787", fetch: makeMockBackendFetch(() => okBackendResponse({ commands: [] })) });
+    assertTrue(!("house" in (await plain.interpret(request))), "no house field when the answer has none");
+  });
+
+  await check("time budgets: Claude's deadline (retries included) ends before the browser stops waiting, so the user gets the backend's own answer", () => {
+    assertEqual(ANTHROPIC_TIMEOUT_MS, 25_000, "Claude: 25 s");
+    assertEqual(BACKEND_AI_TIMEOUT_MS, 30_000, "browser: 30 s");
+    assertTrue(BACKEND_AI_TIMEOUT_MS - ANTHROPIC_TIMEOUT_MS >= 3_000, "at least 3 s for the backend's reply to reach the browser");
+    assertEqual(
+      friendlyAiErrorMessage("Backend request failed with status 502: Anthropic request timed out after 25000ms."),
+      friendlyAiErrorMessage("Backend request timed out after 30000ms."),
+      "either way the user reads the same honest timeout message"
+    );
+    assertTrue(friendlyAiErrorMessage("Backend request timed out after 30000ms.").includes("Your design was not changed."), "which says nothing changed");
   });
 
   await check("a valid tool call becomes { commands, notes } - thinking and text blocks are never commands", async () => {

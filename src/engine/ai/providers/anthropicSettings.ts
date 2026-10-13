@@ -17,6 +17,13 @@
  */
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5";
 
+/**
+ * One overall deadline for a Claude request, the SDK's retries included -
+ * deliberately shorter than the browser's BACKEND_AI_TIMEOUT_MS (30 s), so
+ * the user gets the backend's own "timed out" answer, not a browser abort.
+ */
+export const ANTHROPIC_TIMEOUT_MS = 25_000;
+
 export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export const ANTHROPIC_EFFORTS: readonly AnthropicEffort[] = ["low", "medium", "high", "xhigh", "max"];
 

@@ -4,7 +4,7 @@ import type { AIProviderRequest, AIProviderResponse } from "../types";
 // Explicit .ts extension on this value import lets Node run this file
 // directly (providers/verify.ts, the backend). Harmless for Vite.
 import { RESPONSE_JSON_SCHEMA, buildContextMessage, buildSystemPrompt } from "./promptSchema.ts";
-import { ANTHROPIC_EFFORTS, DEFAULT_ANTHROPIC_EFFORT, DEFAULT_ANTHROPIC_MODEL } from "./anthropicSettings.ts";
+import { ANTHROPIC_EFFORTS, ANTHROPIC_TIMEOUT_MS, DEFAULT_ANTHROPIC_EFFORT, DEFAULT_ANTHROPIC_MODEL } from "./anthropicSettings.ts";
 import type { AnthropicEffort } from "./anthropicSettings.ts";
 
 export { ANTHROPIC_EFFORTS, DEFAULT_ANTHROPIC_EFFORT, DEFAULT_ANTHROPIC_MODEL };
@@ -96,7 +96,6 @@ export interface AnthropicMessageSummary {
 }
 
 const DEFAULT_MAX_TOKENS = 16000;
-const DEFAULT_TIMEOUT_MS = 25_000;
 const DEFAULT_MAX_RETRIES = 2;
 const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
@@ -159,7 +158,7 @@ export class AnthropicProvider implements AIProvider {
     this.model = options.model?.trim() || DEFAULT_ANTHROPIC_MODEL;
     this.effort = options.effort ?? DEFAULT_ANTHROPIC_EFFORT;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs ?? ANTHROPIC_TIMEOUT_MS;
     this.fallbacks = options.fallbacks ?? false;
     this.onMessage = options.onMessage;
     this.client = new Anthropic({
@@ -256,6 +255,7 @@ export class AnthropicProvider implements AIProvider {
 
     const commands: unknown[] = [];
     const notes: string[] = [];
+    let house: unknown;
     for (const call of calls) {
       if (call.name !== SUBMIT_TOOL_NAME) {
         throw new Error(`Anthropic response was malformed: unexpected tool "${call.name}".`);
@@ -269,7 +269,18 @@ export class AnthropicProvider implements AIProvider {
       if (typeof input.notes === "string" && input.notes.trim().length > 0) {
         notes.push(input.notes.trim());
       }
+      if (input.house !== undefined) {
+        if (house !== undefined) {
+          throw new Error("Anthropic response was malformed: more than one house plan.");
+        }
+        // A whole-house plan, likewise unvalidated here - AICommandPipeline validates it and the house builder builds it.
+        house = input.house;
+      }
     }
-    return { commands, notes: notes.length > 0 ? notes.join(" ") : text.length > 0 ? text : undefined };
+    return {
+      commands,
+      notes: notes.length > 0 ? notes.join(" ") : text.length > 0 ? text : undefined,
+      ...(house !== undefined ? { house } : {})
+    };
   }
 }

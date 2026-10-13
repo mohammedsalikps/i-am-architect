@@ -73,7 +73,7 @@ function wire(): Wired {
     history: context.history,
     snapshot: () => buildAIProjectSnapshot(context),
     undo: () => context.history.undo(),
-    fallback: (instruction) => service.submit(instruction)
+    fallback: (instruction, options) => service.submit(instruction, options)
   });
   return {
     context,
@@ -686,7 +686,7 @@ async function main(): Promise<void> {
       history: context.history,
       snapshot: () => buildAIProjectSnapshot(context),
       undo: () => context.history.undo(),
-      fallback: (instruction) => service.submit(instruction)
+      fallback: (instruction, options) => service.submit(instruction, options)
     });
     const wired = wire();
     return { ...wired, context, session, say: (text) => session.handle(text), backend, count: () => ({ walls: context.wallStore.getAll().length }) as Record<string, number> };
@@ -743,6 +743,115 @@ async function main(): Promise<void> {
     r = await app.say("Build everything");
     assertEqual(r.tone, "success", r.text);
     assertEqual(app.backend.requests.length, 0, "no backend request");
+  });
+
+  // --- Whole houses only the AI recognizes (the live 3-bedroom-house timeout) ---
+
+  const AI_ONLY_HOME = "I need somewhere for a family of five to live";
+  const AI_PLAN = { bedrooms: 3, footprint: { length: 10, width: 8 } };
+  const roofs = (context: ProjectContext) => context.elementStore.getAll().filter((element) => element.kind === "roof").length;
+
+  await check("a house only the AI recognizes comes back as a plan and goes through the staged build - questions first, one undo step per stage, one AI request in all", async () => {
+    assertEqual(parseUtterance(AI_ONLY_HOME).kind, "unknown", "the panel doesn't recognize this wording itself");
+    const app = wireBackend(() => ({ kind: "ok", commands: [], house: AI_PLAN }));
+    r = await app.say(AI_ONLY_HOME);
+    assertEqual(app.backend.requests.length, 1, "the AI was asked once");
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "Where should the house go", "a clarification first");
+    assertEqual(app.context.slabStore.getAll().length + app.context.wallStore.getAll().length, 0, "nothing built yet");
+
+    r = await app.say("At the origin");
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "Here's the plan", "the plan, for confirmation");
+    assertIncludes(r.text, "Bedroom 3", "with the AI's three bedrooms");
+
+    r = await app.say("yes");
+    assertEqual(r.tone, "success", r.text);
+    assertEqual(app.context.slabStore.getAll().length, 1, "the foundation only");
+    assertEqual(app.context.wallStore.getAll().length, 0, "no walls yet");
+    assertEqual(app.session.getState().stages?.find((stage) => stage.id === "foundation")?.status, "done", "progress: foundation done");
+
+    r = await app.say("Build everything");
+    assertEqual(r.tone, "success", r.text);
+    const walls = app.context.wallStore.getAll().length;
+    assertTrue(walls > 4 && roofs(app.context) === 1 && app.context.assetStore.getAll().length > 0, "every stage built");
+    app.context.history.undo();
+    assertEqual(app.context.assetStore.getAll().length, 0, "one undo removes only the last stage (the furniture)");
+    assertEqual(roofs(app.context), 1, "the roof stays");
+    app.context.history.undo();
+    assertEqual(roofs(app.context), 0, "the next undo takes off the roof");
+    assertEqual(app.context.wallStore.getAll().length, walls, "and the walls stay");
+    assertEqual(app.backend.requests.length, 1, "building the stages never called the AI");
+  });
+
+  await check("an AI request that times out in the panel changes nothing and says so; “Try again” resends the same words and carries on", async () => {
+    let attempt = 0;
+    const app = wireBackend(() => {
+      attempt += 1;
+      // What the real backend relays when Claude's 25 s deadline passes.
+      return attempt === 1 ? { kind: "status", status: 502, error: "Anthropic request timed out after 25000ms." } : { kind: "ok", commands: [], house: AI_PLAN };
+    });
+    addStartupWall(app.context);
+    const before = JSON.stringify(buildAIProjectSnapshot(app.context).objects);
+
+    r = await app.say(AI_ONLY_HOME);
+    assertEqual(r.tone, "error", r.text);
+    assertIncludes(r.text, "taking too long", "says it timed out");
+    assertIncludes(r.text, "Your design was not changed", "and that nothing changed");
+    assertEqual(JSON.stringify(buildAIProjectSnapshot(app.context).objects), before, "the scene is exactly as it was");
+    const retry = r.choices.find((choice) => choice.label === "Try again");
+    assertEqual(retry?.say, AI_ONLY_HOME, "Try again resends the same words");
+
+    r = await app.say(retry!.say);
+    assertEqual(r.tone, "question", r.text);
+    assertIncludes(r.text, "Where should the house go", "the retry picks up the design conversation");
+    assertEqual(app.backend.requests.length, 2, "two requests in all");
+    assertEqual(JSON.stringify(buildAIProjectSnapshot(app.context).objects), before, "still nothing built or duplicated - the house waits for its questions");
+  });
+
+  await check("an unsupported or invalid AI house plan in the panel is reported with its reason - nothing is built and no design starts", async () => {
+    const cases: [unknown, string][] = [
+      [{ ...AI_PLAN, floors: 2 }, "multiple floors"],
+      [{ bedrooms: 2.5 }, "house plan was invalid"]
+    ];
+    for (const [plan, reason] of cases) {
+      const app = wireBackend(() => ({ kind: "ok", commands: [], house: plan }));
+      r = await app.say(AI_ONLY_HOME);
+      assertEqual(r.tone, "error", r.text);
+      assertIncludes(r.text, reason, "the real reason");
+      assertEqual(buildAIProjectSnapshot(app.context).objects.length, 0, "nothing built");
+      assertEqual(app.session.getState().stages?.some((stage) => stage.status === "done") ?? false, false, "no design was started");
+    }
+  });
+
+  await check("a stage that fails part-way keeps nothing from that stage, keeps the stages before it, and can be tried again", async () => {
+    const context = createProjectContext();
+    let failing = true;
+    // The third wall of the walls stage fails, after two have been placed.
+    const commandExecutor = {
+      execute: (command: unknown) =>
+        failing && (command as { type?: string }).type === "wall.add" && context.wallStore.getAll().length >= 2
+          ? { success: false, message: "Simulated failure." }
+          : context.commandExecutor.execute(command as Parameters<typeof context.commandExecutor.execute>[0])
+    };
+    const session = new ArchitectSession({ commandExecutor, history: context.history, snapshot: () => buildAIProjectSnapshot(context), undo: () => context.history.undo() });
+    r = await session.handle("Build a 10m x 8m house with 3 bedrooms at 0, 0");
+    r = await session.handle("yes");
+    assertEqual(context.slabStore.getAll().length, 1, "foundation built");
+
+    r = await session.handle("next");
+    assertEqual(r.tone, "error", r.text);
+    assertIncludes(r.text, "Nothing from this stage was kept", "says the stage was rolled back");
+    assertEqual(context.wallStore.getAll().length + context.pillarStore.getAll().length, 0, "no wall or pillar from the failed stage remains");
+    assertEqual(context.slabStore.getAll().length, 1, "the foundation stays");
+    assertTrue(session.getState().stages?.find((stage) => stage.id === "structure")?.status !== "done", "the walls stage isn't marked done");
+    const retry = r.choices.find((choice) => choice.label === "Try again");
+    assertTrue(retry !== undefined, "offers to try again");
+
+    failing = false;
+    r = await session.handle(retry!.say);
+    assertEqual(r.tone, "success", r.text);
+    assertTrue(context.wallStore.getAll().length > 4, "the retry raises the walls");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

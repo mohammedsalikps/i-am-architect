@@ -203,7 +203,7 @@ export class OpenAIProvider implements AIProvider {
       throw new Error('OpenAI response content was malformed: expected "{ commands: [] }".');
     }
 
-    const { commands, notes } = parsedContent as { commands: unknown[]; notes?: unknown };
+    const { commands, notes, house } = parsedContent as { commands: unknown[]; notes?: unknown; house?: unknown };
 
     // Error 4 of 4 ("the model returns unsupported commands") is deliberately NOT
     // checked here - `commands` is handed back exactly as `unknown[]`, same as
@@ -214,7 +214,9 @@ export class OpenAIProvider implements AIProvider {
     // two disagreeing - see ai/README.md "Two validation layers, not one".
     return {
       commands,
-      notes: typeof notes === "string" ? notes : undefined
+      notes: typeof notes === "string" ? notes : undefined,
+      // A whole-house plan, passed on as-is: AICommandPipeline validates it.
+      ...(house !== undefined ? { house } : {})
     };
   }
 }
