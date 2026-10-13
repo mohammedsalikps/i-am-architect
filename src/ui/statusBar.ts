@@ -13,6 +13,8 @@ export type StatusBarOptions = {
 export interface PlacementStatusInfo {
   label: string;
   onCancel: () => void;
+  /** Replaces the "click to place" sentence - for a tool that doesn't place anything (Measure). */
+  text?: string;
 }
 
 export interface StatusBar {
@@ -79,7 +81,9 @@ export function createStatusBar(options: StatusBarOptions): StatusBar {
   let placementInfo: PlacementStatusInfo | null = null;
   const renderState = (): void => {
     if (placementInfo) {
-      stateText.textContent = `Placement mode: ${placementInfo.label} — click to place, Esc or Cancel to exit`;
+      stateText.textContent = placementInfo.text
+        ? `${placementInfo.text} Esc or Cancel to exit.`
+        : `Placement mode: ${placementInfo.label} — click to place, Esc or Cancel to exit`;
       state.classList.add("status-bar__item--placing");
       cancelButton.hidden = false;
       return;

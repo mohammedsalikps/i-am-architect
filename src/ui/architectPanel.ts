@@ -1,8 +1,11 @@
 import { el } from "./dom";
 import { createVoiceInput } from "./voiceInput";
 import type { VoiceState } from "./voiceInput";
-import { createHandsFree, createSpeechOutput, matchSpokenChoice } from "./handsFree";
+import { createHandsFree, createSpeechOutput, matchSpokenChoice, spokenNumbers } from "./handsFree";
 import type { HandsFreeStatus } from "./handsFree";
+import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState";
+import type { CopilotEvent, CopilotState } from "./copilotState";
+import { createLevelMeter } from "./levelMeter";
 import { isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
 import type { ArchitectChoice, ArchitectReply, ArchitectSession, ArchitectViewState } from "../engine/architect/ArchitectSession";
 import type { PlanPoint } from "../engine/architect/parseUtterance";
@@ -72,13 +75,56 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     collapseButton
   ]);
 
-  const body = el("div", { className: "architect__body" }, [stages, log, composer, voiceNote]);
+  const stepper = el(
+    "ol",
+    { className: "copilot__steps", attrs: { "aria-label": "What the architect is doing" } },
+    COPILOT_STEPS.map((step) => el("li", { className: "copilot__step", attrs: { "data-step": step.id } }, [el("span", { className: "copilot__dot", attrs: { "aria-hidden": "true" } }), el("span", { text: step.label })]))
+  );
+  const stateLine = el("p", { className: "copilot__state", attrs: { role: "status", "aria-live": "polite" } });
+  const transcriptLine = el("p", { className: "copilot__transcript" });
+  const levelBars = el("div", { className: "copilot__level", attrs: { "aria-hidden": "true" } }, Array.from({ length: 14 }, () => el("span", { className: "copilot__bar" })));
+  levelBars.hidden = true; // shown only while a real microphone level arrives
+  const stopButton = el("button", { className: "copilot__stop", text: "■ Stop", attrs: { type: "button", title: "Stop speaking and listening now" } });
+  const status = el("div", { className: "copilot__status" }, [stepper, el("div", { className: "copilot__state-row" }, [levelBars, stateLine, stopButton]), transcriptLine]);
+  const body = el("div", { className: "architect__body" }, [stages, status, log, composer, voiceNote]);
   const element = el("aside", { className: "architect", attrs: { "aria-label": "EAVARA Architect" } }, [header, body]);
 
   let busy = false;
   let activeChoices: HTMLElement | null = null;
   /** The latest reply - what a spoken answer is matched against, and what hands-free reads out when turned on. */
   let lastReply: ArchitectReply | null = null;
+  let copilot: CopilotState = INITIAL_COPILOT_STATE;
+  const gate = createInputGate();
+  let levelHistory: number[] = [];
+
+  const renderCopilot = (): void => {
+    const statuses = stepStatuses(copilot);
+    stepper.querySelectorAll("li").forEach((item, index) => {
+      item.className = `copilot__step copilot__step--${statuses[index]}`;
+    });
+    stateLine.textContent = copilot.detail;
+    stateLine.className = `copilot__state copilot__state--${copilot.phase}`;
+    transcriptLine.hidden = copilot.transcript.length === 0;
+    transcriptLine.textContent = copilot.transcript ? `“${copilot.transcript}”` : "";
+    stopButton.hidden = !(copilot.phase === "listening" || copilot.phase === "transcribing" || handsFree.speaking || handsFree.enabled);
+    status.hidden = copilot.phase === "idle" && copilot.detail.length === 0 && !handsFree.enabled;
+  };
+  const dispatch = (event: CopilotEvent): void => {
+    copilot = nextCopilotState(copilot, event);
+    renderCopilot();
+  };
+  const meter = createLevelMeter((level) => {
+    levelBars.hidden = level === null;
+    if (level === null) {
+      levelHistory = [];
+      return;
+    }
+    levelHistory = [...levelHistory.slice(-13), level];
+    levelBars.querySelectorAll("span").forEach((bar, index) => {
+      const value = levelHistory[index - (14 - levelHistory.length)] ?? 0;
+      (bar as HTMLElement).style.height = `${Math.max(8, Math.round(value * 100))}%`;
+    });
+  });
 
   const setBusy = (value: boolean): void => {
     busy = value;
@@ -122,7 +168,19 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   };
 
   const showReply = (reply: ArchitectReply): void => {
+    const tags = [
+      ...(reply.source === "ai" ? [el("span", { className: "copilot__tag copilot__tag--ai", text: "AI model", attrs: { title: "Answered by the AI model through the backend" } })] : []),
+      ...(reply.preview ? [el("span", { className: "copilot__tag copilot__tag--preview", text: "Preview", attrs: { title: "Nothing is built until you confirm" } })] : []),
+      ...(reply.applied
+        ? [
+            reply.undone
+              ? el("span", { className: "copilot__tag copilot__tag--applied", text: "Undone ✓", attrs: { title: "The last change was reversed in the scene" } })
+              : el("span", { className: "copilot__tag copilot__tag--applied", text: "Applied ✓", attrs: { title: "The scene changed" } })
+          ]
+        : [])
+    ];
     const message = el("div", { className: `architect__msg architect__msg--architect architect__msg--${reply.tone}` }, [
+      ...(tags.length > 0 ? [el("div", { className: "copilot__tags" }, tags)] : []),
       el("p", { className: "architect__text", text: reply.text })
     ]);
     const choices = renderChoices(reply.choices);
@@ -158,29 +216,46 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
       }
       retireChoices();
       addUserMessage(`📍 (${fmt(point.x)}, ${fmt(point.z)})`);
-      showReply(session.pickedLocation(point));
+      const picked = session.pickedLocation(point);
+      dispatch({ type: "reply", reply: picked });
+      showReply(picked);
     });
   };
 
   async function send(text: string, shown = text): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || busy) return;
+    if (!trimmed) return;
+    const admitted = gate.admit(trimmed, busy, Date.now());
+    if (admitted === "duplicate") return;
+    if (admitted === "queued") {
+      setNote(`Queued: “${trimmed}” - I'll take it as soon as the current answer is in.`);
+      return;
+    }
     retireChoices();
     addUserMessage(shown);
     input.value = "";
     setBusy(true);
+    dispatch({ type: "sent", text: trimmed });
     try {
-      showReply(await session.handle(trimmed));
+      const reply = await session.handle(trimmed);
+      dispatch({ type: "reply", reply });
+      showReply(reply);
     } catch (error) {
-      showReply({ text: `Something went wrong: ${error instanceof Error ? error.message : String(error)}`, tone: "error", choices: [] });
+      const failure: ArchitectReply = { text: `Something went wrong: ${error instanceof Error ? error.message : String(error)} Nothing was changed.`, tone: "error", choices: [] };
+      dispatch({ type: "reply", reply: failure });
+      showReply(failure);
     } finally {
       setBusy(false);
       input.focus();
+      const next = gate.takeQueued();
+      if (next) void send(next, next);
     }
   }
 
   composer.addEventListener("submit", (event) => {
     event.preventDefault();
+    // Sending the box while recognition is still running: the box is what's sent - drop the speech session, so its final words don't run a second time.
+    if (voice.listening) voice.cancel();
     void send(input.value);
   });
   input.addEventListener("keydown", (event) => {
@@ -198,17 +273,29 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   const voice = createVoiceInput({
     onInterim: (text) => {
       input.value = text;
+      if (text) dispatch({ type: "interim", text });
     },
     onFinal: (text) => {
+      dispatch({ type: "heard", text });
       handsFree.heard();
       // "Concrete block", "build it", "pick another spot": a spoken choice
-      // sends that choice; anything else is sent as said.
+      // sends that choice; anything else is sent as said - with numbers
+      // said in words as digits ("four by five" → "4 by 5"), shown openly.
       const choice = lastReply ? matchSpokenChoice(text, lastReply.choices) : null;
-      void send(choice ? choice.say : text, `🎤 ${text}`);
+      const said = spokenNumbers(text);
+      void send(choice ? choice.say : said, said === text || choice ? `🎤 ${text}` : `🎤 ${text} → “${said}”`);
     },
     onState: (state: VoiceState, message?: string, code?: string) => {
       micButton.classList.toggle("architect__mic--listening", state === "listening");
       micButton.setAttribute("aria-pressed", String(state === "listening"));
+      if (state === "listening") {
+        dispatch({ type: "listening" });
+        meter.start();
+      } else {
+        meter.stop();
+        if (state === "error") dispatch({ type: "voice-error", message: message ?? "Speech recognition stopped." });
+        else if (copilot.phase === "listening") dispatch({ type: "stopped" });
+      }
       if (handsFree.enabled) {
         if (state === "error") handsFree.listenerError(code ?? "", message ?? "Speech recognition stopped.");
         return;
@@ -225,6 +312,7 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
       const on = status.kind === "speaking" || status.kind === "listening";
       handsFreeButton.setAttribute("aria-pressed", String(on));
       handsFreeButton.classList.toggle("architect__hands-free--on", on);
+      renderCopilot();
       if (status.kind === "speaking") setNote("🔊 Speaking… (hands-free)");
       else if (status.kind === "listening") setNote("🎤 Listening… answer out loud, or type.");
       else if (status.kind === "stopped") setNote(status.message, true);
@@ -234,6 +322,10 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   if (voice.supported) {
     micButton.title = "Speak an instruction";
     micButton.addEventListener("click", () => {
+      if (handsFree.speaking) {
+        handsFree.bargeIn();
+        return;
+      }
       if (!busy) voice.toggle();
     });
     handsFreeButton.title = createSpeechOutput()
@@ -249,6 +341,15 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     handsFreeButton.disabled = true;
     handsFreeButton.title = "Hands-free needs speech recognition - use Chrome or Edge. Typing works everywhere.";
   }
+
+  stopButton.addEventListener("click", () => {
+    if (handsFree.enabled || handsFree.speaking) handsFree.interrupt();
+    // Stop means stop: whatever was half-heard is dropped, never sent.
+    voice.cancel();
+    if (input.value && copilot.phase === "transcribing") input.value = "";
+    meter.stop();
+    dispatch({ type: "stopped" });
+  });
 
   collapseButton.addEventListener("click", () => {
     const collapsed = element.classList.toggle("architect--collapsed");
@@ -270,6 +371,7 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   });
 
   showReply(session.greeting());
+  renderCopilot();
 
   return {
     element,

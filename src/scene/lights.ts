@@ -14,7 +14,7 @@ import * as THREE from "three";
  * casts one). Intensities are tuned for THREE.ACESFilmicToneMapping.
  */
 export function addLights(scene: THREE.Scene): void {
-  const hemisphere = new THREE.HemisphereLight(0xcfe0ff, 0x2b2620, 0.65);
+  const hemisphere = new THREE.HemisphereLight(0xeaf2ff, 0xb9b2a4, 0.85);
   scene.add(hemisphere);
 
   const sun = new THREE.DirectionalLight(0xfff3e0, 2.6);

@@ -21,7 +21,10 @@ export interface SpeechOutput {
 export interface Listener {
   readonly supported: boolean;
   start(): void;
+  /** Stop listening; words already recognised are still sent. */
   stop(): void;
+  /** Stop listening and drop whatever was heard. */
+  cancel(): void;
 }
 
 export type HandsFreeStatus =
@@ -36,6 +39,49 @@ const FATAL = new Set(["not-allowed", "service-not-allowed", "audio-capture"]);
 const SILENT_TURNS_BEFORE_PAUSE = 2;
 
 const EMOJI = /[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu;
+
+const UNITS: Readonly<Record<string, number>> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19
+};
+const TENS: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 40, fifty: 50 };
+const NUMBER_WORD = String.raw`(?:${[...Object.keys(TENS), ...Object.keys(UNITS)].join("|")})`;
+/** "twenty five", "three", "fifty": one whole number said in words. */
+const WHOLE = String.raw`(?:(?:${Object.keys(TENS).join("|")})(?:[\s-]+(?:${Object.keys(UNITS).filter((word) => UNITS[word] > 0 && UNITS[word] < 10).join("|")}))?|${NUMBER_WORD})`;
+
+function wordsToNumber(words: string): number {
+  const parts = words.toLowerCase().split(/[\s-]+/);
+  return parts.reduce((total, part) => total + (TENS[part] ?? UNITS[part] ?? 0), 0);
+}
+
+/**
+ * A recognised transcript with its numbers as digits, the way a typed
+ * instruction would have them - "four by five metres" → "4 by 5 metres",
+ * "three point five" → "3.5", "two comma zero" → "2, 0", "minus three" →
+ * "-3". Only numbers said as words change; everything else stays as heard.
+ * For speech only: typed text is never rewritten.
+ */
+export function spokenNumbers(transcript: string): string {
+  const whole = new RegExp(String.raw`\b(${WHOLE})\b`, "gi");
+  return transcript
+    .replace(new RegExp(String.raw`\b(${WHOLE}|\d+)\s+point\s+((?:${NUMBER_WORD}|\d)(?:\s+(?:${NUMBER_WORD}|\d))*)\b`, "gi"), (_match, integer: string, decimals: string) => {
+      const head = /^\d+$/.test(integer) ? integer : String(wordsToNumber(integer));
+      const tail = decimals.split(/\s+/).map((digit) => (/^\d$/.test(digit) ? digit : String(UNITS[digit.toLowerCase()] ?? ""))).join("");
+      return `${head}.${tail}`;
+    })
+    // A bare "one" stays a word ("the one on the left") unless it reads as a measure or coordinate.
+    .replace(whole, (match: string, _word: string, offset: number, text: string) =>
+      match.toLowerCase() === "one" &&
+      !/^\s*(?:m\b|mm\b|cm\b|met|by\b|x\b|point\b|comma\b|,)/i.test(text.slice(offset + match.length)) &&
+      !/(?:\bby|\bat|\bcomma|,)\s*$/i.test(text.slice(0, offset))
+        ? match
+        : String(wordsToNumber(match))
+    )
+    .replace(/\b(?:minus|negative)\s+(?=\d)/gi, "-")
+    .replace(/(\d)\s+comma\s+(?=-?\d)/gi, "$1, ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
 
 /** Text as a speech engine should read it: no emoji, units in words, "×" as "by". */
 export function speakable(text: string): string {
@@ -102,6 +148,12 @@ export interface HandsFree {
   listenerError(code: string, message: string): void;
   /** Recognition ended - with or without a result. */
   listenerEnded(): void;
+  /** True while a reply is being read out. */
+  readonly speaking: boolean;
+  /** The user pressed the microphone while the reply was being read: stop speaking at once and listen. */
+  bargeIn(): void;
+  /** The explicit Stop: silence speech and the microphone at once, and turn hands-free off. */
+  interrupt(): void;
 }
 
 export function createHandsFree(options: { speech: SpeechOutput | null; listener: Listener; onStatus: (status: HandsFreeStatus) => void }): HandsFree {
@@ -113,14 +165,17 @@ export function createHandsFree(options: { speech: SpeechOutput | null; listener
   let pendingRestart = false;
   /** Bumped whenever speaking or listening is superseded, so a stale "speech finished" can't reopen the mic. */
   let turn = 0;
+  let speaking = false;
 
   const stop = (message?: string): void => {
     enabled = false;
     awaiting = false;
     pendingRestart = false;
+    speaking = false;
     turn += 1;
     speech?.cancel();
-    listener.stop();
+    // Turning hands-free off or pressing Stop must not send half-heard words.
+    listener.cancel();
     onStatus(message ? { kind: "stopped", message } : { kind: "off" });
   };
 
@@ -150,15 +205,32 @@ export function createHandsFree(options: { speech: SpeechOutput | null; listener
       listen();
       return;
     }
+    speaking = true;
     onStatus({ kind: "speaking" });
     speech.speak(text, () => {
-      if (enabled && turn === mine) listen();
+      if (turn !== mine) return;
+      speaking = false;
+      if (enabled) listen();
     });
   };
 
   return {
     get enabled() {
       return enabled;
+    },
+    get speaking() {
+      return speaking;
+    },
+    bargeIn() {
+      if (!enabled) return;
+      turn += 1;
+      speaking = false;
+      speech?.cancel();
+      silentTurns = 0;
+      listen();
+    },
+    interrupt() {
+      stop("Stopped. Press 🎤 to speak, 🔊 for hands-free, or type.");
     },
     setEnabled(on: boolean): boolean {
       if (!on) {

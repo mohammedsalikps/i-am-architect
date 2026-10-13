@@ -25,7 +25,7 @@ import { createStoreSnapper } from "../engine/snapping/storeSnapper";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { VisibilityStore } from "./visibility/VisibilityStore";
 import { PlacementController } from "./placement/PlacementController";
-import { computeArchitecturalFit } from "./camera/fitCamera";
+import { computeArchitecturalFit, withMinimumExtent } from "./camera/fitCamera";
 import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -36,6 +36,11 @@ import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
 import type { AssetStore } from "../engine/assets/AssetStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+
+/** The smallest area "Fit House" frames, in metres - about a small plot (the fit itself is exact, so this is the visible area, not a fudge). */
+const MIN_FIT_EXTENT = { x: 11, y: 3, z: 11 };
+/** The smallest area "Focus" frames - enough to see an element in place. */
+const MIN_FOCUS_EXTENT = { x: 7, y: 2.5, z: 7 };
 
 /** Camera view presets the UI's view-control buttons can request. */
 export type ViewPreset = "perspective" | "top" | "front" | "side";
@@ -118,7 +123,7 @@ export class SceneManager {
     this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, 30, 80);
 
     this.camera = new THREE.PerspectiveCamera(
-      60,
+      45,
       container.clientWidth / container.clientHeight,
       0.1,
       1000
@@ -174,6 +179,18 @@ export class SceneManager {
       // nudged slightly up here for a touch more presence at floor level).
       gtaoPass.blendIntensity = 0.75;
       gtaoPass.updateGtaoMaterial({ radius: 0.3, samples: 16 });
+      // Presentation-only marks (labels, translucent previews) flagged
+      // userData.excludeFromAO stay out of the AO depth/normal pass, as
+      // GTAOPass already does for lines and points - otherwise every label
+      // sprite casts a dark occlusion halo onto the ground behind it.
+      // restoreVisibility() puts back what this hid (it caches first).
+      const hideLinesAndPoints = gtaoPass.overrideVisibility.bind(gtaoPass);
+      gtaoPass.overrideVisibility = () => {
+        hideLinesAndPoints();
+        this.scene.traverse((object) => {
+          if (object.userData.excludeFromAO) object.visible = false;
+        });
+      };
       composer.addPass(gtaoPass);
       composer.addPass(new OutputPass());
 
@@ -310,12 +327,58 @@ export class SceneManager {
     window.addEventListener("resize", this.handleResize);
   }
 
+  /** Pixels of the viewport's left edge covered by a floating panel (the AI Architect copilot) - see setOverlayInset. */
+  private overlayInset = 0;
+
+  /**
+   * A floating panel covers `px` of the viewport's left edge: shift the
+   * projection so the scene's centre sits in the middle of the UNCOVERED
+   * area (and fits use that area's width) - instead of framing the house
+   * behind the panel. Picking stays exact: the raycaster uses the same
+   * projection. 0 restores the normal, centred projection.
+   */
+  setOverlayInset(px: number): void {
+    const inset = Math.max(0, Math.round(px));
+    if (inset === this.overlayInset) return;
+    this.overlayInset = inset;
+    this.applyProjection();
+  }
+
+  /** The width/height of the part of the viewport no panel covers. */
+  private visibleAspect(): number {
+    const width = this.container.clientWidth;
+    const height = Math.max(1, this.container.clientHeight);
+    const inset = this.effectiveInset(width);
+    return Math.max(1, width - inset) / height;
+  }
+
+  private effectiveInset(width: number): number {
+    // A panel covering most of a narrow viewport isn't worth offsetting for.
+    return this.overlayInset > 0 && this.overlayInset < width * 0.6 ? this.overlayInset : 0;
+  }
+
+  private applyProjection(): void {
+    const width = this.container.clientWidth;
+    const height = Math.max(1, this.container.clientHeight);
+    const inset = this.effectiveInset(width);
+    if (inset > 0) {
+      // A virtual image `inset` px wider than the canvas, centred on the camera
+      // axis; the canvas shows its left `width` px - so the axis lands in the
+      // middle of the uncovered part.
+      this.camera.aspect = (width + inset) / height;
+      this.camera.setViewOffset(width + inset, height, 0, 0, width, height);
+    } else {
+      this.camera.aspect = width / height;
+      this.camera.clearViewOffset();
+    }
+    this.camera.updateProjectionMatrix();
+  }
+
   private readonly handleResize = (): void => {
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
 
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    this.applyProjection();
     this.renderer.setSize(width, height);
     // The composer's own render targets must track the renderer's size
     // exactly like this.renderer.setSize() above - composer.setSize()
@@ -378,7 +441,9 @@ export class SceneManager {
    * somewhere arbitrary.
    */
   fitToScene(): void {
-    this.applyFit(this.boundingBoxOf(null));
+    const box = this.boundingBoxOf(null);
+    // At least a typical plot's extent, so one wall or a first room is seen in context, not filling the screen.
+    this.applyFit(box ? withMinimumExtent(box, MIN_FIT_EXTENT) : null);
   }
 
   /**
@@ -390,7 +455,23 @@ export class SceneManager {
     if (objectIds.length === 0) {
       return;
     }
-    this.applyFit(this.boundingBoxOf(new Set(objectIds)));
+    const box = this.boundingBoxOf(new Set(objectIds));
+    // A small minimum, so a newly built wall is framed with some of its surroundings rather than filling the screen.
+    this.applyFit(box ? withMinimumExtent(box, MIN_FOCUS_EXTENT) : null);
+  }
+
+  /**
+   * Frames a region that isn't (yet) an object - the architect's preview
+   * of a room or wall before it is built - with a margin of `margin`
+   * metres around it so its neighbours stay in view. Camera only.
+   */
+  focusOnRegion(region: { center: { x: number; z: number }; sizeX: number; sizeZ: number; height: number }, margin = 2): void {
+    const { center, sizeX, sizeZ, height } = region;
+    const framed = new THREE.Box3(
+      new THREE.Vector3(center.x - sizeX / 2 - margin, 0, center.z - sizeZ / 2 - margin),
+      new THREE.Vector3(center.x + sizeX / 2 + margin, height, center.z + sizeZ / 2 + margin)
+    );
+    this.applyFit(withMinimumExtent(framed, MIN_FOCUS_EXTENT));
   }
 
   /**
@@ -471,7 +552,7 @@ export class SceneManager {
       return;
     }
     const direction = this.camera.position.clone().sub(this.controls.target);
-    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.camera.aspect });
+    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.visibleAspect() });
     this.camera.position.copy(position);
     this.controls.target.copy(target);
     this.camera.lookAt(target);

@@ -77,6 +77,8 @@ export type AppShellOptions = {
   commandExecutor: CommandExecutor;
   /** Whether drags snap - shown and toggled by the viewport's Snap button. */
   snapSettings: SnapSettings;
+  /** Select / Measure / Annotate (ui/viewportTools.ts), shown in the Snap button's row. */
+  viewportTools?: HTMLElement[];
   /** Arms pick-and-place for one catalog design asset - see ui/assetLibrary.ts and main.ts's addAsset(). */
   onAddAsset: (assetId: string) => void;
   /** The Construction Method tab's viewport highlight - see SceneManager.highlightConstructionObjects() and constructionMethodPanel.ts. */
@@ -85,8 +87,8 @@ export type AppShellOptions = {
   architect?: { element: HTMLElement; focusInput: () => void };
 };
 
-/** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
-function createSnapToggle(snapSettings: SnapSettings): HTMLElement {
+/** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on - after the viewport tools, when there are any. */
+function createSnapToggle(snapSettings: SnapSettings, tools: HTMLElement[] = []): HTMLElement {
   const button = el("button", {
     className: "view-controls__button snap-toggle",
     attrs: { type: "button", title: "Snap to endpoints, corners, walls, and the 0.1 m grid while dragging" }
@@ -97,7 +99,7 @@ function createSnapToggle(snapSettings: SnapSettings): HTMLElement {
     button.setAttribute("aria-pressed", String(enabled));
     button.classList.toggle("snap-toggle--on", enabled);
   });
-  return el("div", { className: "view-controls" }, [button]);
+  return el("div", { className: "view-controls" }, [...tools, ...(tools.length > 0 ? [el("span", { className: "view-controls__divider" })] : []), button]);
 }
 
 /** True once every construction store is empty - a fresh "New Project" or a signed-out reset, before the first wall exists. */
@@ -250,7 +252,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // purely a viewport concern, so they're now an overlay on the
   // viewport itself instead of competing for header space.
   const viewControls = createViewControls(options.onViewChange, options.onFitToScene, options.onFocusSelected);
-  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings)]);
+  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings, options.viewportTools)]);
 
   const commandBar = createCommandBar(
     options.ribbonActions.addWall,

@@ -51,6 +51,8 @@ import { ArchitectSession } from "./engine/architect/ArchitectSession";
 import type { PlanPoint } from "./engine/architect/parseUtterance";
 import { createArchitectPanel } from "./ui/architectPanel";
 import { createSiteOverlay } from "./scene/siteOverlay";
+import { createMeasureTool, MEASURE_TOOL_ID, type MeasureTool } from "./scene/measureTool";
+import { createViewportTools } from "./ui/viewportTools";
 
 const appRoot = document.getElementById("app");
 
@@ -712,6 +714,14 @@ const snapSettings = new SnapSettings();
 // SceneManager's layers share exactly one instance.
 const visibilityStore = new VisibilityStore();
 
+// Select / Measure / Annotate in the viewport's tool row. The Measure tool
+// needs the real scene, so it is built after SceneManager (below).
+let measureTool: MeasureTool | null = null;
+const viewportTools = createViewportTools({
+  onSelect: () => sceneManager.current?.placementController.disarm(),
+  onMeasure: () => measureTool?.toggle()
+});
+
 const shell = createAppShell({
   projectMeta,
   persistence,
@@ -750,6 +760,7 @@ const shell = createAppShell({
   history,
   commandExecutor,
   snapSettings,
+  viewportTools: viewportTools.elements,
   onAddAsset: addAsset,
   onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 },
   architect: architectPanel
@@ -776,6 +787,18 @@ sceneManager.current = new SceneManager(
   visibilityStore
 );
 sceneManager.current.start();
+// The floating AI Architect copilot covers the viewport's left side: frame
+// the scene in the part still visible, following the panel as it is
+// resized or collapsed.
+const updateViewportInset = (): void => {
+  const panel = architectPanel.element;
+  const viewport = shell.viewportContainer.getBoundingClientRect();
+  const collapsed = panel.classList.contains("architect--collapsed") || panel.offsetParent === null;
+  sceneManager.current?.setOverlayInset(collapsed ? 0 : panel.getBoundingClientRect().right - viewport.left + 8);
+};
+new ResizeObserver(updateViewportInset).observe(architectPanel.element);
+window.addEventListener("resize", updateViewportInset);
+updateViewportInset();
 // The startup wall (or a restored project's whole model, once loaded)
 // framed on first paint, rather than the camera's fixed default
 // position - which, for anything bigger than the single startup wall,
@@ -795,10 +818,27 @@ persistence.subscribe((state) => {
 // The ribbon shows which tool is armed (RibbonTool.isActive), and the
 // status bar shows the placement banner and its Cancel button - both
 // re-derived from PlacementController, not duplicated state of their own.
+// The Measure tool's readout replaces the status bar's "click to place"
+// line while it is armed.
+const cancelPlacement = (): void => sceneManager.current?.placementController.disarm();
+measureTool = createMeasureTool({
+  ...sceneManager.current.getViewportContext(),
+  placementController: sceneManager.current.placementController,
+  snapObjects: () => buildAIProjectSnapshot(project).objects,
+  snapping: () => snapSettings.isEnabled(),
+  onReadout: (text) => {
+    if (text) shell.setPlacementStatus({ label: "Measure", text, onCancel: cancelPlacement });
+  }
+});
 sceneManager.current.placementController.subscribe((tool) => {
   shell.refreshRibbon();
   shell.refreshAssetLibrary();
-  shell.setPlacementStatus(tool ? { label: tool.label, onCancel: () => sceneManager.current?.placementController.disarm() } : null);
+  viewportTools.setMode(!tool ? "select" : tool.id === MEASURE_TOOL_ID ? "measure" : "placing");
+  if (tool?.id === MEASURE_TOOL_ID) {
+    shell.setPlacementStatus({ label: tool.label, text: measureTool?.readout() ?? "Measure.", onCancel: cancelPlacement });
+  } else {
+    shell.setPlacementStatus(tool ? { label: tool.label, onCancel: cancelPlacement } : null);
+  }
 });
 
 // Phase 5A: a real, translucent GLTF preview + pre-placement rotation +
@@ -838,7 +878,19 @@ createElementPlacementHud({
 // and the progress strip and marks should say so. Coalesced to one
 // refresh per frame: a build stage changes dozens of objects at once.
 const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene);
-architect.subscribe((state) => siteOverlay.update(state));
+// A new or corrected preview is framed once, so the footprint and its
+// dimension labels can actually be read; the camera is left alone while
+// the same preview stays up, so the user can orbit around it.
+let framedPreview = "";
+architect.subscribe((state) => {
+  siteOverlay.update(state);
+  const preview = state.preview;
+  const key = preview ? JSON.stringify([preview.label, preview.center, preview.sizeX, preview.sizeZ, preview.height]) : "";
+  if (preview && key !== framedPreview) {
+    sceneManager.current?.focusOnRegion(preview);
+  }
+  framedPreview = key;
+});
 let architectRefreshQueued = false;
 const refreshArchitect = (): void => {
   if (architectRefreshQueued) return;

@@ -36,9 +36,9 @@ export function createHorizonBackground(): THREE.Texture {
     return texture;
   }
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, "#15161a"); // zenith - near-black, not pitch black
-  gradient.addColorStop(0.55, "#24262b"); // horizon - a lighter charcoal band, enough to read as a studio wall, not a void
-  gradient.addColorStop(1, "#1a1b1f"); // recedes toward the ground's own dark tone
+  gradient.addColorStop(0, "#cfdcec"); // zenith - a soft daylight blue
+  gradient.addColorStop(0.55, "#eef2f6"); // horizon - near-white haze
+  gradient.addColorStop(1, "#e7e9ec"); // meets the ground's own light tone
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -48,4 +48,4 @@ export function createHorizonBackground(): THREE.Texture {
 }
 
 /** Matches the gradient's lower band, so distant geometry fades into the same dark tone instead of a mismatched flat fog color. */
-export const HORIZON_FOG_COLOR = 0x1a1b1f;
+export const HORIZON_FOG_COLOR = 0xe9ecef;

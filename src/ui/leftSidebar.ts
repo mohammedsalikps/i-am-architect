@@ -5,6 +5,7 @@ import { createTabStrip, comingSoon } from "./tabStrip";
 import { ELEMENT_KINDS } from "../engine/elements/catalog";
 import { ASSET_DEFINITIONS } from "../engine/assets/catalog";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
+import { searchProjectItems } from "./projectSearch";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
@@ -27,6 +28,8 @@ interface HierarchyObject {
   hostId?: string | null;
   connections?: readonly unknown[];
   position: { x: number; y: number; z: number };
+  /** Searched by the tree's search box, along with kind and assetId. */
+  material?: string;
 }
 
 interface ObjectSource {
@@ -217,8 +220,20 @@ function buildProjectHierarchy(
   const root = el("div", { className: "hierarchy-objects" });
   const expandedRooms = new Set<string>();
   let renderedKey: string | null = null;
+  // The search box swaps the tree for a flat list of matching objects;
+  // picking one selects it and frames it in the viewport.
+  const search = el("input", {
+    className: "hierarchy-search__input",
+    attrs: { type: "search", placeholder: "Find in project…", "aria-label": "Search the project's objects", autocomplete: "off", spellcheck: "false" }
+  }) as HTMLInputElement;
+  let matches: { id: string; focusIds: string[] }[] = [];
+  const pick = (match: { id: string; focusIds: string[] }): void => {
+    selectionStore.select(match.id);
+    onFocusObjects(match.focusIds);
+  };
 
   const render = (): void => {
+    const query = search.value.trim();
     const selectedId = selectionStore.get();
     const hidden = visibilityStore.getHidden();
     const allObjects = sources.flatMap((source) => source.store.getAll());
@@ -227,7 +242,12 @@ function buildProjectHierarchy(
     const items = sources.flatMap((source) =>
       source.store
         .getAll()
-        .map((object) => ({ id: object.id, label: source.labelOf(object), order: source.orderOf(object) }))
+        .map((object) => ({
+          id: object.id,
+          label: source.labelOf(object),
+          order: source.orderOf(object),
+          detail: [object.material, object.kind, object.assetId].filter((word) => typeof word === "string").join(" ")
+        }))
         .sort((a, b) => a.order - b.order)
     );
     const itemById = new Map(items.map((item) => [item.id, item]));
@@ -259,6 +279,7 @@ function buildProjectHierarchy(
     // mid-click (a pending field edit commits when the press starts)
     // would swallow it.
     const key = JSON.stringify([
+      query,
       selectedId,
       Array.from(hidden).sort(),
       visibilityStore.isIsolating(),
@@ -270,6 +291,37 @@ function buildProjectHierarchy(
       return;
     }
     renderedKey = key;
+
+    if (query) {
+      const roomOf = new Map<string, string>();
+      for (const { room, memberItems } of roomEntries) {
+        const name = itemById.get(room.id)?.label ?? "room";
+        for (const item of memberItems) roomOf.set(item.id, name);
+      }
+      const searchable = [
+        ...roomEntries.map(({ room, memberItems }) => ({ id: room.id, label: room.label, detail: "room", focusIds: [room.id, ...memberItems.map((item) => item.id)] })),
+        ...items
+          .filter((item) => !roomIds.has(item.id))
+          .map((item) => ({ id: item.id, label: item.label, detail: `${item.detail}${roomOf.has(item.id) ? ` in ${roomOf.get(item.id)}` : ""}`, focusIds: [item.id] }))
+      ];
+      const found = searchProjectItems(searchable, query);
+      matches = found;
+      root.replaceChildren(
+        el("h4", { className: "hierarchy-objects__group-title", text: found.length === 0 ? "No matches" : `${found.length} match${found.length === 1 ? "" : "es"}` }),
+        ...(found.length === 0
+          ? [el("p", { className: "sidebar__placeholder", text: `Nothing in the project matches “${query}”. Search by name, id, material or room.` })]
+          : found.map((match) => {
+              const row = objectRow(match, selectedId, selectionStore, visibilityStore);
+              // Picking a result also frames it - the whole room, for a room.
+              row.querySelector(".hierarchy-objects__item")?.addEventListener("click", () => onFocusObjects(match.focusIds));
+              const where = match.detail.match(/ in (.+)$/);
+              if (where) row.querySelector(".hierarchy-objects__item")?.append(el("span", { className: "hierarchy-search__where", text: ` · ${where[1]}` }));
+              return row;
+            }))
+      );
+      return;
+    }
+    matches = [];
 
     const sections: HTMLElement[] = [];
     if (roomEntries.length > 0) {
@@ -299,8 +351,23 @@ function buildProjectHierarchy(
   }
   selectionStore.subscribe(render);
   visibilityStore.subscribe(render);
+  search.addEventListener("input", render);
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && matches.length > 0) {
+      event.preventDefault();
+      pick(matches[0]);
+    } else if (event.key === "Escape" && search.value) {
+      event.stopPropagation();
+      search.value = "";
+      render();
+    }
+  });
 
-  return el("div", { className: "sidebar__section" }, [el("h3", { className: "sidebar__section-title", text: "Building" }), root]);
+  return el("div", { className: "sidebar__section" }, [
+    el("h3", { className: "sidebar__section-title", text: "Building" }),
+    el("div", { className: "hierarchy-search" }, [search]),
+    root
+  ]);
 }
 
 /**

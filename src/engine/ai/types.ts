@@ -437,4 +437,6 @@ export interface AIPipelineResult {
    * the caller builds it. `outcomes` is empty.
    */
   housePlan?: HouseDesignRequest;
+  /** True when the AI provider (the model, via the backend) was actually called for this instruction - false/absent when it was resolved locally (a recognized house, a deterministic edit). */
+  usedProvider?: boolean;
 }

@@ -18,7 +18,7 @@ import type { HouseLayout, HouseStructureRefs } from "../ai/houseDesign.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
 import { friendlyAiErrorMessage, isNetworkUnreachable, summarizeCreatedObjects, summarizeUpdatedObjects } from "../ai/AiPromptController.ts";
-import type { AIPipelineResult, AIProjectSnapshot, AIRunOptions } from "../ai/types";
+import type { AIContextObject, AIPipelineResult, AIProjectSnapshot, AIRunOptions } from "../ai/types";
 import { planFurnishingsInScene } from "./interiors.ts";
 import { parseUtterance } from "./parseUtterance.ts";
 import { addOpeningToRoom, furnishRooms, moveOpening, setWallLength, showRoom } from "./roomEdits.ts";
@@ -40,6 +40,29 @@ import {
   wallVolume
 } from "./wallBuilder.ts";
 import type { WallDraft, WallSlot } from "./wallBuilder.ts";
+import { readAdjustments } from "./adjust.ts";
+import {
+  SIDE_WORDS,
+  besideCenter,
+  completeRoom,
+  describeRoom as describeRoomDraft,
+  missingRoomSlot,
+  readBeside,
+  readRoomDraft,
+  readRoomSide,
+  readRoomSlotAnswer,
+  roomConflicts,
+  roomElementCommand,
+  roomQuestion,
+  roomSizeProblem,
+  fixedWallProblem,
+  roomPartsOf,
+  roomWallCommand,
+  roomWallSpecs,
+  sharedWallOn
+} from "./roomBuilder.ts";
+import type { CompleteRoom, RoomDraft, RoomSlot, SceneEntry } from "./roomBuilder.ts";
+import type { Side } from "./roomModel.ts";
 import type { ArchitectStage, LocationRef, PlanPoint, Utterance } from "./parseUtterance.ts";
 
 /**
@@ -88,6 +111,14 @@ export interface ArchitectReply {
   hideIds?: string[];
   /** Objects to show again. */
   showIds?: string[];
+  /** The scene really changed during this turn (objects created, moved, resized, re-materialed or removed) - measured, never assumed. */
+  applied?: boolean;
+  /** A change is laid out and waiting for the user's go-ahead ("Build it?", the house plan) - nothing built yet. */
+  preview?: boolean;
+  /** This turn was an undo: when `applied` is also set, the scene changed by reversing the last change, not by making a new one. */
+  undone?: boolean;
+  /** Where the answer came from: this session's own rules, or the AI model (the backend provider was actually called). */
+  source?: "architect" | "ai";
 }
 
 export interface ArchitectStageView {
@@ -103,6 +134,19 @@ export interface ArchitectViewState {
   /** The house being designed: its footprint, where it's planned, and whether construction has started. */
   plan: { footprint: HouseFootprint; center: PlanPoint | null; started: boolean } | null;
   stages: ArchitectStageView[] | null;
+  /** A room or wall laid out and waiting for "build it" - drawn in the 3D scene as a preview, never part of the model. */
+  preview?: ArchitectPreview | null;
+}
+
+export interface ArchitectPreview {
+  label: string;
+  center: PlanPoint;
+  /** Extent along world X and Z, metres. */
+  sizeX: number;
+  sizeZ: number;
+  height: number;
+  /** The walls it would add, each as a box on the plan. */
+  walls: { center: PlanPoint; length: number; thickness: number; rotation: number }[];
 }
 
 export type ArchitectListener = (state: ArchitectViewState) => void;
@@ -165,7 +209,11 @@ type Pending =
   /** One new wall being specified (wallBuilder.ts): the slot asked about, or "confirm" once nothing is missing. */
   | { kind: "wall"; draft: WallDraft; slot: WallSlot | "confirm" }
   /** The house's wall material, asked just before its walls go up - then these stages are built. */
-  | { kind: "house-material"; stages: ArchitectStage[] };
+  | { kind: "house-material"; stages: ArchitectStage[] }
+  /** "It" could be the wall just built or the selection - which one did the user mean? */
+  | { kind: "adjust-target"; text: string; options: string[] }
+  /** One new room being specified (roomBuilder.ts): the slot asked about, "side" (which side of its neighbour), or "confirm". */
+  | { kind: "room"; draft: RoomDraft; slot: RoomSlot | "side" | "confirm" };
 
 interface SiteRecord {
   id: string;
@@ -202,6 +250,31 @@ function reply(text: string, tone: ArchitectTone, choices: ArchitectChoice[] = [
   return { text, tone, choices, ...extra };
 }
 
+/**
+ * What an undo actually reversed, from the scene before and after it:
+ * "removed the bedroom (room-2) and 3 walls", "restored 2 walls",
+ * "changed the kitchen (room-1)". Null when nothing changed.
+ */
+function describeReversal(before: readonly AIContextObject[], after: readonly AIContextObject[]): string | null {
+  const afterById = new Map(after.map((object) => [object.id, object]));
+  const beforeIds = new Set(before.map((object) => object.id));
+  const removed = before.filter((object) => !afterById.has(object.id));
+  const restored = after.filter((object) => !beforeIds.has(object.id));
+  const changed = before.filter((object) => afterById.has(object.id) && JSON.stringify(object) !== JSON.stringify(afterById.get(object.id)));
+  const name = (objects: readonly AIContextObject[]): string => {
+    const named = objects.filter((object) => object.label).map((object) => `the ${object.label!.toLowerCase()} (${object.id})`);
+    const counts = new Map<string, number>();
+    for (const object of objects.filter((entry) => !entry.label)) counts.set(object.type, (counts.get(object.type) ?? 0) + 1);
+    return list([...named, ...[...counts].map(([type, count]) => plural(count, type))]);
+  };
+  const parts = [
+    ...(removed.length > 0 ? [`removed ${name(removed)}`] : []),
+    ...(restored.length > 0 ? [`restored ${name(restored)}`] : []),
+    ...(changed.length > 0 ? [`changed ${name(changed)} back`] : [])
+  ];
+  return parts.length > 0 ? parts.join("; ") : null;
+}
+
 export class ArchitectSession {
   private readonly options: ArchitectSessionOptions;
   private readonly listeners = new Set<ArchitectListener>();
@@ -220,6 +293,12 @@ export class ArchitectSession {
   private pending: Pending | null = null;
   /** The material library id every wall of the house is built in - asked for, never assumed. */
   private houseWallMaterial: string | null = null;
+  /** The single element this conversation last built or changed - what "it" means when nothing else is selected. */
+  private lastBuiltId: string | null = null;
+  /** A room waiting for a click in the 3D view (see pickedLocation). */
+  private roomPick: RoomDraft | null = null;
+  /** The user has said "ground floor" once - not asked again. */
+  private floorConfirmed = false;
   /** A wall waiting for a click in the 3D view (see pickedLocation). */
   private wallPick: WallDraft | null = null;
   /** Roofs hidden to show a room ("show me the living room") - a view setting this session can undo with "show the roof". */
@@ -259,7 +338,8 @@ export class ArchitectSession {
       site: site ? { length: site.length, width: site.width, center: site.center } : null,
       location: this.location,
       plan: footprint ? { footprint, center: this.layout?.center ?? this.location, started } : null,
-      stages: this.layout ? this.stageViews(exists) : null
+      stages: this.layout ? this.stageViews(exists) : null,
+      preview: this.previewState()
     };
   }
 
@@ -274,16 +354,29 @@ export class ArchitectSession {
       const chosen = pending.options.filter((option) => option.keys.some((key) => said.includes(` ${key.toLowerCase()} `)));
       if (chosen.length === 1) return this.handle(chosen[0].say);
     }
+    const before = this.sceneSignature();
     const answered = pending ? this.answer(pending, utterance, text) : null;
     const result = answered ?? (await this.route(utterance, text));
     this.emit();
-    return result;
+    return this.sceneSignature() !== before ? { ...result, applied: true } : result;
+  }
+
+  /** Every object's data as the snapshot reports it - compared before and after a turn to tell whether the scene really changed. */
+  private sceneSignature(): string {
+    return JSON.stringify(this.options.snapshot().objects);
   }
 
   /** The user clicked the ground to choose a location (see pickLocation). */
   pickedLocation(point: PlanPoint): ArchitectReply {
     this.pending = null;
     const picked = { x: Math.round(point.x * 10) / 10, z: Math.round(point.z * 10) / 10 };
+    if (this.roomPick) {
+      const draft = this.roomPick;
+      this.roomPick = null;
+      const result = this.continueRoom({ ...draft, placement: { kind: "location", location: { kind: "point", point: picked } } });
+      this.emit();
+      return result;
+    }
     if (this.wallPick) {
       const draft = this.wallPick;
       this.wallPick = null;
@@ -334,7 +427,7 @@ export class ArchitectSession {
         if (u.kind === "no") return this.status("OK, I'll leave it there.");
         return null;
       case "which-room": {
-        if (u.kind === "all" || u.kind === "yes" || /(?:all|both|every)/i.test(text)) return this.furnish(pending.options);
+        if (u.kind === "all" || u.kind === "yes" || /\b(?:all|both|every)\b/i.test(text)) return this.furnish(pending.options);
         const chosen = pending.options.filter((name) => text.toLowerCase().includes(name.toLowerCase()));
         if (chosen.length > 0) return this.furnish(chosen);
         return null;
@@ -347,6 +440,12 @@ export class ArchitectSession {
         return null;
       case "wall":
         return this.answerWall(pending, u, text);
+      case "room":
+        return this.answerRoom(pending, u, text);
+      case "adjust-target":
+        if (pending.options.includes(text.trim())) return this.adjustElement(pending.text, text.trim());
+        if (u.kind === "no") return reply("OK — nothing was changed.", "info");
+        return null;
       case "house-material": {
         const material = readWallMaterial(text);
         if (material) {
@@ -387,10 +486,17 @@ export class ArchitectSession {
       case "yes":
       case "no":
         return this.status("Nothing is waiting on a yes or no right now.");
-      case "undo":
+      case "undo": {
         if (!this.options.undo) return reply("Undo isn't available here.", "error");
+        const before = this.options.snapshot().objects;
         this.options.undo();
-        return this.status("Undone — the last change was reversed.");
+        const reversed = describeReversal(before, this.options.snapshot().objects);
+        if (!reversed) return reply("There was nothing to undo.", "info", this.layout ? this.nextChoices(this.existence()) : this.helpChoices());
+        const lead = `Undone — ${reversed}.`;
+        // While a house is being planned or built its progress is the useful context; otherwise just say what changed.
+        const result = this.layout || this.request ? this.status(lead) : reply(lead, "success", [{ label: "Undo again", say: "undo" }]);
+        return { ...result, undone: true };
+      }
       case "help":
         return this.help();
       case "status":
@@ -438,8 +544,12 @@ export class ArchitectSession {
         return this.status("Nothing is in the way right now.");
       case "build-wall":
         return this.continueWall(readWallDraft(u.text));
+      case "adjust":
+        return this.adjustElement(u.text);
+      case "build-room":
+        return this.startRoom(u.text);
       case "unknown":
-        return this.fallback(text);
+        return this.namedRoomEdit(text) ?? this.fallback(text);
     }
   }
 
@@ -730,7 +840,8 @@ export class ArchitectSession {
         { label: "Build everything", say: "Build everything" },
         { label: bedrooms === 3 ? "Make it 2 bedrooms" : "Make it 3 bedrooms", say: bedrooms === 3 ? "2 bedrooms" : "3 bedrooms" },
         { label: "Move it", say: "Pick a location" }
-      ]
+      ],
+      { preview: true }
     );
   }
 
@@ -1116,6 +1227,493 @@ export class ArchitectSession {
 
   // --- everything else ---
 
+  // --- changes to one existing element, by conversation (adjust.ts) ---
+
+  /**
+   * "Move it 2 m east", "make it 3 m high", "use brick instead". "It" is
+   * the selection or the element this conversation last built - and when
+   * those differ, or neither exists, the user is asked rather than guessed
+   * for. Every change is one validated update_object, so one undo step.
+   */
+  private adjustElement(text: string, targetId?: string): ArchitectReply {
+    const snapshot = this.options.snapshot();
+    const byId = new Map(snapshot.objects.map((object) => [object.id, object]));
+    const selected = snapshot.selectedObjectId && byId.has(snapshot.selectedObjectId) ? snapshot.selectedObjectId : null;
+    const last = this.lastBuiltId && byId.has(this.lastBuiltId) ? this.lastBuiltId : null;
+    let target = targetId && byId.has(targetId) ? targetId : null;
+    if (!target) {
+      if (selected && last && selected !== last) {
+        this.pending = { kind: "adjust-target", text, options: [last, selected] };
+        return reply(`Which one do you mean - ${last}, which I just built, or the selected ${selected}?`, "question", [
+          { label: `${last} (just built)`, say: last },
+          { label: `${selected} (selected)`, say: selected },
+          { label: "Neither", say: "cancel" }
+        ]);
+      }
+      target = selected ?? last;
+    }
+    if (!target) {
+      return reply("Which element do you mean? Select it in the 3D view or the project tree, then say that again.", "question");
+    }
+
+    const object = byId.get(target)!;
+    // A room moves and resizes with its own walls - read from the scene, so a reopened project works the same.
+    if (object.type === "element" && object.kind === "room") return this.adjustRoom(target, text);
+    const adjustments = readAdjustments(text);
+    const ambiguous = adjustments.find((adjustment) => adjustment.kind === "ambiguous-size");
+    if (ambiguous && ambiguous.kind === "ambiguous-size") {
+      const value = fmtMeters(ambiguous.value);
+      const dimensions = (["length", "height", "thickness"] as const).filter((name) => name in object.dimensions);
+      return reply(
+        `Should ${target}'s ${dimensions.join(", ").replace(/, ([^,]*)$/, " or $1")} be ${value}?`,
+        "question",
+        [...dimensions.map((name) => ({ label: `${name.charAt(0).toUpperCase()}${name.slice(1)} ${value}`, say: `make it ${ambiguous.value} m ${name === "length" ? "long" : name === "height" ? "high" : "thick"}` })), { label: "Neither", say: "cancel" }]
+      );
+    }
+
+    const changes: { position?: { x: number; z: number }; dimensions?: Record<string, number>; material?: string; color?: string } = {};
+    const said: string[] = [];
+    for (const adjustment of adjustments) {
+      if (adjustment.kind === "move") {
+        const x = Math.round((object.position.x + adjustment.dx) * 1000) / 1000;
+        const z = Math.round((object.position.z + adjustment.dz) * 1000) / 1000;
+        changes.position = { x, z };
+        said.push(`moved ${fmtMeters(adjustment.distance)} ${adjustment.direction}: centre (${fmt(object.position.x)}, ${fmt(object.position.z)}) → (${fmt(x)}, ${fmt(z)})`);
+      } else if (adjustment.kind === "resize") {
+        if (!(adjustment.dimension in object.dimensions)) {
+          return reply(`${target} is a ${object.type} - it has no ${adjustment.dimension} to change.`, "error");
+        }
+        // "1 m longer" changes the current size by 1 m; "4 m long" sets it.
+        const current = object.dimensions[adjustment.dimension];
+        const value = adjustment.change ? Math.round((current + adjustment.change * adjustment.value) * 1000) / 1000 : adjustment.value;
+        if (object.type === "wall" && adjustment.dimension !== "width") {
+          const problem = wallSizeProblem(adjustment.dimension, value);
+          if (problem) return reply(`${problem} Nothing was changed.`, "error");
+        } else if (!(value > 0)) {
+          return reply("A size must be more than zero. Nothing was changed.", "error");
+        }
+        changes.dimensions = { ...changes.dimensions, [adjustment.dimension]: value };
+        said.push(`${adjustment.dimension} ${fmtMeters(current)} → ${fmtMeters(value)}`);
+      } else if (adjustment.kind === "material") {
+        const material = wallMaterial(adjustment.material);
+        if (object.type !== "wall" || !material) {
+          return reply(`Masonry materials apply to walls - ${target} is a ${object.type}. Choose its material in the Properties panel.`, "error");
+        }
+        changes.material = material.id;
+        changes.color = material.color;
+        said.push(`material → ${material.label.toLowerCase()}`);
+      }
+    }
+    if (said.length === 0) {
+      return reply(`I couldn't tell what to change about ${target}. Try “move it 2 m east”, “make it 3 m high” or “use brick instead”.`, "question");
+    }
+    const result = this.runBatch([{ type: "update_object", objectId: target, changes }]);
+    if (!result.ok) {
+      return reply(`${target} wasn't changed: ${result.message}`, "error");
+    }
+    this.lastBuiltId = target;
+    return reply(`Changed ${target}: ${said.join("; ")}. One undo reverses it.`, "success", [{ label: "Undo", say: "undo" }], { focusIds: [target] });
+  }
+
+  // --- one room, by conversation (roomBuilder.ts) ---
+
+  private roomsNow() {
+    return listRooms(this.options.snapshot());
+  }
+
+  /** Every object's plan box (from the derived geometry) - what a room footprint is checked against. */
+  private sceneEntries(): SceneEntry[] {
+    const snapshot = this.options.snapshot();
+    const geometry = analyzeConstructionGeometry(snapshot);
+    const byId = new Map(snapshot.objects.map((object) => [object.id, object]));
+    return geometry.objects
+      .filter((entry) => byId.has(entry.id))
+      .map((entry) => ({ object: byId.get(entry.id)!, box: { minX: entry.aabb.min.x, maxX: entry.aabb.max.x, minZ: entry.aabb.min.z, maxZ: entry.aabb.max.z } }));
+  }
+
+  private startRoom(text: string): ArchitectReply {
+    const said = readRoomDraft(text, this.roomsNow());
+    const { unknownNeighbour, otherFloor, ...draft } = said;
+    if (otherFloor) {
+      return reply(
+        `I can't build on the ${otherFloor.toLowerCase()} - this model has only a ground floor so far (no storeys yet). Shall I put it on the ground floor instead?`,
+        "question",
+        [{ label: "Ground floor", say: `${text.replace(otherFloor, "")} on the ground floor` }, { label: "Cancel", say: "cancel" }]
+      );
+    }
+    return this.continueRoom(draft, unknownNeighbour ? `I can't find a room called “${unknownNeighbour}” in the model.` : "");
+  }
+
+  /** The room's centre, from its placement - or what's still needed to know it. */
+  private roomCenter(draft: RoomDraft): { center: PlanPoint } | { ask: "placement" | "side"; lead?: string; sides?: Side[] } {
+    const placement = draft.placement;
+    if (!placement) return { ask: "placement" };
+    if (placement.kind === "location") {
+      const point = this.resolveRef(placement.location);
+      return point ? { center: point } : { ask: "placement", lead: "I can't place it there." };
+    }
+    const neighbour = this.roomsNow().find((room) => room.id === placement.roomId);
+    if (!neighbour) return { ask: "placement", lead: `${placement.roomName} isn't in the model any more.` };
+    const size = { length: draft.length ?? 1, width: draft.width ?? 1 };
+    if (placement.side) return { center: besideCenter(neighbour, placement.side, size) };
+    const entries = this.sceneEntries();
+    const free = (["right", "left", "front", "back"] as const).filter((side) => roomConflicts(entries, besideCenter(neighbour, side, size), size, new Set()).length === 0);
+    return { ask: "side", sides: free };
+  }
+
+  private continueRoom(draft: RoomDraft, lead = ""): ArchitectReply {
+    const prefix = lead ? `${lead} ` : "";
+    this.roomPick = null;
+    if (this.floorConfirmed && !draft.floor) draft = { ...draft, floor: "ground" };
+    if (draft.floor) this.floorConfirmed = true;
+    for (const slot of ["length", "width", "height"] as const) {
+      const value = draft[slot];
+      const problem = value === undefined ? null : roomSizeProblem(slot, value);
+      if (problem) return this.continueRoom({ ...draft, [slot]: undefined }, `${prefix}${problem}`);
+    }
+    const rooms = this.roomsNow();
+    const slot = missingRoomSlot(draft);
+    if (slot) {
+      const question = roomQuestion(slot, draft, rooms);
+      this.pending = { kind: "room", draft, slot };
+      return reply(`${prefix}${question.text}`, "question", [...question.choices, { label: "Cancel", say: "cancel" }]);
+    }
+    const room = completeRoom(draft)!;
+    const placed = this.roomCenter(draft);
+    if ("ask" in placed) {
+      if (placed.ask === "side") {
+        const neighbour = draft.placement!.kind === "beside" ? draft.placement!.roomName : "it";
+        if (!placed.sides || placed.sides.length === 0) {
+          this.pending = { kind: "room", draft: { ...draft, placement: undefined }, slot: "placement" };
+          return reply(
+            `${prefix}There's no free side of the ${neighbour.toLowerCase()} for a ${room.length} × ${room.width} m room - every side is blocked by other construction. Where should it go instead? Give coordinates, or pick a spot in the 3D view.`,
+            "question",
+            [{ label: "📍 Pick in the 3D view", say: "pick a location" }, { label: "Cancel", say: "cancel" }]
+          );
+        }
+        this.pending = { kind: "room", draft, slot: "side" };
+        return reply(`${prefix}Which side of the ${neighbour.toLowerCase()}? These sides are free:`, "question", [
+          ...placed.sides.map((side) => ({ label: `${SIDE_WORDS[side][0].toUpperCase()}${SIDE_WORDS[side].slice(1)} side (${side})`, say: SIDE_WORDS[side] })),
+          { label: "Cancel", say: "cancel" }
+        ]);
+      }
+      const question = roomQuestion("placement", draft, rooms);
+      this.pending = { kind: "room", draft: { ...draft, placement: undefined }, slot: "placement" };
+      return reply(`${prefix}${placed.lead ? `${placed.lead} ` : ""}${question.text}`, "question", [...question.choices, { label: "Cancel", say: "cancel" }]);
+    }
+    const center = placed.center;
+    const entries = this.sceneEntries();
+    const conflicts = roomConflicts(entries, center, room, new Set());
+    if (conflicts.length > 0) {
+      this.pending = { kind: "room", draft: { ...draft, placement: undefined }, slot: "placement" };
+      const names = conflicts.slice(0, 4).map((object) => object.label ?? object.id);
+      return reply(
+        `${prefix}A ${room.length} × ${room.width} m room centred at (${fmt(center.x)}, ${fmt(center.z)}) would overlap ${list(names)}${conflicts.length > 4 ? ` and ${conflicts.length - 4} more` : ""}. Where should it go instead?`,
+        "question",
+        [{ label: "📍 Pick in the 3D view", say: "pick a location" }, ...rooms.slice(0, 2).map((other) => ({ label: `Beside ${other.name}`, say: `beside the ${other.name.toLowerCase()}` })), { label: "Cancel", say: "cancel" }],
+        { focusIds: conflicts.map((object) => object.id) }
+      );
+    }
+    const shared = room.walls === "none" ? [] : (["front", "back", "left", "right"] as const).map((side) => sharedWallOn(entries, center, room, side)).filter((wall): wall is NonNullable<typeof wall> => wall !== null);
+    const note = shared.length > 0 ? ` It shares ${list(shared.map((wall) => wall.id))} with its neighbour, so ${shared.length === 1 ? "that wall isn't" : "those walls aren't"} built twice.` : "";
+    this.pending = { kind: "room", draft, slot: "confirm" };
+    return reply(
+      `${prefix}Ready to build ${describeRoomDraft(room, center)}. Length runs east–west, width north–south.${note} Build it?`,
+      "question",
+      [{ label: "Build it", say: "yes" }, { label: "📍 Pick another spot", say: "pick a location" }, { label: "Cancel", say: "cancel" }],
+      { preview: true }
+    );
+  }
+
+  private answerRoom(pending: Extract<Pending, { kind: "room" }>, u: Utterance, text: string): ArchitectReply | null {
+    const { draft, slot } = pending;
+    const rooms = this.roomsNow();
+    if (u.kind === "no") {
+      const rest = text.replace(/^\s*(?:no|nope|nah|wait)\b[\s,.!:-]*/i, "");
+      const corrected = rest === text ? {} : this.roomCorrection(draft, slot, rest);
+      if (Object.keys(corrected).length > 0) return this.continueRoom({ ...draft, ...corrected });
+      return reply("OK — no room was built.", "info", [{ label: "Start a room again", say: "create a room" }]);
+    }
+    if (u.kind === "pick-location" && (slot === "placement" || slot === "confirm" || slot === "side")) return this.askRoomPick({ ...draft, placement: undefined });
+    if (slot === "confirm" && u.kind === "yes") return this.buildRoom(draft);
+    if (slot === "side") {
+      const side = readRoomSide(text);
+      if (side && draft.placement?.kind === "beside") return this.continueRoom({ ...draft, placement: { ...draft.placement, side } });
+    }
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "build-room", "next"].includes(u.kind)) {
+      return null;
+    }
+    const corrected = this.roomCorrection(draft, slot, text);
+    if (Object.keys(corrected).length > 0) return this.continueRoom({ ...draft, ...corrected });
+    // A size with no dimension word: ask which one rather than guess.
+    const size = readAdjustments(`make it ${text}`).find((adjustment) => adjustment.kind === "ambiguous-size");
+    if (size && size.kind === "ambiguous-size" && (slot === "confirm" || slot === "side")) {
+      this.pending = pending;
+      const value = `${Number(size.value.toFixed(3))} m`;
+      return reply(`Is ${value} the room's length (east–west), width (north–south) or ceiling height?`, "question", [
+        { label: `Length ${value}`, say: `${size.value} m long` },
+        { label: `Width ${value}`, say: `${size.value} m wide` },
+        { label: `Height ${value}`, say: `${size.value} m high` },
+        { label: "Neither", say: "cancel" }
+      ]);
+    }
+    this.pending = pending;
+    if (slot === "confirm") {
+      return reply("Say “yes” to build it, change something (e.g. “make it 4.5 metres wide”), or “cancel”.", "question", [
+        { label: "Build it", say: "yes" },
+        { label: "Cancel", say: "cancel" }
+      ]);
+    }
+    if (slot === "side") return reply("Which side - east, west, north or south?", "question", [{ label: "Cancel", say: "cancel" }]);
+    const question = roomQuestion(slot, draft, rooms);
+    return reply(`I didn't catch the ${slot}. ${question.text}`, "question", [...question.choices, { label: "Cancel", say: "cancel" }]);
+  }
+
+  /** What these words change about the pending room: stated values, the current question's answer, or a move of its placement. */
+  private roomCorrection(draft: RoomDraft, slot: RoomSlot | "side" | "confirm", text: string): Partial<RoomDraft> {
+    const rooms = this.roomsNow();
+    const stated = readRoomDraft(text, rooms);
+    const { unknownNeighbour: _unknown, otherFloor: _other, ...values } = stated;
+    const answer = slot === "confirm" || slot === "side" ? undefined : readRoomSlotAnswer(slot, text, rooms);
+    const changes: Partial<RoomDraft> = {};
+    for (const [key, value] of Object.entries({ ...values, ...answer })) {
+      if (value !== undefined && JSON.stringify((draft as Record<string, unknown>)[key]) !== JSON.stringify(value)) (changes as Record<string, unknown>)[key] = value;
+    }
+    // "Move it 2 m east" before it's built: shift the planned centre.
+    const move = readAdjustments(text).find((adjustment) => adjustment.kind === "move");
+    if (move && move.kind === "move" && !changes.placement) {
+      const placed = this.roomCenter(draft);
+      if ("center" in placed) {
+        changes.placement = { kind: "location", location: { kind: "point", point: { x: Math.round((placed.center.x + move.dx) * 1000) / 1000, z: Math.round((placed.center.z + move.dz) * 1000) / 1000 } } };
+      }
+    }
+    return changes;
+  }
+
+  private askRoomPick(draft: RoomDraft): ArchitectReply {
+    this.roomPick = draft;
+    this.pending = { kind: "room", draft, slot: "placement" };
+    return reply(
+      "Click where the room's centre should go in the 3D view - or say coordinates like “at 4, 2”.",
+      "question",
+      [{ label: "Cancel", say: "cancel" }],
+      { pickLocation: { footprint: draft.length && draft.width ? { length: draft.length, width: draft.width } : null } }
+    );
+  }
+
+  /** The room zone and its walls (minus any shared with a neighbour) as ONE validated batch - one undo step. */
+  private buildRoom(draft: RoomDraft): ArchitectReply {
+    const room = completeRoom(draft);
+    const placed = this.roomCenter(draft);
+    if (!room || !("center" in placed)) return this.continueRoom(draft);
+    const center = placed.center;
+    const entries = this.sceneEntries();
+    if (roomConflicts(entries, center, room, new Set()).length > 0) return this.continueRoom(draft, "Something has been built there since the preview.");
+    const specs = room.walls === "none" ? [] : roomWallSpecs(center, room).filter((spec) => !sharedWallOn(entries, center, room, spec.side));
+    const result = this.runBatch([roomElementCommand(center, room), ...specs.map((spec) => roomWallCommand(spec, room))]);
+    if (!result.ok) {
+      this.pending = { kind: "room", draft, slot: "confirm" };
+      return reply(`The room wasn't built: ${result.message} Nothing was changed.`, "error", [{ label: "Try again", say: "yes" }, { label: "Cancel", say: "cancel" }]);
+    }
+    const roomId = result.results[0]?.objectId ?? "";
+    const wallIds = specs.map((_, index) => result.results[index + 1]?.objectId).filter((id): id is string => !!id);
+    this.lastBuiltId = roomId;
+    const ids = [roomId, ...wallIds];
+    const walls = specs.length > 0 ? ` with ${plural(specs.length, "wall")} (${wallIds.join(", ")})` : "";
+    return reply(
+      `Built ${roomId}: ${describeRoomDraft(room, center)}${walls}. One undo removes all of it.`,
+      "success",
+      [
+        { label: "Undo", say: "undo" },
+        { label: `Add a door to the ${room.name.toLowerCase()}`, say: `add a door to the ${room.name.toLowerCase()}` },
+        { label: "Create another room", say: "create a room" }
+      ],
+      { focusIds: ids }
+    );
+  }
+
+  /**
+   * "Move the kitchen 2 m east", "make the bedroom 4.5 m wide": an edit to
+   * a room named by its name (not "it"). Null when the words don't name
+   * exactly one room to move or resize - the AI fallback gets them.
+   */
+  private namedRoomEdit(text: string): ArchitectReply | null {
+    const lower = text.toLowerCase().replace(/\s+/g, " ");
+    const rooms = this.roomsNow();
+    // Longest names first, so "bedroom 2" wins over "bedroom"; a name followed by a unit ("bedroom 2 m wide") isn't that name.
+    const named = [...new Set(rooms.map((room) => room.name.toLowerCase()))]
+      .sort((a, b) => b.length - a.length)
+      .find((name) =>
+        new RegExp(
+          String.raw`\b(?:move|shift|nudge|slide|make|resize|change|put|place)\s+the\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}` +
+            // The name must end the noun: "the kitchen 2 m east", "the kitchen beside ...", never "the kitchen table ...".
+            String.raw`(?=\s*(?:$|[,.;]|-?\d|(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty|half)\b|(?:by|to|beside|next|adjacent|alongside|east|west|north|south|behind|in\s+front)\b))` +
+            String.raw`(?!\s*(?:m\b|mm\b|cm\b|met))`
+        ).test(lower)
+      );
+    if (!named) return null;
+    const others = rooms.filter((room) => room.name.toLowerCase() !== named);
+    if (readAdjustments(text).length === 0 && !readBeside(text, others)) return null;
+    const matches = rooms.filter((room) => room.name.toLowerCase() === named);
+    if (matches.length > 1) {
+      return reply(
+        `There are ${matches.length} rooms called “${named}” (${matches.map((room) => room.id).join(", ")}). Select the one you mean in the 3D view or the project tree, then say “${text.replace(new RegExp(`the ${named}`, "i"), "it")}”.`,
+        "question"
+      );
+    }
+    return this.adjustRoom(matches[0].id, text);
+  }
+
+  /**
+   * "Make it 4.5 m wide", "move it 2 m east", "move it beside the living
+   * room", "use brick" - for any room, with its walls. Everything is read
+   * from the scene as it stands (roomPartsOf): the room's own walls move,
+   * resize and change material with it in the same batch - one undo step -
+   * while a wall it shares with a neighbour, or one longer than its side,
+   * stays put; a change that would break such a wall is explained and
+   * nothing is changed.
+   */
+  private adjustRoom(roomId: string, text: string): ArchitectReply {
+    const snapshot = this.options.snapshot();
+    const parts = roomPartsOf(snapshot, roomId);
+    if (!parts) {
+      return reply(`${roomId} is turned at an angle, and only rooms square to the plan can be edited with their walls. Nothing was changed.`, "error");
+    }
+    const name = parts.name.toLowerCase();
+    let room: CompleteRoom = parts.room;
+    let center = { ...parts.center };
+    const said: string[] = [];
+    let materialChange: string | null = null;
+    for (const adjustment of readAdjustments(text)) {
+      if (adjustment.kind === "ambiguous-size") {
+        const value = `${Number(adjustment.value.toFixed(3))} m`;
+        return reply(`Should the ${name}'s length (east–west), width (north–south) or ceiling height be ${value}?`, "question", [
+          { label: `Length ${value}`, say: `make it ${adjustment.value} m long` },
+          { label: `Width ${value}`, say: `make it ${adjustment.value} m wide` },
+          { label: `Height ${value}`, say: `make it ${adjustment.value} m high` },
+          { label: "Neither", say: "cancel" }
+        ]);
+      }
+      if (adjustment.kind === "resize" && adjustment.dimension !== "thickness") {
+        // "1 m wider" changes the current size by 1 m; "4.5 m wide" sets it.
+        const value = adjustment.change ? Math.round((room[adjustment.dimension] + adjustment.change * adjustment.value) * 1000) / 1000 : adjustment.value;
+        const problem = roomSizeProblem(adjustment.dimension, value);
+        if (problem) return reply(`${problem} Nothing was changed.`, "error");
+        said.push(`${adjustment.dimension === "height" ? "ceiling" : adjustment.dimension} ${room[adjustment.dimension]} m → ${value} m`);
+        room = { ...room, [adjustment.dimension]: value };
+      } else if (adjustment.kind === "move") {
+        center = { x: Math.round((center.x + adjustment.dx) * 1000) / 1000, z: Math.round((center.z + adjustment.dz) * 1000) / 1000 };
+        said.push(`moved ${adjustment.distance} m ${adjustment.direction}`);
+      } else if (adjustment.kind === "material") {
+        if (Object.keys(parts.own).length === 0) return reply(`The ${name} has no walls of its own to change. Nothing was changed.`, "error");
+        said.push(`its walls → ${wallMaterial(adjustment.material)?.label.toLowerCase() ?? adjustment.material}`);
+        materialChange = adjustment.material;
+      }
+    }
+    const beside = readBeside(text, this.roomsNow().filter((other) => other.id !== roomId));
+    if (beside && "unknown" in beside) return reply(`I can't find a room called “${beside.unknown}” in the model. Nothing was changed.`, "question");
+    if (beside && "room" in beside) {
+      if (!beside.side) {
+        return reply(`Which side of the ${beside.room.name.toLowerCase()}?`, "question", (["right", "left", "front", "back"] as const).map((side) => ({ label: `${SIDE_WORDS[side]} side`, say: `move the ${name} ${SIDE_WORDS[side]} of the ${beside.room.name.toLowerCase()}` })));
+      }
+      center = besideCenter(beside.room, beside.side, room);
+      said.push(`moved to the ${SIDE_WORDS[beside.side]} side of the ${beside.room.name.toLowerCase()}`);
+    }
+    if (said.length === 0) return reply(`I couldn't tell what to change about the ${name}. Try “make it 4.5 m wide”, “move it 2 m east” or “move it beside the kitchen”.`, "question");
+
+    // A resize keeps a shared (fixed) side where it is: the room grows or
+    // shrinks away from it. With no fixed side it stays centred; with fixed
+    // walls on both ends fixedWallProblem() explains why it can't change.
+    const moved = center.x !== parts.center.x || center.z !== parts.center.z;
+    const fixedOn = (side: Side) => parts.fixed.some((entry) => entry.side === side);
+    const round3 = (value: number) => Math.round(value * 1000) / 1000;
+    if (!moved && room.length !== parts.room.length) {
+      if (fixedOn("left") && !fixedOn("right")) center = { ...center, x: round3(parts.center.x - parts.room.length / 2 + room.length / 2) };
+      else if (fixedOn("right") && !fixedOn("left")) center = { ...center, x: round3(parts.center.x + parts.room.length / 2 - room.length / 2) };
+    }
+    if (!moved && room.width !== parts.room.width) {
+      if (fixedOn("back") && !fixedOn("front")) center = { ...center, z: round3(parts.center.z - parts.room.width / 2 + room.width / 2) };
+      else if (fixedOn("front") && !fixedOn("back")) center = { ...center, z: round3(parts.center.z + parts.room.width / 2 - room.width / 2) };
+    }
+    if (!moved && (center.x !== parts.center.x || center.z !== parts.center.z)) {
+      said.push(`kept against ${list(parts.fixed.map((entry) => entry.wall.id))}, so it is now centred at (${center.x}, ${center.z})`);
+    }
+
+    const blocked = fixedWallProblem(parts, center, room);
+    if (blocked) {
+      return reply(`${blocked} Nothing was changed. What would you like to do instead - change the neighbouring room too, or edit this one differently?`, "question", [], {
+        focusIds: [roomId, ...parts.fixed.map((entry) => entry.wall.id)]
+      });
+    }
+    const ownWalls = Object.values(parts.own).filter((wall): wall is AIContextObject => wall !== undefined);
+    const own = new Set([roomId, ...ownWalls.map((wall) => wall.id)]);
+    for (const object of snapshot.objects) if (object.hostId && own.has(object.hostId)) own.add(object.id);
+    const conflicts = roomConflicts(this.sceneEntries(), center, room, own);
+    if (conflicts.length > 0) {
+      return reply(`That would overlap ${list(conflicts.slice(0, 4).map((object) => object.label ?? object.id))}, so nothing was changed. Try another size or position.`, "error", [], { focusIds: conflicts.map((object) => object.id) });
+    }
+
+    const material = materialChange ? wallMaterial(materialChange) : null;
+    // The element keeps its own axes: turned a quarter, its own length runs north-south.
+    const dimensions = parts.swapped ? { length: room.width, width: room.length, height: room.height } : { length: room.length, width: room.width, height: room.height };
+    const commands: unknown[] = [{ type: "update_object", objectId: roomId, changes: { position: { x: center.x, z: center.z }, dimensions } }];
+    for (const spec of roomWallSpecs(center, room)) {
+      const wall = parts.own[spec.side];
+      if (!wall) continue;
+      commands.push({
+        type: "update_object",
+        objectId: wall.id,
+        changes: {
+          position: { x: spec.center.x, z: spec.center.z },
+          rotation: spec.rotation,
+          dimensions: { length: spec.length, height: room.height, thickness: wall.dimensions.thickness ?? room.wallThickness },
+          ...(material ? { material: material.id, color: material.color } : {})
+        }
+      });
+    }
+    const result = this.runBatch(commands);
+    if (!result.ok) return reply(`The ${name} wasn't changed: ${result.message}`, "error");
+    this.lastBuiltId = roomId;
+    const withWalls = ownWalls.length > 0 ? ` Its own ${ownWalls.length === 1 ? "wall" : "walls"} (${ownWalls.map((wall) => wall.id).join(", ")}) changed with it` : "";
+    const kept = parts.fixed.length > 0 ? `${withWalls ? ";" : ""} ${list(parts.fixed.map((entry) => entry.wall.id))} ${parts.fixed.length === 1 ? "stays" : "stay"} as ${parts.fixed.length === 1 ? "it is" : "they are"}${materialChange ? " (not one of its own walls)" : ""}` : "";
+    return reply(`Changed ${roomId} (the ${name}): ${said.join("; ")}.${withWalls}${kept}${withWalls || kept ? "." : ""} One undo reverses it.`, "success", [{ label: "Undo", say: "undo" }], { focusIds: [...own] });
+  }
+
+  /** The pending room's or wall's preview for the 3D scene - only once it's fully specified and placed. */
+  private previewState(): ArchitectPreview | null {
+    const pending = this.pending;
+    if (pending?.kind === "room" && pending.slot === "confirm") {
+      const room = completeRoom(pending.draft);
+      const placed = this.roomCenter(pending.draft);
+      if (!room || !("center" in placed)) return null;
+      const entries = this.sceneEntries();
+      const walls = room.walls === "none" ? [] : roomWallSpecs(placed.center, room).filter((spec) => !sharedWallOn(entries, placed.center, room, spec.side));
+      return {
+        label: `${room.name} ${room.length} × ${room.width} m, ${room.height} m ceiling`,
+        center: placed.center,
+        sizeX: room.length,
+        sizeZ: room.width,
+        height: room.height,
+        walls: walls.map((spec) => ({ center: spec.center, length: spec.length, thickness: room.wallThickness, rotation: spec.rotation }))
+      };
+    }
+    if (pending?.kind === "wall" && pending.slot === "confirm" && pending.draft.location) {
+      const center = this.resolveRef(pending.draft.location);
+      const draft = pending.draft;
+      if (!center || draft.length === undefined || draft.thickness === undefined || draft.height === undefined) return null;
+      const footprint = wallFootprint(draft);
+      return {
+        label: `Wall ${draft.length} m × ${draft.height} m × ${Math.round(draft.thickness * 1000)} mm`,
+        center,
+        sizeX: footprint.length,
+        sizeZ: footprint.width,
+        height: draft.height,
+        walls: [{ center, length: draft.length, thickness: draft.thickness, rotation: draft.direction === "z" ? Math.PI / 2 : 0 }]
+      };
+    }
+    return null;
+  }
+
   // --- one wall, by conversation (wallBuilder.ts) ---
 
   /** Asks for the first thing the draft is missing - or, once nothing is, confirms it. Nothing is assumed. */
@@ -1149,13 +1747,19 @@ export class ArchitectSession {
         { label: "📍 Pick another spot", say: "pick a location" },
         { label: "Cancel", say: "cancel" }
       ],
-      overlaps.length > 0 ? { focusIds: overlaps.map((object) => object.id) } : {}
+      { preview: true, ...(overlaps.length > 0 ? { focusIds: overlaps.map((object) => object.id) } : {}) }
     );
   }
 
   private answerWall(pending: Extract<Pending, { kind: "wall" }>, u: Utterance, text: string): ArchitectReply | null {
     const { draft, slot } = pending;
     if (u.kind === "no") {
+      // "No, 5 metres long" / "no, brick" is a correction, not a cancel.
+      const rest = text.replace(/^\s*(?:no|nope|nah|wait)\b[\s,.!:-]*/i, "");
+      const corrected = rest === text ? {} : { ...readWallDraft(rest), ...(slot === "confirm" ? {} : readSlotAnswer(slot, rest, draft)) };
+      if (Object.values(corrected).some((value) => value !== undefined)) {
+        return this.continueWall({ ...draft, ...Object.fromEntries(Object.entries(corrected).filter(([, value]) => value !== undefined)) });
+      }
       return reply("OK — no wall was built.", "info", [{ label: "Start a wall again", say: "add a wall" }]);
     }
     if (u.kind === "pick-location" && (slot === "position" || slot === "confirm")) {
@@ -1175,6 +1779,17 @@ export class ArchitectSession {
       if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
     }
     if (JSON.stringify(merged) === JSON.stringify(draft)) {
+      // A size with no dimension word, at the confirmation: ask which one rather than guess.
+      const size = slot === "confirm" ? readAdjustments(`make it ${text}`).find((adjustment) => adjustment.kind === "ambiguous-size") : undefined;
+      if (size && size.kind === "ambiguous-size") {
+        this.pending = pending;
+        const value = fmtMeters(size.value);
+        return reply(`Is ${value} the wall's length or its height?`, "question", [
+          { label: `Length ${value}`, say: `${size.value} m long` },
+          { label: `Height ${value}`, say: `${size.value} m high` },
+          { label: "Neither", say: "cancel" }
+        ]);
+      }
       if (slot === "confirm") {
         this.pending = pending;
         return reply("Say “yes” to build it, change a value (e.g. “make it 4 m long”), or “cancel”.", "question", [
@@ -1209,6 +1824,7 @@ export class ArchitectSession {
       return reply(`The wall wasn't built: ${result.message} Nothing was changed.`, "error", [{ label: "Try again", say: "yes" }, { label: "Cancel", say: "cancel" }]);
     }
     const id = result.results[0]?.objectId ?? "the wall";
+    if (result.results[0]?.objectId) this.lastBuiltId = result.results[0].objectId;
     return reply(
       `Built ${id}: ${describeWall({ ...complete, center })} - ${fmtMeters(wallVolume(complete)).replace(" m", " m³")} of masonry. Select it to inspect or edit its dimensions; undo removes it in one step.`,
       "success",
@@ -1250,8 +1866,14 @@ export class ArchitectSession {
     try {
       result = await this.options.fallback(text, { housePlan: "return" });
     } catch (error) {
-      return this.aiFailure(text, error instanceof Error ? error.message : String(error));
+      return { ...this.aiFailure(text, error instanceof Error ? error.message : String(error)), source: "ai" };
     }
+    const source: "architect" | "ai" = result.usedProvider ? "ai" : "architect";
+    const answer = this.fallbackReply(text, result);
+    return { ...answer, source };
+  }
+
+  private fallbackReply(text: string, result: AIPipelineResult): ArchitectReply {
     if (result.success && result.housePlan) {
       // The AI read the turn as a whole house: the same staged design flow
       // as a house this session recognizes itself - location and size

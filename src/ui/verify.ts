@@ -23,8 +23,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // Explicit .ts extension: Node runs this file directly (see above).
 import { SPLASH_HOLD_MS, SPLASH_REDUCED_HOLD_MS, splashRemainingMs } from "./splash.ts";
-import { createHandsFree, matchSpokenChoice, spokenReply } from "./handsFree.ts";
+import { createHandsFree, matchSpokenChoice, spokenNumbers, spokenReply } from "./handsFree.ts";
 import type { HandsFreeStatus } from "./handsFree.ts";
+import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState.ts";
+import type { CopilotEvent } from "./copilotState.ts";
+import { rmsLevel } from "./levelMeter.ts";
+import { createVoiceInput } from "./voiceInput.ts";
+import { searchProjectItems } from "./projectSearch.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -386,7 +391,7 @@ function run(): void {
   type Spoken = { text: string; choices: { label: string; say: string }[] };
   const fakeListener = (supported = true) => {
     const log: string[] = [];
-    return { log, listener: { supported, start: () => void log.push("start"), stop: () => void log.push("stop") } };
+    return { log, listener: { supported, start: () => void log.push("start"), stop: () => void log.push("stop"), cancel: () => void log.push("cancel") } };
   };
   const fakeSpeech = () => {
     const spoken: string[] = [];
@@ -515,9 +520,210 @@ function run(): void {
     const handsFree = createHandsFree({ speech: speech.output, listener, onStatus: () => undefined });
     handsFree.enableWith(materialQuestion);
     handsFree.setEnabled(false);
-    assertTrue(speech.cancelled() > 0 && log[log.length - 1] === "stop", "speech cancelled, mic closed");
+    assertTrue(speech.cancelled() > 0 && log[log.length - 1] === "cancel", "speech cancelled, mic closed - and anything half-heard dropped, not sent");
     speech.finish();
     assertTrue(!log.includes("start"), "a late “finished speaking” never reopens the mic");
+  });
+
+  // --- Copilot interaction state (copilotState.ts), level (levelMeter.ts), interruption (handsFree.ts) ---
+
+  check("copilot: listening → transcribing → understanding → clarifying / previewing / applied, from what really happened", () => {
+    let state = INITIAL_COPILOT_STATE;
+    const step = (event: CopilotEvent) => (state = nextCopilotState(state, event));
+    step({ type: "listening" });
+    assertEqual(state.phase, "listening", "listening");
+    step({ type: "interim", text: "add a brick" });
+    assertEqual(`${state.phase} | ${state.transcript}`, "transcribing | add a brick", "the live words, not sent yet");
+    step({ type: "heard", text: "add a brick wall" });
+    step({ type: "sent", text: "add a brick wall" });
+    assertEqual(state.phase, "understanding", "sent");
+    step({ type: "reply", reply: { tone: "question" } });
+    assertEqual(state.phase, "clarifying", "a question");
+    step({ type: "reply", reply: { tone: "question", preview: true } });
+    assertEqual(state.phase, "previewing", "a change laid out");
+    assertTrue(state.detail.includes("nothing is built"), "and says nothing is built yet");
+    step({ type: "reply", reply: { tone: "success" } });
+    assertEqual(state.phase, "idle", "a success that changed nothing is NOT shown as applied");
+    step({ type: "reply", reply: { tone: "success", applied: true } });
+    assertEqual(state.phase, "applied", "only a measured scene change is applied");
+    step({ type: "reply", reply: { tone: "error" } });
+    assertEqual(`${state.phase} | ${state.detail}`, "error | Nothing was changed.", "errors say nothing changed");
+    step({ type: "voice-error", message: "Microphone access was blocked." });
+    assertEqual(`${state.phase} | ${state.detail}`, "error | Microphone access was blocked.", "voice errors are shown");
+  });
+
+  check("project search: every word must match a name, id, material or room; an exact id first; empty finds nothing", () => {
+    const items = [
+      { id: "room-1", label: "Kitchen — 20 m²", detail: "room" },
+      { id: "wall-2", label: "Wall", detail: "brick in Kitchen" },
+      { id: "wall-3", label: "Wall", detail: "concrete-block in Kitchen" },
+      { id: "wall-12", label: "Wall", detail: "brick" },
+      { id: "door-1", label: "Door in wall-2", detail: "in Kitchen" }
+    ];
+    const ids = (query: string) => searchProjectItems(items, query).map((item) => item.id).join(" ");
+    assertEqual(ids("kitchen"), "room-1 wall-2 wall-3 door-1", "the room and everything standing in it");
+    assertEqual(ids("brick kitchen"), "wall-2", "every word must match, in any order");
+    assertEqual(ids("BRICK"), "wall-2 wall-12", "case-insensitive, by material");
+    assertEqual(ids("wall-2"), "wall-2 door-1", "an exact id first, then what mentions it (the door in it)");
+    assertEqual(ids("garage"), "", "no match");
+    assertEqual(ids("   "), "", "an empty search lists nothing (the tree shows instead)");
+  });
+
+  check("copilot stepper: a step is done only if it really happened - typed input skips Listening, no question skips Clarifying", () => {
+    const run = (events: CopilotEvent[]) => events.reduce((state, event) => nextCopilotState(state, event), INITIAL_COPILOT_STATE);
+    const typedToPreview = run([{ type: "sent", text: "add a 5 m brick wall at 2, 3 east-west 2.7 m high 230 mm thick" }, { type: "reply", reply: { tone: "question", preview: true } }]);
+    assertEqual(stepStatuses(typedToPreview).join(" "), "skipped done skipped active todo", "typed, straight to a preview: no Listening, no Clarifying");
+    const typedApplied = nextCopilotState(typedToPreview, { type: "reply", reply: { tone: "success", applied: true } });
+    assertEqual(stepStatuses(typedApplied).join(" "), "skipped done skipped done done", "applied without any question asked");
+    const spokenClarified = run([
+      { type: "listening" },
+      { type: "heard", text: "add a wall" },
+      { type: "sent", text: "add a wall" },
+      { type: "reply", reply: { tone: "question" } },
+      { type: "sent", text: "brick" },
+      { type: "reply", reply: { tone: "question", preview: true } }
+    ]);
+    assertEqual(stepStatuses(spokenClarified).join(" "), "done done done active todo", "spoken, asked, then previewed: every step really happened");
+    const nextTask = nextCopilotState(nextCopilotState(spokenClarified, { type: "reply", reply: { tone: "success", applied: true } }), { type: "sent", text: "move it 2 m east" });
+    assertEqual(stepStatuses(nextTask).join(" "), "skipped active todo todo todo", "a new typed instruction after Applied starts a fresh task");
+    assertEqual(stepStatuses(INITIAL_COPILOT_STATE).join(" "), "todo todo todo todo todo", "idle");
+    const undone = run([{ type: "sent", text: "undo" }, { type: "reply", reply: { tone: "success", applied: true, undone: true } }]);
+    assertEqual(undone.detail, "Undone - the last change was reversed.", "an undo is reported as an undo, not as a new change applied");
+    assertEqual(COPILOT_STEPS.map((stepEntry) => stepEntry.label).join(" → "), "Listening → Understanding → Clarifying → Previewing → Applied", "labels");
+  });
+
+  check("copilot input: a repeated final phrase is dropped; while busy only the latest new instruction waits its turn", () => {
+    const gate = createInputGate(2500);
+    assertEqual(gate.admit("Add a wall", false, 1000), "send", "first");
+    assertEqual(gate.admit("add a wall ", false, 1500), "duplicate", "the same words again within 2.5 s (recognition double-fire)");
+    assertEqual(gate.admit("brick", true, 1600), "queued", "busy: kept");
+    assertEqual(gate.admit("stone masonry", true, 1700), "queued", "a newer instruction replaces it");
+    assertEqual(gate.takeQueued(), "stone masonry", "the latest wins");
+    assertEqual(gate.takeQueued(), null, "taken once");
+    assertEqual(gate.admit("Add a wall", false, 5000), "send", "the same words later are a new instruction");
+  });
+
+  check("level meter: RMS of real samples - silence is 0, speech-level signal reads clearly, never above 1", () => {
+    assertEqual(rmsLevel([]), 0, "no samples");
+    assertEqual(rmsLevel(new Float32Array(512)), 0, "silence");
+    const tone = Float32Array.from({ length: 512 }, (_, index) => 0.1 * Math.sin(index / 4));
+    const level = rmsLevel(tone);
+    assertTrue(level > 0.2 && level < 0.4, `a moderate signal: ${level}`);
+    assertEqual(rmsLevel(Float32Array.from({ length: 64 }, () => 1)), 1, "clamped");
+  });
+
+  check("interruptions: the mic pressed while a reply is read cuts the speech and listens; Stop silences everything at once", () => {
+    const speech = fakeSpeech();
+    const { log, listener } = fakeListener();
+    const handsFree = createHandsFree({ speech: speech.output, listener, onStatus: () => undefined });
+    handsFree.enableWith(materialQuestion);
+    assertTrue(handsFree.speaking, "reading the question");
+    handsFree.bargeIn();
+    assertTrue(!handsFree.speaking && speech.cancelled() > 0, "speech cut immediately");
+    assertEqual(log[log.length - 1], "start", "listening straight away");
+    const starts = log.filter((entry) => entry === "start").length;
+    speech.finish();
+    assertEqual(log.filter((entry) => entry === "start").length, starts, "the cancelled speech's late “finished” changes nothing");
+    handsFree.replied(materialQuestion);
+    handsFree.interrupt();
+    assertTrue(!handsFree.enabled && !handsFree.speaking && log[log.length - 1] === "cancel", "Stop: speech and mic off, hands-free off, half-heard words dropped");
+  });
+
+  // --- Speech recognition (voiceInput.ts) against a scripted stand-in for the browser's recogniser - no audio ---
+
+  type FakeResult = { isFinal: boolean; 0: { transcript: string } };
+  class FakeRecognition {
+    static last: FakeRecognition | null = null;
+    lang = "";
+    interimResults = false;
+    continuous = false;
+    maxAlternatives = 1;
+    onresult: ((event: { resultIndex: number; results: FakeResult[] }) => void) | null = null;
+    onerror: ((event: { error: string }) => void) | null = null;
+    onend: (() => void) | null = null;
+    constructor() {
+      FakeRecognition.last = this;
+    }
+    start(): void {}
+    stop(): void {
+      this.onend?.();
+    }
+    abort(): void {
+      this.onerror?.({ error: "aborted" });
+      this.onend?.();
+    }
+    /** What Chrome sends: every result so far, `resultIndex` the first that changed. */
+    results(resultIndex: number, ...entries: [string, boolean][]): void {
+      this.onresult?.({ resultIndex, results: entries.map(([transcript, isFinal]) => ({ isFinal, 0: { transcript } })) });
+    }
+  }
+  const withFakeRecognition = (run: (voice: ReturnType<typeof createVoiceInput>, heard: { interim: string[]; final: string[]; states: string[] }) => void): void => {
+    const scope = globalThis as unknown as { window?: unknown };
+    const previous = scope.window;
+    scope.window = { webkitSpeechRecognition: FakeRecognition };
+    try {
+      const heard = { interim: [] as string[], final: [] as string[], states: [] as string[] };
+      const voice = createVoiceInput({
+        onInterim: (text) => void heard.interim.push(text),
+        onFinal: (text) => void heard.final.push(text),
+        onState: (state) => void heard.states.push(state)
+      });
+      run(voice, heard);
+    } finally {
+      scope.window = previous;
+    }
+  };
+
+  check("speech recognition: interim words show live; the final transcript is sent exactly once, when listening ends - repeated results don't send it twice", () => {
+    withFakeRecognition((voice, heard) => {
+      voice.start();
+      const recogniser = FakeRecognition.last!;
+      recogniser.results(0, ["make it", false]);
+      recogniser.results(0, ["make it 4.5 metres", false]);
+      recogniser.results(0, ["make it 4.5 metres wide", true]);
+      // Chrome can deliver another event after the final one; results before resultIndex are already counted.
+      recogniser.results(1, ["make it 4.5 metres wide", true]);
+      assertEqual(heard.final.length, 0, "nothing is sent while still listening");
+      assertEqual(heard.interim.join(" / "), "make it / make it 4.5 metres / make it 4.5 metres wide / make it 4.5 metres wide", "partial words shown as they come");
+      recogniser.onend?.();
+      assertEqual(heard.final.join(" / "), "make it 4.5 metres wide", "sent once, in full");
+      assertEqual(voice.listening, false, "and listening has ended");
+    });
+  });
+
+  check("spoken numbers: words become digits the way a typed instruction has them - and nothing else changes", () => {
+    const cases: [string, string][] = [
+      ["create a four by five metre kitchen three metres high", "create a 4 by 5 metre kitchen 3 metres high"],
+      ["make it four point five metres wide", "make it 4.5 metres wide"],
+      ["at two comma zero", "at 2, 0"],
+      ["at one comma two", "at 1, 2"],
+      ["move it minus three metres", "move it -3 metres"],
+      ["twenty five metres long", "25 metres long"],
+      ["make it one metre longer", "make it 1 metre longer"],
+      ["the one on the left", "the one on the left"],
+      ["build it", "build it"],
+      ["make it 4.5 metres wide", "make it 4.5 metres wide"],
+      ["seventeen", "17"]
+    ];
+    for (const [said, expected] of cases) assertEqual(spokenNumbers(said), expected, said);
+  });
+
+  check("speech recognition: pressing the mic again sends what was said; Stop (cancel) drops it - nothing half-heard ever runs", () => {
+    withFakeRecognition((voice, heard) => {
+      voice.start();
+      FakeRecognition.last!.results(0, ["create a kitchen", true]);
+      voice.toggle();
+      assertEqual(heard.final.join(" / "), "create a kitchen", "mic pressed to finish: the words are sent");
+
+      voice.start();
+      FakeRecognition.last!.results(0, ["move it 2 metres", true], [" east", false]);
+      assertTrue(voice.listening, "listening");
+      voice.cancel();
+      assertEqual(heard.final.join(" / "), "create a kitchen", "Stop: the half-heard “move it 2 metres” is dropped, not sent");
+      assertEqual(heard.states[heard.states.length - 1], "idle", "back to idle, with no error shown for our own abort");
+      FakeRecognition.last!.results(0, ["late words", true]);
+      assertEqual(heard.interim.includes("late words"), false, "a late result after Stop is ignored");
+    });
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

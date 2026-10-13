@@ -72,7 +72,8 @@ export function createElementPlacementHud(options: ElementPlacementHudOptions): 
   }
 
   const unsubscribe = options.placementController.subscribe((tool: PlacementTool | null) => {
-    armedTool = tool && !tool.id.startsWith(ASSET_TOOL_PREFIX) ? tool : null;
+    // Assets have their own HUD; a measuring tool places nothing, so it has no size to show.
+    armedTool = tool && !tool.id.startsWith(ASSET_TOOL_PREFIX) && !tool.measures ? tool : null;
     lastPoint = null;
     emitHud();
   });

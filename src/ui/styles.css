@@ -1,45 +1,48 @@
-/* Professional dark CAD-style theme for the application shell. */
+/* Light architectural theme: warm white and light grey surfaces, navy text,
+   one architectural-blue accent, subtle borders and minimal shadows. */
 
 :root {
-  --color-bg: #14151a;
-  --color-surface: #1b1d23;
-  --color-surface-raised: #23252d;
-  --color-surface-sunken: #101116;
-  --color-border: #2b2e36;
-  --color-text: #eceef1;
-  --color-text-muted: #8d93a1;
-  --color-accent: #4f8ef7;
-  --color-accent-soft: rgba(79, 142, 247, 0.14);
+  --color-bg: #f3f4f6;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f2f4f8;
+  --color-surface-sunken: #eceff3;
+  --color-border: #e1e5eb;
+  --color-text: #17233a;
+  --color-text-muted: #5f6b7d;
+  --color-accent: #1f5fbf;
+  --color-accent-soft: rgba(31, 95, 191, 0.1);
   --color-accent-text: #ffffff;
-  --color-success: #4caf7d;
+  --color-success: #1d8655;
   /* The EAVARA mark's own quiet warm accent - used sparingly (the brand
      mark, the empty state's eyebrow, the AI result card) so it reads as
      the school's identity, not a second UI accent color competing with
      the tool-blue used for every interactive state. */
-  --color-brand: #c9a769;
+  --color-brand: #9b7a3a;
   /* One named danger color, replacing five slightly different reds
      (#ff8a80, #e5746b, #a83c38, and one inline rgba(216,76,68,...)) that
      had drifted into separate rules over time - the AI error card, the
      delete/danger button, the save-status error line, and a relationship
      warning were each their own shade. All now read from this one family,
      the same soft/solid pairing --color-accent already uses. */
-  --color-danger: #ff8a80;
-  --color-danger-soft: rgba(255, 138, 128, 0.14);
-  --color-danger-border: #a83c38;
-  --shadow-panel: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --color-danger: #c2412d;
+  --color-danger-soft: rgba(194, 65, 45, 0.09);
+  --color-danger-border: #e3a497;
+  --shadow-panel: 0 10px 28px rgba(16, 24, 40, 0.1);
   /* A dialog sits above a dimming scrim, so it earns a slightly heavier
      shadow than an in-page panel - project-chooser and auth-dialog each
      hand-wrote this identical value independently; named once here. */
-  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 18px 44px rgba(16, 24, 40, 0.18);
   /* A light lift for small chrome that floats over other content without
      becoming a dialog: the viewport's view-controls overlay, the AI
      result card, a pressed ribbon tool - present, not heavy. */
-  --shadow-elevation-1: 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-elevation-1: 0 1px 3px rgba(16, 24, 40, 0.08);
   /* The floating viewport overlays' (view-controls, the manipulation
      readout) own translucent chrome - distinct from --color-surface,
      which is opaque, because these sit over the 3D scene and stay
      slightly see-through on purpose. */
-  --overlay-bg: rgba(26, 26, 26, 0.85);
+  --overlay-bg: rgba(255, 255, 255, 0.94);
+  /* The dimming behind a dialog. */
+  --scrim: rgba(16, 24, 40, 0.32);
 
   /* A small, consistent radius scale - already the range this file used
      ad hoc (2-6px controls, one 10px outlier, a couple of pill shapes);
@@ -71,8 +74,8 @@
   --topbar-height: 52px;
   --mainnav-height: 36px;
   --ribbon-height: 72px;
-  --rail-width: 56px;
-  --sidebar-left-width: 208px;
+  --rail-width: 70px;
+  --sidebar-left-width: 236px;
   --sidebar-right-width: 260px;
   /* Tall enough that the AI panel's own header + input row + a "Design
      Complete" result card's heading and summary line are all visible at
@@ -343,7 +346,7 @@ button {
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
 }
 
 .project-chooser[hidden] {
@@ -437,7 +440,7 @@ button {
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
 }
 
 .auth-dialog[hidden] {
@@ -995,6 +998,37 @@ button {
   color: var(--color-accent-text);
 }
 
+/* Select / Measure / Annotate (ui/viewportTools.ts), in the Snap row. */
+.viewport-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.viewport-tool svg {
+  flex: none;
+}
+
+.viewport-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.viewport-tool:disabled:hover {
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 1100px) {
+  /* Icons only (each keeps its name as aria-label and tooltip), so the row never wraps over the copilot. */
+  .viewport-tool__label {
+    display: none;
+  }
+
+  .viewport-tool {
+    padding: 5px 8px;
+  }
+}
+
 /* Separates Perspective/Top/Front/Side from Fit House/Focus Selected. */
 .view-controls__divider {
   width: 1px;
@@ -1028,7 +1062,7 @@ button {
   width: min(380px, calc(100% - 48px));
   padding: 28px 28px 24px;
   text-align: center;
-  background: rgba(27, 29, 35, 0.82);
+  background: var(--overlay-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   backdrop-filter: blur(6px);
@@ -1851,10 +1885,10 @@ button {
 .color-swatch--placeholder {
   background: repeating-linear-gradient(
     45deg,
-    #3a3a3a,
-    #3a3a3a 4px,
-    #2a2a2a 4px,
-    #2a2a2a 8px
+    #eef0f3,
+    #eef0f3 4px,
+    #e2e5ea 4px,
+    #e2e5ea 8px
   );
 }
 
@@ -2526,7 +2560,7 @@ button {
   width: min(360px, calc(100% - 24px));
   display: flex;
   flex-direction: column;
-  background: rgba(27, 29, 35, 0.92);
+  background: var(--overlay-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-panel);
@@ -3011,4 +3045,318 @@ button {
   border-color: var(--color-accent);
   background: var(--color-surface-raised);
   box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+/* --- Workspace polish (light architectural theme) --- */
+
+/* The left rail is wide enough for "Measurements" on one line. */
+.sidebar-rail__item {
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+/* The AI copilot floats over the viewport at the height its conversation
+   needs (never a tall empty block), can be resized from its corner, and
+   never covers more than the viewport. */
+.architect {
+  bottom: auto;
+  max-height: calc(100% - 24px);
+  width: 380px;
+  min-width: 300px;
+  max-width: calc(100% - 24px);
+  min-height: 0;
+  resize: both;
+  overflow: hidden;
+}
+
+.architect__log {
+  flex: 1 1 auto;
+  min-height: 80px;
+}
+
+.architect__composer {
+  flex-wrap: wrap;
+}
+
+.architect__input {
+  flex: 1 1 100%;
+  order: -1;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.architect__send {
+  margin-left: auto;
+  min-height: 32px;
+}
+
+.architect__tool {
+  min-height: 32px;
+}
+
+/* --- AI Architect copilot: interaction state (ui/copilotState.ts) --- */
+
+.copilot__status {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.copilot__steps {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.copilot__step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  text-align: center;
+  position: relative;
+}
+
+.copilot__step:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--color-border);
+  z-index: 0;
+}
+
+.copilot__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  background: var(--color-surface);
+  position: relative;
+  z-index: 1;
+}
+
+.copilot__step--done {
+  color: var(--color-text);
+}
+
+.copilot__step--done .copilot__dot {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.copilot__step--done::before,
+.copilot__step--active::before {
+  background: var(--color-accent) !important;
+}
+
+.copilot__step--active {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.copilot__step--active .copilot__dot {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.copilot__state-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.copilot__state {
+  margin: 0;
+  flex: 1;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.copilot__state--applied {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.copilot__state--error {
+  color: var(--color-danger);
+}
+
+.copilot__state--previewing,
+.copilot__state--clarifying,
+.copilot__state--understanding {
+  color: var(--color-accent);
+}
+
+.copilot__transcript {
+  margin: 0;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--color-text);
+}
+
+.copilot__level {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 20px;
+  width: 64px;
+  flex-shrink: 0;
+}
+
+.copilot__bar {
+  flex: 1;
+  height: 8%;
+  border-radius: 2px;
+  background: var(--color-accent);
+  transition: height 80ms linear;
+}
+
+.copilot__stop {
+  flex-shrink: 0;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.copilot__tags {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.copilot__tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.copilot__tag--ai {
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.copilot__tag--preview {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.copilot__tag--applied {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+/* The copilot's optional parts really disappear when hidden (their own display rules would otherwise win). */
+.copilot__status[hidden],
+.copilot__level[hidden],
+.copilot__transcript[hidden],
+.copilot__stop[hidden] {
+  display: none;
+}
+
+/* Narrower desktops: a slimmer copilot, and the view controls kept on the
+   right edge of the viewport so the copilot never hides them. */
+@media (max-width: 1280px) {
+  .architect {
+    width: 320px;
+    min-width: 260px;
+    /* Below the view controls, never over them. */
+    top: 84px;
+    max-height: calc(100% - 96px);
+  }
+
+  .viewport-area__controls {
+    left: auto;
+    right: 12px;
+    transform: none;
+    align-items: flex-end;
+  }
+}
+
+@media (max-width: 1100px) {
+  .architect {
+    width: 290px;
+  }
+
+  .view-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 260px;
+  }
+}
+
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-left-width: 200px;
+    --sidebar-right-width: 230px;
+  }
+
+  /* Below the (wrapped) view controls, never over them. */
+  .architect {
+    top: 112px;
+    max-height: calc(100% - 124px);
+  }
+}
+
+/* A step this task passed over (typed, not spoken; no question needed) - visibly not "done". */
+.copilot__step--skipped {
+  color: var(--color-text-muted);
+  opacity: 0.6;
+}
+
+.copilot__step--skipped .copilot__dot {
+  border-style: dashed;
+  background: transparent;
+}
+
+/* --- Project tree search (ui/leftSidebar.ts, ui/projectSearch.ts) --- */
+.hierarchy-search {
+  margin: 0 0 var(--space-2);
+}
+
+.hierarchy-search__input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.hierarchy-search__input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.hierarchy-search__where {
+  color: var(--color-text-muted);
+}
+
+.hierarchy-objects__item--selected .hierarchy-search__where {
+  color: inherit;
+  opacity: 0.8;
 }

@@ -22,6 +22,8 @@ export interface PlacementTool {
    * room/asset is normally placed once per click of its own tool.
    */
   repeat?: boolean;
+  /** A measuring tool (scene/measureTool.ts): its clicks record points and build nothing, so there's no object size to show. */
+  measures?: boolean;
   /** Executes the real construction command at the clicked ground point - the same command path a ribbon click used to run instantly. */
   place(point: GroundPoint): void;
 }
@@ -205,6 +207,12 @@ export class PlacementController {
     // A genuine placement click - keep it from OrbitControls and click-to-select, exactly like a manipulation press.
     event.stopPropagation();
     event.preventDefault();
+    // OrbitControls did see this press's pointerdown (a drag while armed
+    // still orbits), so it must also see the press end: without its
+    // pointerup it stays mid-rotate, and every plain mouse move after the
+    // click turns the camera. A non-bubbling pointercancel on the canvas
+    // ends its gesture; click-to-select listens for pointerup only.
+    this.options.canvas.dispatchEvent(new PointerEvent("pointercancel", { pointerId: event.pointerId, pointerType: event.pointerType, isPrimary: event.isPrimary }));
     const tool = this.tool;
     tool.place({ x: point.x, z: point.z });
     if (!tool.repeat) {

@@ -29,6 +29,7 @@ interface SpeechRecognitionLike {
   onend: (() => void) | null;
   start(): void;
   stop(): void;
+  abort(): void;
 }
 type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
@@ -47,11 +48,16 @@ export interface VoiceInputOptions {
 
 export interface VoiceInput {
   readonly supported: boolean;
+  /** A recognition session is open (listening, or finishing). */
+  readonly listening: boolean;
   /** Starts listening, or stops if already listening. */
   toggle(): void;
   /** Starts listening (no-op while already listening; queued if a stop is still finishing). */
   start(): void;
+  /** Stops listening; what was already recognised is still delivered (onFinal) - "I've finished speaking". */
   stop(): void;
+  /** Stops listening and throws away whatever was heard - nothing reaches onFinal. For Stop, and for typed text sent mid-recognition. */
+  cancel(): void;
 }
 
 function recognitionConstructor(): SpeechRecognitionConstructor | null {
@@ -70,7 +76,7 @@ const ERROR_MESSAGES: Readonly<Record<string, string>> = {
 export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
   const Recognition = recognitionConstructor();
   if (!Recognition) {
-    return { supported: false, toggle: () => undefined, start: () => undefined, stop: () => undefined };
+    return { supported: false, listening: false, toggle: () => undefined, start: () => undefined, stop: () => undefined, cancel: () => undefined };
   }
 
   let recognition: SpeechRecognitionLike | null = null;
@@ -79,12 +85,24 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
   let stopRequested = false;
   /** start() arrived while a stopped session was still finishing - begin again once it has. */
   let startQueued = false;
+  /** cancel() was asked for: this session's words are dropped, never delivered. */
+  let discard = false;
 
   const stop = (): void => {
     startQueued = false;
     if (recognition) {
       stopRequested = true;
       recognition.stop();
+    }
+  };
+
+  const cancel = (): void => {
+    startQueued = false;
+    if (recognition) {
+      discard = true;
+      stopRequested = true;
+      finalText = "";
+      recognition.abort();
     }
   };
 
@@ -98,6 +116,7 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
 
   const begin = (): void => {
     finalText = "";
+    discard = false;
     let errored = false;
     const instance = new Recognition();
     instance.lang = navigator.language || "en-US";
@@ -105,6 +124,8 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
     instance.continuous = false;
     instance.maxAlternatives = 1;
     instance.onresult = (event) => {
+      // Dropped (Stop), or from a session that has already ended.
+      if (discard || recognition !== instance) return;
       let interim = "";
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
@@ -124,9 +145,10 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
     };
     instance.onend = () => {
       recognition = null;
-      const text = finalText.trim();
+      const text = discard ? "" : finalText.trim();
       const stoppedByUs = stopRequested;
       stopRequested = false;
+      discard = false;
       if (!errored || stoppedByUs) options.onState("idle");
       if (text) options.onFinal(text);
       if (!stoppedByUs) options.onEnd?.();
@@ -147,8 +169,12 @@ export function createVoiceInput(options: VoiceInputOptions): VoiceInput {
 
   return {
     supported: true,
+    get listening() {
+      return recognition !== null;
+    },
     toggle: () => (recognition ? stop() : start()),
     start,
-    stop
+    stop,
+    cancel
   };
 }

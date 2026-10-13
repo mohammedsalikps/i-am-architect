@@ -10,7 +10,9 @@ import type { ArchitectViewState } from "../engine/architect/ArchitectSession";
  *   itself is a real landscape element, drawn by the element layer);
  * - the chosen location, as a pin;
  * - the planned house footprint, as a dashed outline, until construction
- *   starts and the real slab takes its place.
+ *   starts and the real slab takes its place;
+ * - a room or wall waiting for "build it": a translucent volume, ghost
+ *   walls exactly where they would be built, and its dimensions labelled.
  *
  * Driven entirely by ArchitectSession's view state - see main.ts.
  */
@@ -32,25 +34,30 @@ function rectanglePoints(center: { x: number; z: number }, length: number, width
   return [new THREE.Vector3(x0, MARK_Y, z0), new THREE.Vector3(x1, MARK_Y, z0), new THREE.Vector3(x1, MARK_Y, z1), new THREE.Vector3(x0, MARK_Y, z1), new THREE.Vector3(x0, MARK_Y, z0)];
 }
 
-function disposeChildren(group: THREE.Group): void {
+export function disposeChildren(group: THREE.Group): void {
   for (const child of [...group.children]) {
     group.remove(child);
     child.traverse((object) => {
       const mesh = object as THREE.Mesh;
       mesh.geometry?.dispose();
       const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(material)) material.forEach((entry) => entry.dispose());
-      else material?.dispose();
+      const materials = Array.isArray(material) ? material : material ? [material] : [];
+      for (const entry of materials) {
+        (entry as THREE.SpriteMaterial).map?.dispose();
+        entry.dispose();
+      }
     });
   }
 }
 
 /** Overlay marks draw over the ground and slab but stay out of picking and shadows. */
-function overlayObject<T extends THREE.Object3D>(object: T): T {
+export function overlayObject<T extends THREE.Object3D>(object: T): T {
   object.renderOrder = 998;
   object.raycast = () => undefined;
   object.castShadow = false;
   object.receiveShadow = false;
+  // Not geometry: kept out of the ambient-occlusion pass (see SceneManager).
+  object.userData.excludeFromAO = true;
   return object;
 }
 
@@ -108,6 +115,70 @@ function buildPlan(center: { x: number; z: number }, footprint: { length: number
   return group;
 }
 
+const PREVIEW_COLOR = 0x1f5fbf;
+
+/** A camera-facing label, `height` metres tall - a dimension or a name. */
+export function textSprite(text: string, height = 0.42): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const fontSize = 44;
+  const font = `600 ${fontSize}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+  let width = 200;
+  if (context) {
+    context.font = font;
+    width = Math.ceil(context.measureText(text).width) + 36;
+  }
+  canvas.width = width;
+  canvas.height = 72;
+  if (context) {
+    context.font = font;
+    context.fillStyle = "rgba(255, 255, 255, 0.94)";
+    context.strokeStyle = "#1f5fbf";
+    context.lineWidth = 4;
+    context.beginPath();
+    context.roundRect(2, 2, width - 4, 68, 14);
+    context.fill();
+    context.stroke();
+    context.fillStyle = "#17233a";
+    context.textBaseline = "middle";
+    context.fillText(text, 18, 38);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
+  sprite.scale.set((height * canvas.width) / canvas.height, height, 1);
+  return overlayObject(sprite);
+}
+
+function buildPreview(preview: NonNullable<ArchitectViewState["preview"]>): THREE.Object3D {
+  const group = new THREE.Group();
+  const { center, sizeX, sizeZ, height } = preview;
+  const volume = new THREE.BoxGeometry(sizeX, height, sizeZ);
+  const box = new THREE.Mesh(volume, new THREE.MeshBasicMaterial({ color: PREVIEW_COLOR, transparent: true, opacity: 0.07, depthWrite: false }));
+  box.position.set(center.x, height / 2, center.z);
+  const edges = new THREE.LineSegments(new THREE.EdgesGeometry(volume), new THREE.LineBasicMaterial({ color: PREVIEW_COLOR, transparent: true, opacity: 0.75 }));
+  edges.position.copy(box.position);
+  group.add(overlayObject(box), overlayObject(edges));
+  for (const wall of preview.walls) {
+    const ghost = new THREE.Mesh(new THREE.BoxGeometry(wall.length, height, wall.thickness), new THREE.MeshBasicMaterial({ color: PREVIEW_COLOR, transparent: true, opacity: 0.22, depthWrite: false }));
+    ghost.position.set(wall.center.x, height / 2, wall.center.z);
+    ghost.rotation.y = wall.rotation;
+    group.add(overlayObject(ghost));
+  }
+  const fmtM = (value: number) => `${Number(value.toFixed(2))} m`;
+  // The length along the south (+Z) edge, the width along the east (+X) edge, the height at a corner.
+  const along = textSprite(fmtM(sizeX));
+  along.position.set(center.x, 0.25, center.z + sizeZ / 2 + 0.55);
+  const across = textSprite(fmtM(sizeZ));
+  across.position.set(center.x + sizeX / 2 + 0.75, 0.25, center.z);
+  const up = textSprite(`↕ ${fmtM(height)}`);
+  up.position.set(center.x + sizeX / 2 + 0.75, height, center.z + sizeZ / 2);
+  const name = textSprite(preview.label, 0.48);
+  name.position.set(center.x, height + 0.6, center.z);
+  group.add(along, across, up, name);
+  return group;
+}
+
 export function createSiteOverlay(scene: THREE.Scene): SiteOverlay {
   const root = new THREE.Group();
   root.name = "architect-site-overlay";
@@ -125,6 +196,9 @@ export function createSiteOverlay(scene: THREE.Scene): SiteOverlay {
       }
       if (state.plan && state.plan.center && !building) {
         root.add(buildPlan(state.plan.center, state.plan.footprint));
+      }
+      if (state.preview) {
+        root.add(buildPreview(state.preview));
       }
     }
   };

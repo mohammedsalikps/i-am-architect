@@ -1,6 +1,7 @@
 // Explicit .ts extensions on value imports let Node run this file directly
 // (engine/architect/verify.ts does). Harmless for Vite.
 import { parseHouseIntent, readHouseRequest } from "../ai/houseIntent.ts";
+import { isAdjustment } from "./adjust.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
 
@@ -53,6 +54,10 @@ export type Utterance =
   | { kind: "wall-length"; text: string; length?: number }
   /** One new wall, built by conversation (wallBuilder.ts) - "add a 5 m brick wall", "build a wall". */
   | { kind: "build-wall"; text: string }
+  /** A change to one existing element - "move it 2 m east", "make it 3 m high", "use brick instead" (adjust.ts). */
+  | { kind: "adjust"; text: string }
+  /** One new room, built by conversation (roomBuilder.ts) - "create a 4 m by 5 m kitchen, 3 m high". */
+  | { kind: "build-room"; text: string }
   | { kind: "unknown" };
 
 const NUMBER = String.raw`(-?\d+(?:\.\d+)?)`;
@@ -206,6 +211,9 @@ const OPENING_REF = /\b(doors?|windows?|entrance)\b|\b(door|window)-\d+\b/i;
 const RESIZE = /\b(?:make|set|change|resize|extend|shorten|lengthen|stretch|cut)\b/i;
 const WALL_BUILD_VERB = /\b(?:build|add|create|construct|put\s+up|place|raise|erect|draw|make|want|need|give\s+me)\b/i;
 const ONE_NEW_WALL = /\b(?:a|an|one|another|new|1)\s+(?:[\w.,×-]+\s+){0,20}?wall\b(?!s)/i;
+const ONE_NEW_ROOM = /\b(?:a|an|one|another|new|1)\s+(?:[\w.,×-]+\s+){0,14}?(?:room|bed\s*room|kitchen|bath\s*room|living\s+room|lounge|dining\s+room|study|office|hall(?:way)?|utility|laundry|garage|store(?:room)?|pantry|toilet|washroom)\b(?!s)/i;
+// Adding something INTO a room ("add a wall to the kitchen", a door, furniture) - but "with brick walls" is part of the room.
+const NOT_ONE_NEW_ROOM = /\b(?:doors?|windows?|furnish\w*|furniture|sofa|bed|table|chair|wardrobe|rooms)\b/i;
 const NOT_ONE_NEW_WALL = /\b(?:walls|doors?|windows?|selected|house|home|bungalow|cottage|room|kitchen|bedroom|bathroom)\b/i;
 
 function stageIn(text: string): ArchitectStage | undefined {
@@ -244,9 +252,27 @@ export function parseUtterance(raw: string): Utterance {
     return { kind: "build-wall", text };
   }
 
+  // One NEW room: a build verb and "a/an/another/new ... kitchen/room/..." -
+  // not a whole house, not "the rooms" (the rooms stage), and not something
+  // to add INTO a room (a wall, door, window or furniture).
+  if (WALL_BUILD_VERB.test(text) && ONE_NEW_ROOM.test(text) && !NOT_ONE_NEW_ROOM.test(text) && !ONE_NEW_WALL.test(text) && !HOUSE_NOUN.test(text)) {
+    return { kind: "build-room", text };
+  }
+
+  // "Move it beside the living room": moving the room just built (or selected) next to another.
+  if (/\b(?:move|put|place|shift)\s+(?:it|this|that)\s+(?:beside|next\s+to|adjacent\s+to|alongside|(?:east|west|north|south)\s+of|behind|in\s+front\s+of)\b/i.test(text)) {
+    return { kind: "adjust", text };
+  }
+
   // Room-aware edits on the house as it stands (see roomEdits.ts). A
   // "selected" object is left to the AI pipeline's own deterministic
   // edits ("make the selected wall 5 metres long"), exactly as before.
+  // A change to "it"/"this"/"the new wall" - not a selected-object edit
+  // (the AI pipeline's own deterministic edits keep those), not a house
+  // plan change ("make it 12 x 10 m", "3 bedrooms").
+  if (!/\bselected\b/i.test(text) && !DIMENSIONS.test(text) && !/\bbed(?:room)?s?\b/i.test(text) && !HOUSE_NOUN.test(text) && isAdjustment(text)) {
+    return { kind: "adjust", text };
+  }
   if (SHOW_ROOF.test(text)) return { kind: "show-roof" };
   if (SHOW.test(text)) return { kind: "show", text };
   if (REFURNISH.test(text)) return { kind: "refurnish", text };

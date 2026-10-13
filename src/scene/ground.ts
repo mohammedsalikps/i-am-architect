@@ -22,7 +22,7 @@ export function addGround(scene: THREE.Scene): void {
     // background's own darkest tones (environment.ts), so the ground
     // plane still reads as a real surface a building rests on, not part
     // of an undifferentiated black void.
-    color: 0x35363b,
+    color: 0xdfe1dc,
     // A real site surface - concrete, packed ground, paving - still has
     // a faint sheen under direct sun; nowhere near glossy or reflective.
     roughness: 0.9
@@ -36,7 +36,7 @@ export function addGround(scene: THREE.Scene): void {
   // dark-line/light-ground pairing) so the grid stays visible without
   // dominating the model - still a quiet reference plane (moderate
   // opacity), not a competing grid.
-  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x6b6d72, 0x4a4c50);
+  const grid = new THREE.GridHelper(GROUND_SIZE, GRID_DIVISIONS, 0x7f8792, 0xa6adb6);
   const gridMaterial = grid.material as THREE.Material;
   gridMaterial.transparent = true;
   gridMaterial.opacity = 0.5;

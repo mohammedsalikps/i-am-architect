@@ -166,6 +166,14 @@ function measuredByLength(object: AIContextObject): boolean {
   return object.type === "wall" || object.type === "beam" || object.kind === "boundary-wall" || (object.type === "element" && !!getElementKind(object.kind ?? "")?.linear);
 }
 
+/** How a building is read: base and structure first, then openings, roof and rooms; services and furniture last. */
+const TYPE_ORDER: readonly string[] = ["slab", "foundation", "wall", "boundary-wall", "pillar", "beam", "door", "window", "roof", "stair", "room", "flooring", "ceiling"];
+function constructionOrder(object: AIContextObject): number {
+  const key = object.type === "element" ? object.kind ?? "" : object.type;
+  const index = TYPE_ORDER.indexOf(key);
+  return index === -1 ? (object.type === "asset" ? TYPE_ORDER.length + 1 : TYPE_ORDER.length) : index;
+}
+
 export function buildRecordBook(objects: readonly AIContextObject[]): RecordBook {
   // Area of the openings each wall hosts - deducted from that wall's face.
   const openings = new Map<string, number>();
@@ -178,7 +186,7 @@ export function buildRecordBook(objects: readonly AIContextObject[]): RecordBook
   }
 
   const rows: RecordRow[] = [...objects]
-    .sort((a, b) => a.type.localeCompare(b.type) || compareIds(a.id, b.id))
+    .sort((a, b) => constructionOrder(a) - constructionOrder(b) || a.type.localeCompare(b.type) || compareIds(a.id, b.id))
     .map((object) => {
       const others = Object.entries(object.dimensions)
         .filter(([key, value]) => !["length", "height", "thickness"].includes(key) && typeof value === "number" && isFinite(value))
