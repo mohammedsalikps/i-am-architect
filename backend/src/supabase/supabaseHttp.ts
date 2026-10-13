@@ -14,6 +14,23 @@ export interface SupabaseHttpResponse {
   ok: boolean;
   status: number;
   json(): Promise<unknown>;
+  /** Present on a real fetch Response - read only for diagnostics (see describeUpstream). */
+  headers?: { get(name: string): string | null };
+  /** Present on a real fetch Response: true when a redirect was followed to get it. */
+  redirected?: boolean;
+}
+
+/**
+ * What an answer looked like, in categories only - never its URL, headers'
+ * values beyond the media type, or body content. Enough to tell "a
+ * Supabase Auth JSON error" from "an HTML page from something else".
+ */
+export interface UpstreamShape {
+  status: number;
+  /** The media type alone ("application/json", "text/html"), or null when there was none. */
+  mediaType: string | null;
+  body: "json-object" | "json-other" | "not-json";
+  redirected: boolean;
 }
 
 export type SupabaseFetch = (
@@ -54,13 +71,13 @@ export interface SupabaseRequestOptions {
   prefer?: string;
 }
 
-/** Sends one request and returns its status and parsed JSON body (null when there is none). Throws SupabaseUnavailableError when there is no response. */
+/** Sends one request and returns its status, parsed JSON body (null when there is none) and shape. Throws SupabaseUnavailableError when there is no response. */
 export async function supabaseRequest(
   config: SupabaseConfig,
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
   options: SupabaseRequestOptions = {}
-): Promise<{ status: number; payload: unknown }> {
+): Promise<{ status: number; payload: unknown; shape: UpstreamShape }> {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -92,14 +109,53 @@ export async function supabaseRequest(
   }
 
   let payload: unknown = null;
+  let parsed = false;
   if (response.status !== 204) {
     try {
       payload = await response.json();
+      parsed = true;
     } catch {
       payload = null;
     }
   }
-  return { status: response.status, payload };
+  const mediaType = response.headers?.get("content-type")?.split(";")[0].trim().toLowerCase() || null;
+  const shape: UpstreamShape = {
+    status: response.status,
+    mediaType,
+    body: !parsed ? "not-json" : isPlainObject(payload) ? "json-object" : "json-other",
+    redirected: response.redirected === true
+  };
+  return { status: response.status, payload, shape };
+}
+
+/**
+ * Whether a configured project URL looks like a Supabase project's API
+ * base: a *.supabase.co (or .in) host - or localhost, for a local
+ * Supabase - and no path (this code appends /auth/v1/..., /rest/v1/...
+ * itself). Custom domains are legitimate, so this only informs, never
+ * refuses. Categories only - never the URL.
+ */
+export function describeProjectUrl(url: string): { supabaseHost: boolean; hasPath: boolean } {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return {
+      supabaseHost: /\.supabase\.(co|in)$/.test(host) || host === "localhost" || host === "127.0.0.1",
+      hasPath: parsed.pathname.replace(/\/+$/, "") !== "" || parsed.search !== "" || parsed.hash !== ""
+    };
+  } catch {
+    return { supabaseHost: false, hasPath: false };
+  }
+}
+
+/** One log line's worth of what an unusable answer was - e.g. "HTTP 200, text/html, body not JSON, not redirected; SUPABASE_URL host is not a project host (*.supabase.co or localhost), no path". */
+export function describeUpstream(config: Pick<SupabaseConfig, "url">, shape: UpstreamShape): string {
+  const url = describeProjectUrl(config.url);
+  const body = shape.body === "json-object" ? "JSON object" : shape.body === "json-other" ? "JSON, not an object" : "body not JSON";
+  return (
+    `HTTP ${shape.status}, ${shape.mediaType ?? "no content-type"}, ${body}, ${shape.redirected ? "after a redirect" : "not redirected"}; ` +
+    `SUPABASE_URL host ${url.supabaseHost ? "is" : "is not"} a project host (*.supabase.co or localhost), ${url.hasPath ? "HAS a path" : "no path"}`
+  );
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

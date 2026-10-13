@@ -42,6 +42,15 @@ import type {
   AddWindowCommand
 } from "./engine/commands/types";
 import type { AIPipelineResult } from "./engine/ai/types";
+import { buildAIProjectSnapshot } from "./engine/ai/types";
+import { buildAIProjectContext } from "./engine/ai/aiProjectContext";
+import { parseHouseIntent } from "./engine/ai/houseIntent";
+import { tryDeterministicIntent } from "./engine/ai/deterministicIntent";
+import type { HouseFootprint } from "./engine/ai/housePlan";
+import { ArchitectSession } from "./engine/architect/ArchitectSession";
+import type { PlanPoint } from "./engine/architect/parseUtterance";
+import { createArchitectPanel } from "./ui/architectPanel";
+import { createSiteOverlay } from "./scene/siteOverlay";
 
 const appRoot = document.getElementById("app");
 
@@ -161,6 +170,86 @@ async function submitAiInstruction(instruction: string): Promise<AIPipelineResul
   }
   return aiService.submit(instruction);
 }
+
+/** Whether the AI pipeline can answer `instruction` without the provider (a whole-house request, or a deterministic edit on the selection) - see AICommandPipeline.run(). */
+function resolvesLocally(instruction: string): boolean {
+  const context = buildAIProjectContext(buildAIProjectSnapshot(project));
+  return parseHouseIntent(instruction).kind !== "none" || tryDeterministicIntent(instruction, context).kind !== "none";
+}
+
+/**
+ * Where the EAVARA Architect sends a turn it doesn't recognize itself: the
+ * same AIService the AI Prompt tab uses. Sign-in is asked for only when
+ * the request actually needs the AI provider - a selection edit ("make the
+ * selected wall 5 metres long") runs locally, signed in or not.
+ */
+async function submitArchitectFallback(instruction: string): Promise<AIPipelineResult> {
+  if (!auth.isSignedIn() && !resolvesLocally(instruction)) {
+    await authDialog.open("Sign in to use the AI assistant for this request.");
+  }
+  return aiService.submit(instruction);
+}
+
+/**
+ * The conversational architect (engine/architect/): site, location,
+ * clarifying questions and a staged build - every change through the same
+ * shared commandExecutor and history as everything else, so each build
+ * stage is one ordinary undo step.
+ */
+const architect = new ArchitectSession({
+  commandExecutor,
+  history,
+  snapshot: () => buildAIProjectSnapshot(project),
+  undo: () => history.undo(),
+  fallback: submitArchitectFallback
+});
+
+/**
+ * A one-click ground pick for the architect's "where should the house go?"
+ * - the same PlacementController every ribbon tool uses, with a ghost the
+ * size of the planned footprint. Esc, the status bar's Cancel, or arming
+ * another tool cancels it (`done(null)`).
+ */
+function pickArchitectLocation(footprint: HouseFootprint | null, done: (point: PlanPoint | null) => void): void {
+  const controller = sceneManager.current?.placementController;
+  if (!controller) {
+    done(null);
+    return;
+  }
+  let settled = false;
+  let armed = false;
+  let unsubscribe: (() => void) | null = null;
+  const settle = (point: PlanPoint | null): void => {
+    if (settled) return;
+    settled = true;
+    unsubscribe?.();
+    done(point);
+  };
+  controller.arm({
+    id: "architect:location",
+    label: "House location",
+    ghostSize: footprint ? { x: footprint.length, y: 0.05, z: footprint.width } : { x: 0.8, y: 0.05, z: 0.8 },
+    place: (point) => settle(point)
+  });
+  unsubscribe = controller.subscribe((tool) => {
+    if (tool?.id === "architect:location") {
+      armed = true;
+    } else if (armed) {
+      settle(null);
+    }
+  });
+}
+
+const architectPanel = createArchitectPanel({
+  session: architect,
+  onFocus: (objectIds) => sceneManager.current?.focusOn(objectIds),
+  onPickLocation: pickArchitectLocation,
+  // The same VisibilityStore as the hierarchy's eye buttons - a view
+  // setting, never part of the model or its undo history.
+  onSetHidden: (objectIds, hidden) => {
+    for (const id of objectIds) visibilityStore.setHidden(id, hidden);
+  }
+});
 
 // Project storage goes through the backend's /api/projects routes - the
 // browser holds no storage credential of any kind (see
@@ -662,7 +751,8 @@ const shell = createAppShell({
   commandExecutor,
   snapSettings,
   onAddAsset: addAsset,
-  onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 }
+  onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 },
+  architect: architectPanel
 });
 
 appRoot.append(shell.root);
@@ -741,6 +831,27 @@ createElementPlacementHud({
   placementController: sceneManager.current.placementController,
   onHudChange: placementHud.update
 });
+
+// The architect's planning marks (site boundary, location pin, planned
+// footprint) follow its state; the state itself is re-read whenever the
+// model changes - an undo, a redo, or a manual edit can un-build a stage,
+// and the progress strip and marks should say so. Coalesced to one
+// refresh per frame: a build stage changes dozens of objects at once.
+const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene);
+architect.subscribe((state) => siteOverlay.update(state));
+let architectRefreshQueued = false;
+const refreshArchitect = (): void => {
+  if (architectRefreshQueued) return;
+  architectRefreshQueued = true;
+  requestAnimationFrame(() => {
+    architectRefreshQueued = false;
+    architect.refresh();
+  });
+};
+history.subscribe(refreshArchitect);
+for (const store of [wallStore, pillarStore, beamStore, slabStore, doorStore, windowStore, elementStore, assetStore]) {
+  store.subscribe(refreshArchitect);
+}
 
 // Restore a stored session, if any, and confirm it with the backend.
 void auth.start();

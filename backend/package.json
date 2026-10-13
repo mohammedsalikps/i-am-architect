@@ -10,7 +10,8 @@
     "mock": "node mockBackend.ts",
     "verify": "node verify.ts && node auth.verify.ts && node --disable-warning=ExperimentalWarning --experimental-transform-types persistence.verify.ts",
     "test:integration": "node --env-file=.env.integration --disable-warning=ExperimentalWarning --experimental-transform-types integration/supabase.integration.ts",
-    "test:deployed": "node --env-file=.env.integration --disable-warning=ExperimentalWarning --experimental-transform-types integration/deployed.smoke.ts"
+    "test:deployed": "node --env-file=.env.integration --disable-warning=ExperimentalWarning --experimental-transform-types integration/deployed.smoke.ts",
+    "check:supabase": "node --env-file=.env checkSupabaseAuth.ts"
   },
   "engines": {
     "node": ">=22.18"

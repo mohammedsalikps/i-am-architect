@@ -31,7 +31,9 @@ import { SupabaseProjectRepository, SupabaseProjectStore } from "./src/projects/
 import { ProjectStorageUnavailableError } from "./src/projects/ProjectStore.ts";
 import type { ProjectStore } from "./src/projects/ProjectStore.ts";
 import type { SupabaseFetch, SupabaseHttpResponse } from "./src/supabase/supabaseHttp.ts";
-import { isPrivilegedSupabaseKey, parseFrontendOrigins, readServerConfig } from "./src/config.ts";
+import { isPrivilegedSupabaseKey, parseFrontendOrigins, readServerConfig, supabaseUrlWarnings } from "./src/config.ts";
+import { DEFAULT_ANTHROPIC_MODEL } from "../src/engine/ai/providers/anthropicSettings.ts";
+import { DIAGNOSTIC_ACCESS_TOKEN, DIAGNOSTIC_REFRESH_TOKEN, checkAuthProvider, hintFor } from "./src/supabase/authProviderCheck.ts";
 import { InMemoryProjectStore } from "../src/engine/project/InMemoryProjectRepository.ts";
 import { HttpProjectRepository } from "../src/engine/project/HttpProjectRepository.ts";
 import type { ProjectFetch } from "../src/engine/project/HttpProjectRepository.ts";
@@ -826,6 +828,286 @@ async function run(): Promise<void> {
     );
   });
 
+  // --- Diagnostics for the staging 502 ("The sign-in service sent a malformed user/session") ---
+
+  /** A web page answering with HTTP 200 - what a SUPABASE_URL that isn't a Supabase Auth API can answer to anything. */
+  const webPage = (): SupabaseHttpResponse => ({
+    ok: true,
+    status: 200,
+    redirected: false,
+    headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "text/html; charset=utf-8" : null) },
+    json: async () => {
+      throw new SyntaxError("Unexpected token '<'");
+    }
+  });
+  const jsonAnswer = (status: number, body: unknown): SupabaseHttpResponse => ({
+    ...respond(status, body),
+    headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "application/json" : null) }
+  });
+  const captureErrors = async (fn: () => Promise<void>): Promise<string[]> => {
+    const logged: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+    try {
+      await fn();
+    } finally {
+      console.error = originalError;
+    }
+    return logged;
+  };
+
+  await check("a 200 that isn't a user or session is still a 502 - and the error now records what answered, in categories only", async () => {
+    const service = new SupabaseAuthService({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => webPage()).fetch });
+    let caught: unknown;
+    await service.getUser("jwt-secret-token").catch((error: unknown) => (caught = error));
+    assertTrue(caught instanceof AuthError && caught.status === 502 && caught.message === "The sign-in service sent a malformed user.", "same 502 and message as before");
+    const diagnostic = (caught as AuthError).diagnostic ?? "";
+    for (const fragment of ["HTTP 200", "text/html", "body not JSON", "not redirected", "host is a project host (*.supabase.co or localhost)", "no path"]) {
+      assertTrue(diagnostic.includes(fragment), `diagnostic mentions "${fragment}": ${diagnostic}`);
+    }
+    for (const secret of [SUPABASE_URL, "example-project", ANON_KEY, "jwt-secret-token"]) {
+      assertTrue(!diagnostic.includes(secret), "no URL, project ref, key or token in the diagnostic");
+    }
+
+    const dashboard = new SupabaseAuthService({ url: "https://supabase.com/dashboard/project/example-project", anonKey: ANON_KEY, fetch: recordingSupabase(() => webPage()).fetch });
+    caught = undefined;
+    await dashboard.refresh("refresh-secret").catch((error: unknown) => (caught = error));
+    assertTrue(caught instanceof AuthError && caught.message === "The sign-in service sent a malformed session.", "refresh: same 502 as before");
+    assertTrue((caught as AuthError).diagnostic?.includes("is not a project host (*.supabase.co or localhost), HAS a path"), "a dashboard-style URL is called out");
+
+    const fine = new SupabaseAuthService({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => jsonAnswer(403, { error_code: "bad_jwt", msg: "invalid JWT" })).fetch });
+    caught = undefined;
+    await fine.getUser("jwt-x").catch((error: unknown) => (caught = error));
+    assertTrue(caught instanceof AuthError && caught.status === 401 && caught.diagnostic === undefined, "an ordinary refusal carries no diagnostic");
+  });
+
+  await check("the server answers the browser exactly as before, and logs what the sign-in service answered - never the token, URL or key", async () => {
+    const authService = new SupabaseAuthService({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => webPage()).fetch });
+    let aiBody: unknown;
+    let refreshBody: unknown;
+    const logged = await captureErrors(async () => {
+      await withServer({ ...memoryOptions(), authService }, async (baseUrl) => {
+        const ai = await fetch(`${baseUrl}/api/ai/interpret`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer jwt-secret-token" },
+          body: JSON.stringify({ instruction: "Add a wall", projectContext: SNAPSHOT })
+        });
+        assertEqual(ai.status, 502, "AI request: 502");
+        aiBody = await ai.json();
+        const refresh = await fetch(`${baseUrl}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken: "refresh-secret-token" })
+        });
+        assertEqual(refresh.status, 502, "refresh: 502");
+        refreshBody = await refresh.json();
+      });
+    });
+    assertDeepEqual(aiBody, { error: "The sign-in service sent a malformed user." }, "the browser gets only the message - no diagnostic");
+    assertDeepEqual(refreshBody, { error: "The sign-in service sent a malformed session." }, "likewise for refresh");
+    assertTrue(logged.some((line) => line.includes("Checking a session failed") && line.includes("Sign-in service answered: HTTP 200, text/html, body not JSON")), "session check logged");
+    assertTrue(logged.some((line) => line.includes("Auth request failed") && line.includes("malformed session") && line.includes("text/html")), "refresh logged");
+    for (const secret of ["jwt-secret-token", "refresh-secret-token", SUPABASE_URL, ANON_KEY]) {
+      assertTrue(!logged.some((line) => line.includes(secret)), "no token, URL or key in the log");
+    }
+  });
+
+  await check("ordinary refusals (an expired session, a wrong password) log no diagnostic", async () => {
+    const authService = new SupabaseAuthService({
+      url: SUPABASE_URL,
+      anonKey: ANON_KEY,
+      fetch: recordingSupabase((request) =>
+        request.url.endsWith("/user") ? jsonAnswer(403, { error_code: "bad_jwt", msg: "invalid JWT" }) : jsonAnswer(400, { error_code: "invalid_credentials", msg: "Invalid login credentials" })
+      ).fetch
+    });
+    const logged = await captureErrors(async () => {
+      await withServer({ ...memoryOptions(), authService }, async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/api/projects`, { headers: { Authorization: "Bearer jwt-x" } });
+        assertEqual(res.status, 401, "expired session: 401");
+        const signIn = await fetch(`${baseUrl}/api/auth/signin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: "a@example.com", password: PASSWORD }) });
+        assertEqual(signIn.status, 401, "wrong password: 401");
+      });
+    });
+    assertTrue(!logged.some((line) => line.includes("Sign-in service answered")), "nothing logged for ordinary refusals");
+  });
+
+  await check("SUPABASE_URL warnings name the problem, never the value - and a project URL gets none", () => {
+    assertDeepEqual(supabaseUrlWarnings("https://example-project.supabase.co"), [], "a project URL");
+    assertDeepEqual(supabaseUrlWarnings("https://example-project.supabase.co/"), [], "with a trailing slash");
+    assertDeepEqual(supabaseUrlWarnings("http://localhost:54321"), [], "a local Supabase");
+    assertEqual(supabaseUrlWarnings("https://example-project.supabase.co/rest/v1").length, 1, "a path");
+    assertEqual(supabaseUrlWarnings("https://auth.example.com").length, 1, "a custom domain: informational only");
+    const dashboard = supabaseUrlWarnings("https://supabase.com/dashboard/project/example-project");
+    assertEqual(dashboard.length, 2, "the dashboard URL: both");
+    assertTrue(dashboard.every((warning) => !warning.includes("example-project") && !warning.includes("supabase.com/dashboard")), "never the value");
+    assertTrue(readServerConfig({ OPENAI_API_KEY: "sk-test", SUPABASE_URL: "https://auth.example.com", SUPABASE_ANON_KEY: ANON_KEY }).ok, "warnings never stop the server");
+  });
+
+  // --- Staging regression: "The sign-in service sent a malformed session." ---
+  // Live evidence: staging answered a sign-in for an unknown account AND an
+  // invalid refresh token with that 502 - possible only when SUPABASE_URL
+  // answers 200 to both. Supabase Auth answers both with 400; the Supabase
+  // dashboard answers every request with a 200 web page.
+
+  /** Signs in, then refreshes, through the real server and the browser's HttpAuthClient - with Supabase answering `reply`. */
+  const browserAuthAgainst = async (reply: (request: RecordedRequest) => SupabaseHttpResponse) => {
+    const authService = new SupabaseAuthService({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(reply).fetch });
+    let signIn: unknown;
+    let refresh: unknown;
+    const logged = await captureErrors(async () => {
+      await withServer({ ...memoryOptions(), authService }, async (baseUrl) => {
+        const client = new HttpAuthClient({ baseUrl, fetch: (target, init) => fetch(target, init) });
+        signIn = await client.signIn("alice@example.com", PASSWORD).catch((error: unknown) => error);
+        refresh = await client.refresh("refresh-secret-token").catch((error: unknown) => error);
+      });
+    });
+    return { signIn, refresh, logged };
+  };
+  const outcomeOf = (value: unknown): string => (value instanceof Error ? `${(value as Error & { status?: number }).status} ${value.message}` : "session");
+
+  await check("staging sign-in regression: a Supabase Auth session signs in and refreshes end to end; wrong credentials and an invalid refresh token are 401s, never 502s", async () => {
+    const gotrue = {
+      access_token: "jwt-alice",
+      token_type: "bearer",
+      expires_in: 3600,
+      expires_at: 1_790_000_000,
+      refresh_token: "refresh-alice",
+      user: { id: USER_ID, email: "alice@example.com", role: "authenticated", aud: "authenticated" }
+    };
+    const ok = await browserAuthAgainst(() => jsonAnswer(200, gotrue));
+    assertDeepEqual(
+      ok.signIn,
+      { accessToken: "jwt-alice", refreshToken: "refresh-alice", expiresAt: 1_790_000_000_000, user: { id: USER_ID, email: "alice@example.com" } },
+      "sign-in reaches the browser as a session"
+    );
+    assertEqual(outcomeOf(ok.refresh), "session", "refresh too");
+    assertTrue(!ok.logged.some((line) => line.includes("Sign-in service answered")), "nothing logged");
+
+    const refused = await browserAuthAgainst((request) =>
+      request.url.includes("grant_type=password")
+        ? jsonAnswer(400, { code: 400, error_code: "invalid_credentials", msg: "Invalid login credentials" })
+        : jsonAnswer(400, { code: 400, error_code: "refresh_token_not_found", msg: "Invalid Refresh Token: Refresh Token Not Found" })
+    );
+    assertEqual(outcomeOf(refused.signIn), "401 Wrong email or password.", "wrong credentials: 401");
+    assertEqual(outcomeOf(refused.refresh), `401 ${EXPIRED}`, "an invalid refresh token: 401, sign in again");
+    assertTrue(!refused.logged.some((line) => line.includes("Sign-in service answered")), "ordinary refusals log no diagnostic");
+  });
+
+  await check("staging sign-in regression: a dashboard link, or a project URL with a path, is refused at startup - naming the fix, never the value", () => {
+    const configWith = (url: string) => readServerConfig({ OPENAI_API_KEY: "sk-test", SUPABASE_URL: url, SUPABASE_ANON_KEY: ANON_KEY });
+    for (const url of [
+      "https://supabase.com/dashboard/project/example-ref-abcdefgh",
+      "https://supabase.com/dashboard/project/example-ref-abcdefgh/settings/api",
+      "https://app.supabase.com/project/example-ref-abcdefgh",
+      "https://supabase.com"
+    ]) {
+      const config = configWith(url);
+      assertTrue(!config.ok && config.error.includes("dashboard") && config.error.includes("Project Settings → API → Project URL"), `refused: ${url}`);
+      assertTrue(!config.ok && !config.error.includes("example-ref"), "the error never repeats the value");
+    }
+    for (const url of [`${SUPABASE_URL}/rest/v1`, `${SUPABASE_URL}/auth/v1/`, `${SUPABASE_URL}/?project=1`]) {
+      const config = configWith(url);
+      assertTrue(!config.ok && config.error.includes("bare Project URL") && !config.error.includes("example-project"), `refused: ${url}`);
+    }
+    for (const url of [SUPABASE_URL, `${SUPABASE_URL}/`, "http://localhost:54321", "https://auth.example.com"]) {
+      assertTrue(configWith(url).ok, `accepted: ${url}`);
+    }
+  });
+
+  await check("staging sign-in regression: an unusable 200 is a 502 whose log gives the status, media type, body kind, whether a user id exists and a failure category - never a token, email, key, URL or id", async () => {
+    const cases: [string, () => SupabaseHttpResponse, string, string][] = [
+      ["an HTML page (the dashboard)", webPage, "category: not-supabase-auth", "user id no"],
+      ["unexpected JSON", () => jsonAnswer(200, { message: "ok" }), "category: unexpected-json", "user id no"],
+      ["JSON that isn't an object", () => jsonAnswer(200, ["ok"]), "category: unexpected-json", "user id no"],
+      ["no refresh token", () => jsonAnswer(200, { access_token: "jwt-alice", user: { id: USER_ID, email: "alice@example.com" } }), "category: missing-session-fields", "refresh_token no, user yes, user id yes"],
+      ["no user", () => jsonAnswer(200, { access_token: "jwt-alice", refresh_token: "refresh-alice" }), "category: missing-user-fields", "user no, user id no"],
+      ["a user without an id", () => jsonAnswer(200, { access_token: "jwt-alice", refresh_token: "refresh-alice", user: { email: "alice@example.com" } }), "category: missing-user-fields", "user id no, user email yes"]
+    ];
+    for (const [name, reply, category, fields] of cases) {
+      const outcome = await browserAuthAgainst(() => reply());
+      assertEqual(outcomeOf(outcome.signIn), "502 The sign-in service sent a malformed session.", `${name}: the browser gets the same 502 as before`);
+      const line = outcome.logged.find((entry) => entry.includes("Sign-in service answered")) ?? "";
+      assertTrue(line.includes("HTTP 200") && line.includes(category) && line.includes(fields), `${name}: logs "${category}" and "${fields}": ${line}`);
+      for (const secret of ["jwt-alice", "refresh-alice", "refresh-secret-token", "alice@example.com", PASSWORD, ANON_KEY, SUPABASE_URL, "example-project", USER_ID]) {
+        assertTrue(!outcome.logged.some((entry) => entry.includes(secret)), `${name}: no token, email, password, key, URL or user id in the log`);
+      }
+    }
+
+    const service = new SupabaseAuthService({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => jsonAnswer(200, { email: "alice@example.com" })).fetch });
+    const caught = await service.getUser("jwt-alice").catch((error: unknown) => error);
+    assertTrue(
+      caught instanceof AuthError && caught.status === 502 && (caught.diagnostic ?? "").endsWith("user id no, user email yes; category: missing-user-fields"),
+      "a malformed user (checking a session) is categorised the same way"
+    );
+  });
+
+  await check("the auth provider check: Supabase Auth's answers are 'ok'; a web page, a refused key or no answer are not - and invalid tokens are only ever placeholders", async () => {
+    const healthy = recordingSupabase((request) =>
+      request.url.endsWith("/auth/v1/health")
+        ? jsonAnswer(200, { version: "v2.170.0", name: "GoTrue" })
+        : request.url.endsWith("/auth/v1/user")
+          ? jsonAnswer(403, { error_code: "bad_jwt", msg: "invalid JWT" })
+          : jsonAnswer(400, { error_code: "refresh_token_not_found", msg: "Invalid Refresh Token" })
+    );
+    const ok = await checkAuthProvider({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: healthy.fetch }, { tokenProbes: true });
+    assertEqual(ok.verdict, "ok", "Supabase Auth");
+    assertDeepEqual(ok.probes.map((probe) => `${probe.name}:${probe.outcome}`), ["health:expected", "invalid access token:expected", "invalid refresh token:expected"], "probes");
+    assertDeepEqual(healthy.requests.map((request) => request.headers.Authorization ?? null), [null, `Bearer ${DIAGNOSTIC_ACCESS_TOKEN}`, null], "only the placeholder access token");
+    assertDeepEqual(healthy.requests[2].body, { refresh_token: DIAGNOSTIC_REFRESH_TOKEN }, "only the placeholder refresh token");
+    assertTrue(healthy.requests.every((request) => request.headers.apikey === ANON_KEY), "with the anon key, as the backend sends it");
+
+    const page = await checkAuthProvider({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => webPage()).fetch }, { tokenProbes: true });
+    assertEqual(page.verdict, "unexpected-answer", "a web page");
+    assertTrue(page.probes.every((probe) => probe.outcome === "unexpected"), "every probe");
+    assertTrue(hintFor(page.probes[0])?.includes("web page") ?? false, "the hint says a web page answered");
+
+    const refusedKey = await checkAuthProvider({ url: SUPABASE_URL, anonKey: ANON_KEY, fetch: recordingSupabase(() => jsonAnswer(401, { message: "Invalid API key" })).fetch }, { tokenProbes: false });
+    assertEqual(refusedKey.verdict, "unexpected-answer", "a refused key");
+    assertTrue(hintFor(refusedKey.probes[0])?.includes("SUPABASE_ANON_KEY") ?? false, "the hint points at the key");
+
+    const nothing = await checkAuthProvider(
+      {
+        url: SUPABASE_URL,
+        anonKey: ANON_KEY,
+        fetch: async () => {
+          throw new Error("getaddrinfo ENOTFOUND");
+        }
+      },
+      { tokenProbes: false }
+    );
+    assertEqual(nothing.verdict, "unreachable", "no answer");
+    for (const report of [ok, page, refusedKey, nothing]) {
+      for (const probe of report.probes) assertTrue(!probe.detail.includes(SUPABASE_URL) && !probe.detail.includes(ANON_KEY), "no URL or key in any detail");
+    }
+  });
+
+  await check("GET /health/auth: one word in the response (200 or 503), what each probe saw only in the server log", async () => {
+    const reports = {
+      ok: { verdict: "ok" as const, probes: [{ name: "health" as const, outcome: "expected" as const, detail: "HTTP 200, application/json", status: 200 }] },
+      bad: { verdict: "unexpected-answer" as const, probes: [{ name: "health" as const, outcome: "unexpected" as const, detail: "HTTP 200, text/html, body not JSON", status: 200 }] }
+    };
+    let answers: [number, unknown][] = [];
+    const logged = await captureErrors(async () => {
+      for (const report of [reports.ok, reports.bad]) {
+        await withServer({ ...memoryOptions(), authProviderCheck: async () => report }, async (baseUrl) => {
+          const res = await fetch(`${baseUrl}/health/auth`);
+          answers.push([res.status, await res.json()]);
+        });
+      }
+      await withServer(memoryOptions(), async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/health/auth`);
+        answers.push([res.status, await res.json()]);
+      });
+    });
+    assertDeepEqual(answers[0], [200, { status: "ok", authProvider: "ok" }], "a working sign-in service");
+    assertDeepEqual(answers[1], [503, { status: "unavailable", authProvider: "unexpected-answer" }], "a broken one - no details in the response");
+    assertDeepEqual(answers[2], [200, { status: "ok", authProvider: "local" }], "in-memory sign-in");
+    assertTrue(logged.some((line) => line.includes("Auth provider check, health: unexpected - HTTP 200, text/html")), "the details are logged");
+    answers = [];
+  });
+
   await check("SupabaseProjectRepository sends the anon key AND the user's own token to PostgREST, maps rows, and treats an empty result as not found", async () => {
     let reply: () => SupabaseHttpResponse = () => respond(200, []);
     const supabase = recordingSupabase(() => reply());
@@ -1232,9 +1514,50 @@ async function run(): Promise<void> {
     assertTrue(blankProvider.ok, "a blank AI_PROVIDER counts as unset, defaulting to openai");
   });
 
+  await check("config: AI_PROVIDER=anthropic needs only ANTHROPIC_API_KEY; ANTHROPIC_MODEL / ANTHROPIC_EFFORT are optional and validated; no error repeats a key", () => {
+    const anthropic = "sk-ant-api03-test-not-a-real-key";
+    const others = { OPENAI_API_KEY: "sk-test-not-a-real-key", GEMINI_API_KEY: "gm-test-not-a-real-key" };
+    const memoryStorage = { LOCAL_AUTH: "memory" };
+
+    const plain = readServerConfig({ AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: anthropic, ...memoryStorage });
+    assertTrue(plain.ok, "AI_PROVIDER=anthropic with only ANTHROPIC_API_KEY set");
+    assertDeepEqual(plain.config.ai, { provider: "anthropic", apiKey: anthropic }, "model and effort left to the provider's defaults");
+
+    const tuned = readServerConfig({ AI_PROVIDER: "Anthropic", ANTHROPIC_API_KEY: anthropic, ANTHROPIC_MODEL: " claude-sonnet-5-5 ", ANTHROPIC_EFFORT: "LOW", ...others, ...memoryStorage });
+    assertTrue(tuned.ok, "case-insensitive provider, trimmed model, case-insensitive effort; other providers' keys ignored");
+    assertDeepEqual(tuned.config.ai, { provider: "anthropic", apiKey: anthropic, model: "claude-sonnet-5-5", effort: "low" }, "the anthropic provider config");
+
+    const refusals: [string, Record<string, string>, string][] = [
+      ["no ANTHROPIC_API_KEY (the other providers' keys don't help)", { AI_PROVIDER: "anthropic", ...others }, "ANTHROPIC_API_KEY"],
+      ["an Admin API key", { AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-ant-admin01-test-not-a-real-key" }, "Admin API key"],
+      ["a model id that isn't a Claude model id", { AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: anthropic, ANTHROPIC_MODEL: "gpt-4o" }, "ANTHROPIC_MODEL"],
+      ["an unknown effort", { AI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: anthropic, ANTHROPIC_EFFORT: "extreme" }, "ANTHROPIC_EFFORT"]
+    ];
+    for (const [name, env, fragment] of refusals) {
+      const result = readServerConfig({ ...env, ...memoryStorage });
+      assertTrue(!result.ok, `${name} is refused`);
+      assertTrue(result.error.includes(fragment), `${name}: the error names ${fragment}, got "${result.error}"`);
+      for (const secret of [anthropic, "sk-ant-admin01-test-not-a-real-key", others.OPENAI_API_KEY, others.GEMINI_API_KEY]) {
+        assertTrue(!result.error.includes(secret), `${name}: the error never repeats a key`);
+      }
+    }
+    const listed = readServerConfig({ AI_PROVIDER: "claude", ANTHROPIC_API_KEY: anthropic, ...memoryStorage });
+    assertTrue(!listed.ok && listed.error.includes('"anthropic"'), "an unknown provider's error lists anthropic among the valid values");
+  });
+
+  await check("config and server never load the Anthropic SDK unless AI_PROVIDER=anthropic - a Gemini or OpenAI deployment needs no npm package", () => {
+    const config = readFileSync(fileURLToPath(new URL("./src/config.ts", import.meta.url)), "utf8");
+    const server = readFileSync(fileURLToPath(new URL("./src/server.ts", import.meta.url)), "utf8");
+    const settings = readFileSync(fileURLToPath(new URL("../src/engine/ai/providers/anthropicSettings.ts", import.meta.url)), "utf8");
+    assertTrue(!/@anthropic-ai\/sdk/.test(settings), "the settings module config.ts reads has no SDK import");
+    assertTrue(!/^import\s+(?!type\b)[^;]*AnthropicProvider\.ts/m.test(config), "config.ts never imports AnthropicProvider.ts as a value");
+    assertTrue(!/^import\s+(?!type\b)[^;]*AnthropicProvider\.ts/m.test(server), "server.ts has no static value import of AnthropicProvider.ts (type-only imports are erased)");
+    assertTrue(/if \(config\.ai\.provider === "anthropic"\) \{\s*const \{ AnthropicProvider \} = await import\("\.\.\/\.\.\/src\/engine\/ai\/providers\/AnthropicProvider\.ts"\);/.test(server), "it is loaded on demand, only for anthropic");
+  });
+
   // --- Hosting configuration (read as text) ---
 
-  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image copies only four paths, holds no .env file and runs in production mode; .dockerignore excludes secrets/artifacts without reaching inside a copied path", () => {
+  await check("hosting config: render.yaml and fly.toml build the root Dockerfile and check /health; render.yaml holds no value and leaves PORT to Render; the image copies only five paths, installs only production dependencies without scripts, holds no .env file and runs in production mode; .dockerignore excludes secrets/artifacts without reaching inside a copied path", () => {
     const read = (name: string) => readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
 
     const render = read("render.yaml");
@@ -1242,15 +1565,21 @@ async function run(): Promise<void> {
     assertTrue(/^\s*dockerfilePath:\s*\.\/Dockerfile\s*$/m.test(render), "Render: the root Dockerfile");
     assertTrue(/^\s*dockerContext:\s*\.\s*$/m.test(render), "Render: the repository root as build context");
     assertTrue(/^\s*healthCheckPath:\s*\/health\s*$/m.test(render), "Render: the /health check");
-    for (const key of ["GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "FRONTEND_ORIGIN"]) {
+    // ANTHROPIC_API_KEY for Claude, and GEMINI_API_KEY kept for rolling back to Gemini.
+    for (const key of ["ANTHROPIC_API_KEY", "GEMINI_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "FRONTEND_ORIGIN"]) {
       assertTrue(new RegExp(`-\\s*key:\\s*${key}\\s*\\n\\s*sync:\\s*false\\s*$`, "m").test(render), `render.yaml declares ${key} with sync: false`);
     }
-    // AI_PROVIDER is the one deliberate exception: a plain, non-secret value
-    // (staging defaults to Gemini - no paid OpenAI key required) - see
-    // backend/src/config.ts. Every OTHER key must stay value-free.
-    assertTrue(/^\s*-\s*key:\s*AI_PROVIDER\s*\n\s*value:\s*gemini\s*$/m.test(render), "render.yaml sets AI_PROVIDER: gemini as a plain value");
-    assertEqual((render.match(/^\s*value:/gm) ?? []).length, 1, "AI_PROVIDER is the only key with a value: line - every secret stays sync: false");
-    assertTrue(!/key:\s*OPENAI_API_KEY\b/.test(render), "render.yaml no longer asks for an OpenAI key - staging is Gemini by default");
+    // AI_PROVIDER and ANTHROPIC_MODEL are the deliberate exceptions: plain,
+    // non-secret values (staging uses Claude Sonnet 5.5 - a Blueprint sync
+    // must not put Gemini back) - see backend/src/config.ts. Every OTHER key
+    // must stay value-free.
+    assertTrue(/^\s*-\s*key:\s*AI_PROVIDER\s*\n\s*value:\s*anthropic\s*$/m.test(render), "render.yaml sets AI_PROVIDER: anthropic as a plain value");
+    assertTrue(/^\s*-\s*key:\s*ANTHROPIC_MODEL\s*\n\s*value:\s*claude-sonnet-5-5\s*$/m.test(render), "render.yaml pins ANTHROPIC_MODEL: claude-sonnet-5-5");
+    assertEqual(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-5-5", "the same model as the code's default");
+    const renderAI = readServerConfig({ AI_PROVIDER: "anthropic", ANTHROPIC_MODEL: "claude-sonnet-5-5", ANTHROPIC_API_KEY: "sk-ant-test", LOCAL_AUTH: "memory" });
+    assertTrue(renderAI.ok && renderAI.config.ai.provider === "anthropic" && renderAI.config.ai.model === "claude-sonnet-5-5", "values the server accepts");
+    assertEqual((render.match(/^\s*value:/gm) ?? []).length, 2, "AI_PROVIDER and ANTHROPIC_MODEL are the only keys with a value: line - every secret stays sync: false");
+    assertTrue(!/key:\s*OPENAI_API_KEY\b/.test(render), "render.yaml doesn't ask for an OpenAI key - staging uses Claude, with Gemini as the rollback");
     assertTrue(!/key:\s*(PORT|LOCAL_AUTH)\b/.test(render), "render.yaml leaves PORT to Render and never enables in-memory accounts");
 
     const fly = read("fly.toml");
@@ -1258,16 +1587,22 @@ async function run(): Promise<void> {
     assertTrue(/internal_port = 8787/.test(fly) && /path = "\/health"/.test(fly), "fly.toml: port and /health check kept");
 
     // The Dockerfile's own COPY list alone decides what enters the IMAGE:
-    // exactly these four paths, never the whole repository, and no ADD.
+    // exactly these five paths, never the whole repository, and no ADD.
     // .dockerignore (checked separately below) only trims what reaches the
     // BUILD CONTEXT - a stricter but non-overlapping protection.
     const dockerfile = read("Dockerfile");
-    const copiedPaths = ["package.json", "backend/package.json", "backend/src", "src/engine"];
+    const copiedPaths = ["package.json", "package-lock.json", "backend/package.json", "backend/src", "src/engine"];
     assertDeepEqual(
       [...dockerfile.matchAll(/^\s*(?:COPY|ADD)\s+(.+?)\s+\S+\s*$/gim)].map((match) => match[1]),
       copiedPaths,
       "the image copies only these paths (no ADD, no whole-repository COPY)"
     );
+    // The one install: the lockfile's production dependencies (the Anthropic
+    // SDK), never dev tooling, never a package's install script - and before
+    // the sources are copied, so it can't pick up anything from them.
+    const runs = [...dockerfile.matchAll(/^\s*RUN\s+(.+?)\s*$/gim)].map((match) => match[1]);
+    assertDeepEqual(runs, ["npm ci --omit=dev --ignore-scripts --no-audit --no-fund"], "exactly one RUN: a production-only, script-free npm ci");
+    assertTrue(dockerfile.indexOf("RUN npm ci") < dockerfile.indexOf("COPY backend/src"), "dependencies are installed before any source is copied");
     assertTrue(/^ENV NODE_ENV=production\s*$/m.test(dockerfile), "the image runs in production mode");
     assertTrue(!/NODE_ENV/.test(render.replace(/^\s*#.*$/gm, "")), "render.yaml doesn't override NODE_ENV");
     assertTrue(/^\s*NODE_ENV = "production"\s*$/m.test(fly), "fly.toml keeps NODE_ENV=production");

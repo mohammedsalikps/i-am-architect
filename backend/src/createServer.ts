@@ -12,6 +12,7 @@ import {
   parseProjectInput
 } from "../../src/engine/project/ProjectRepository.ts";
 import { AuthError, parseCredentials } from "./auth/AuthService.ts";
+import type { AuthProviderReport } from "./supabase/authProviderCheck.ts";
 import type { AuthService, AuthUser } from "./auth/AuthService.ts";
 import { ProjectStorageUnavailableError } from "./projects/ProjectStore.ts";
 import type { ProjectStore } from "./projects/ProjectStore.ts";
@@ -91,6 +92,12 @@ export interface CreateServerOptions {
    * console.log; omitted, nothing is logged (the tests).
    */
   requestLog?: (line: string) => void;
+  /**
+   * Checks the sign-in service behind this server (server.ts passes
+   * supabase/authProviderCheck.ts's checkAuthProvider for Supabase) - what
+   * GET /health/auth reports. Omitted with in-memory or no sign-in.
+   */
+  authProviderCheck?: () => Promise<AuthProviderReport>;
 }
 
 // Generous for this endpoint's small JSON payloads, small enough to
@@ -126,7 +133,7 @@ interface RequestContext {
 
 /** The route, for a log line - ids replaced, and anything unrecognised collapsed, so arbitrary paths never reach the log. */
 function routeFor(path: string): string {
-  if (path === "/health" || path === "/api/ai/interpret" || path === PROJECTS_PATH) {
+  if (path === "/health" || path === "/health/auth" || path === "/api/ai/interpret" || path === PROJECTS_PATH) {
     return path;
   }
   if (path.startsWith(`${PROJECTS_PATH}/`)) {
@@ -145,6 +152,9 @@ function operationFor(method: string, path: string): string {
   }
   if (path === "/health") {
     return "health";
+  }
+  if (path === "/health/auth") {
+    return "health.auth";
   }
   if (path === "/api/ai/interpret") {
     return "ai.interpret";
@@ -197,6 +207,20 @@ function sendUnauthorized(res: ServerResponse, message: string): void {
 /** Logs a failure by name and message only - never a header, token, or request body. */
 function logFailure(context: string, error: unknown): void {
   console.error(`${context}:`, error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+}
+
+/**
+ * When the sign-in service answered something unusable (an AuthError
+ * carrying a diagnostic - see supabaseHttp.ts's describeUpstream()), logs
+ * what that answer looked like: status, media type, body kind, redirect,
+ * and whether SUPABASE_URL looks like a project URL. Categories only - the
+ * diagnostic never holds a URL, key, token or body. Ordinary refusals
+ * (a wrong password, an expired session) carry none and log nothing.
+ */
+function logAuthDiagnostic(context: string, error: AuthError): void {
+  if (error.diagnostic) {
+    console.error(`${context}: ${error.message} Sign-in service answered: ${error.diagnostic}.`);
+  }
 }
 
 /** A short, safe reason for a log line: the error's class name. */
@@ -281,6 +305,7 @@ async function authenticate(
     ctx.auth = "unverified";
     ctx.failure = failureName(error);
     if (error instanceof AuthError) {
+      logAuthDiagnostic("Checking a session failed", error);
       sendJson(res, error.status >= 500 ? 502 : error.status, { error: error.message });
       return null;
     }
@@ -442,6 +467,7 @@ async function handleAuthRequest(
   } catch (error) {
     if (error instanceof AuthError) {
       ctx.failure = error.status === 401 ? "credentials or session refused" : `AuthError ${error.status}`;
+      logAuthDiagnostic("Auth request failed", error);
       if (error.status === 401) {
         sendUnauthorized(res, error.message);
       } else {
@@ -615,6 +641,25 @@ async function handleRequest(
   if (method === "GET" && path === "/health") {
     // A liveness check: no dependency, configuration or version detail.
     sendJson(res, 200, { status: "ok" });
+    return;
+  }
+
+  if (method === "GET" && path === "/health/auth") {
+    // Is the sign-in service behind this server answering like one? Tells
+    // "the backend is up" apart from "sign-in works". The response is one
+    // word; what each probe saw (categories only) goes to the server log.
+    if (!options.authProviderCheck) {
+      sendJson(res, 200, { status: "ok", authProvider: options.authService ? "local" : "none" });
+      return;
+    }
+    const report = await options.authProviderCheck();
+    if (report.verdict !== "ok") {
+      ctx.failure = `auth provider ${report.verdict}`;
+      for (const probe of report.probes) {
+        if (probe.outcome !== "expected") console.error(`Auth provider check, ${probe.name}: ${probe.outcome} - ${probe.detail}.`);
+      }
+    }
+    sendJson(res, report.verdict === "ok" ? 200 : 503, { status: report.verdict === "ok" ? "ok" : "unavailable", authProvider: report.verdict });
     return;
   }
 

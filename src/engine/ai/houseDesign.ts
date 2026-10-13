@@ -110,7 +110,8 @@ function clean(value: number): number {
   return Math.round(value * 1e6) / 1e6;
 }
 
-function resolveFootprint(request: HouseDesignRequest): HouseFootprint {
+/** The footprint a request resolves to - its own, or one sized from its size adjective and bedroom count. Exported so a caller can preview it (e.g. the architect's location ghost) before planning. */
+export function resolveFootprint(request: HouseDesignRequest): HouseFootprint {
   if (request.footprint) {
     return request.footprint;
   }
@@ -168,7 +169,7 @@ function resolveRooms(request: HouseDesignRequest): string[] {
   return [...DEFAULT_ROOMS[request.size ?? "medium"]];
 }
 
-interface RoomCell {
+export interface RoomCell {
   name: string;
   center: { x: number; z: number };
   /** Along X. */
@@ -178,7 +179,7 @@ interface RoomCell {
   side: "front" | "back" | "single";
 }
 
-interface InteriorWallSpec {
+export interface InteriorWallSpec {
   /** "spine" separates the front and back rows; "divider" separates two rooms within one row. */
   kind: "spine" | "divider";
   center: { x: number; z: number };
@@ -186,7 +187,7 @@ interface InteriorWallSpec {
   rotation: number;
 }
 
-interface HouseLayout {
+export interface HouseLayout {
   footprint: HouseFootprint;
   center: { x: number; z: number };
   rooms: RoomCell[];
@@ -261,10 +262,14 @@ function tooSmall(layout: HouseLayout): string | null {
   return null;
 }
 
-/** Validates and lays out a design, without executing anything - pure, so it's independently testable and so AICommandPipeline can report a clear failure before any command runs. */
+/**
+ * Validates and lays out a design, without executing anything - pure, so it's independently testable and so AICommandPipeline can report a clear failure before any command runs.
+ * `center`, when given, is where the house goes (the architect's chosen coordinates); otherwise findHouseCenter() picks a spot clear of `occupied`.
+ */
 export function planHouseDesign(
   request: HouseDesignRequest,
-  occupied: readonly PlanBox[]
+  occupied: readonly PlanBox[],
+  center?: { x: number; z: number }
 ): { ok: true; layout: HouseLayout } | { ok: false; error: string } {
   const footprint = resolveFootprint(request);
   const { min, max } = HOUSE_FOOTPRINT_LIMITS;
@@ -277,8 +282,7 @@ export function planHouseDesign(
     return { ok: false, error: `${rooms.length} rooms is more than this house planner supports (up to ${MAX_ROOMS}) - ask for fewer rooms.` };
   }
 
-  const center = findHouseCenter(footprint, occupied);
-  const layout = computeGrid(footprint, center, rooms);
+  const layout = computeGrid(footprint, center ? { x: clean(center.x), z: clean(center.z) } : findHouseCenter(footprint, occupied), rooms);
   const problem = tooSmall(layout);
   if (problem) {
     return { ok: false, error: problem };
@@ -291,40 +295,55 @@ function fail(outcomes: HouseDesignOutcome[], error: string): HouseDesignResult 
 }
 
 /**
- * Executes a validated layout as one sequence of real commands, via
- * `execute` (in the running app, CommandExecutor.execute()) - walls and
- * pillars first (each one's real id read back from its CommandResult),
- * then the openings that host in those specific walls, then the room
- * elements, then the roof. Stops and reports the first failure; the
- * caller wraps this whole call in one history group, so a failure part-
- * way through is fully rolled back by the caller (see
- * AICommandPipeline.run()) - nothing here ever undoes anything itself.
+ * The house's construction stages, in build order. buildHouseDesign()
+ * runs all five back to back (the one-shot AI path); the architect
+ * conversation (engine/architect/) runs them one at a time, each its own
+ * undo step. Both build exactly the same commands - the functions below
+ * are the only place a stage's commands are written.
  */
-export function buildHouseDesign(layout: HouseLayout, execute: Execute): HouseDesignResult {
-  const outcomes: HouseDesignOutcome[] = [];
-  const run = (command: Command): CommandResult | null => {
-    const result = execute(command);
-    outcomes.push({ command, result });
-    return result.success ? result : null;
+export const HOUSE_STAGES = ["foundation", "structure", "openings", "rooms", "roof"] as const;
+export type HouseStage = (typeof HOUSE_STAGES)[number];
+
+/** The real, store-assigned ids of the walls the structure stage built - what the openings stage hosts its doors and windows in. */
+export interface HouseStructureRefs {
+  frontWallId: string;
+  backWallId: string;
+  leftWallId: string;
+  rightWallId: string;
+  interiorWallIds: string[];
+}
+
+/** Where a layout's parts sit, relative to the house: shared by every stage builder below. */
+function frame(layout: HouseLayout) {
+  const { footprint, center } = layout;
+  return {
+    halfLength: footprint.length / 2,
+    halfWidth: footprint.width / 2,
+    standingY: SLAB_THICKNESS + WALL_HEIGHT / 2,
+    at: (x: number, y: number, z: number) => ({ x: clean(center.x + x), y: clean(y), z: clean(center.z + z) })
   };
+}
 
-  const { footprint, center, rooms, interiorWalls } = layout;
-  const halfLength = footprint.length / 2;
-  const halfWidth = footprint.width / 2;
-  const standingY = SLAB_THICKNESS + WALL_HEIGHT / 2;
-  const at = (x: number, y: number, z: number) => ({ x: clean(center.x + x), y: clean(y), z: clean(center.z + z) });
+/** Stage 1: one slab, matching the footprint exactly. */
+export function foundationStageCommands(layout: HouseLayout): AddSlabCommand[] {
+  const { at } = frame(layout);
+  return [
+    {
+      type: "slab.add",
+      slab: { length: layout.footprint.length, width: layout.footprint.width, thickness: SLAB_THICKNESS, rotation: 0, position: at(0, SLAB_THICKNESS / 2, 0) }
+    }
+  ];
+}
 
-  // 1. Slab, matching the footprint exactly.
-  const slab: AddSlabCommand = {
-    type: "slab.add",
-    slab: { length: footprint.length, width: footprint.width, thickness: SLAB_THICKNESS, rotation: 0, position: at(0, SLAB_THICKNESS / 2, 0) }
-  };
-  if (!run(slab)) {
-    return fail(outcomes, "Could not place the floor slab.");
-  }
-
-  // 2. Four exterior walls - same shape as buildSimpleHousePlan's shell,
-  // but built one at a time so each wall's real id is known for hosting.
+/**
+ * Stage 2, in this exact order: the front, back, left and right exterior
+ * walls (same shell as buildSimpleHousePlan's), the four corner pillars,
+ * then the interior walls (row dividers, then the front/back spine).
+ * readStructureRefs() relies on that order.
+ */
+export function structureStageCommands(layout: HouseLayout): (AddWallCommand | AddPillarCommand)[] {
+  const { footprint, interiorWalls } = layout;
+  const { halfLength, halfWidth, standingY, at } = frame(layout);
   const alongX = footprint.length - 2 * PILLAR_SIZE;
   const alongZ = footprint.width - 2 * PILLAR_SIZE;
   const wallX = halfLength - WALL_THICKNESS / 2;
@@ -334,92 +353,86 @@ export function buildHouseDesign(layout: HouseLayout, execute: Execute): HouseDe
     wall: { length: clean(wallLength), height: WALL_HEIGHT, thickness: WALL_THICKNESS, rotation, position: at(x, standingY, z) }
   });
 
-  const frontWall = run(exteriorWall(0, wallZ, alongX, 0));
-  if (!frontWall) return fail(outcomes, "Could not place the front exterior wall.");
-  const backWall = run(exteriorWall(0, -wallZ, alongX, 0));
-  if (!backWall) return fail(outcomes, "Could not place the back exterior wall.");
-  const leftWall = run(exteriorWall(-wallX, 0, alongZ, QUARTER_TURN));
-  if (!leftWall) return fail(outcomes, "Could not place the left exterior wall.");
-  const rightWall = run(exteriorWall(wallX, 0, alongZ, QUARTER_TURN));
-  if (!rightWall) return fail(outcomes, "Could not place the right exterior wall.");
-
-  // 3. Four corner pillars.
   const pillarX = halfLength - PILLAR_SIZE / 2;
   const pillarZ = halfWidth - PILLAR_SIZE / 2;
-  const pillarSpecs: [number, number][] = [
+  const pillarSigns: [number, number][] = [
     [-1, -1],
     [1, -1],
     [1, 1],
     [-1, 1]
   ];
-  for (const [signX, signZ] of pillarSpecs) {
-    const pillar: AddPillarCommand = {
-      type: "pillar.add",
-      pillar: { width: PILLAR_SIZE, depth: PILLAR_SIZE, height: WALL_HEIGHT, rotation: 0, position: at(signX * pillarX, standingY, signZ * pillarZ) }
-    };
-    if (!run(pillar)) {
-      return fail(outcomes, "Could not place a corner pillar.");
+  const pillars: AddPillarCommand[] = pillarSigns.map(([signX, signZ]) => ({
+    type: "pillar.add",
+    pillar: { width: PILLAR_SIZE, depth: PILLAR_SIZE, height: WALL_HEIGHT, rotation: 0, position: at(signX * pillarX, standingY, signZ * pillarZ) }
+  }));
+
+  const interior: AddWallCommand[] = interiorWalls.map((spec) => ({
+    type: "wall.add",
+    wall: {
+      length: spec.length,
+      height: WALL_HEIGHT,
+      thickness: WALL_THICKNESS,
+      rotation: spec.rotation,
+      position: { x: spec.center.x, y: standingY, z: spec.center.z }
     }
+  }));
+
+  return [
+    exteriorWall(0, wallZ, alongX, 0),
+    exteriorWall(0, -wallZ, alongX, 0),
+    exteriorWall(-wallX, 0, alongZ, QUARTER_TURN),
+    exteriorWall(wallX, 0, alongZ, QUARTER_TURN),
+    ...pillars,
+    ...interior
+  ];
+}
+
+/** Reads the wall ids back out of the structure stage's results, given in structureStageCommands()' order. Null when any wall is missing one. */
+export function readStructureRefs(results: readonly CommandResult[]): HouseStructureRefs | null {
+  const id = (index: number): string | undefined => (results[index]?.success ? results[index].objectId : undefined);
+  const [frontWallId, backWallId, leftWallId, rightWallId] = [id(0), id(1), id(2), id(3)];
+  const interiorWallIds = results.slice(8).map((result) => (result.success ? result.objectId : undefined));
+  if (!frontWallId || !backWallId || !leftWallId || !rightWallId || interiorWallIds.some((wallId) => !wallId)) {
+    return null;
+  }
+  return { frontWallId, backWallId, leftWallId, rightWallId, interiorWallIds: interiorWallIds as string[] };
+}
+
+/**
+ * Stage 3: the entrance door centered on the front wall, one door centered
+ * on each interior wall (connecting the two rooms it separates), then the
+ * exterior windows: every back-row room, plus whichever room sits at each
+ * side (or the single room, which gets all three) - never the front wall,
+ * which already carries the entrance door. A window is skipped, not
+ * forced, when its room is too narrow for it to fit cleanly (task section
+ * 11: avoid overlap rather than guess). Every opening is hosted in a real
+ * wall from `refs`.
+ */
+export function openingsStageCommands(layout: HouseLayout, refs: HouseStructureRefs): { commands: (AddDoorCommand | AddWindowCommand)[]; skippedWindows: number } {
+  const { center, rooms } = layout;
+  const commands: (AddDoorCommand | AddWindowCommand)[] = [{ type: "door.add", door: { ...DOOR, hostId: refs.frontWallId } }];
+  for (const wallId of refs.interiorWallIds) {
+    commands.push({ type: "door.add", door: { ...DOOR, hostId: wallId } });
   }
 
-  // 4. Interior walls (row dividers, then the front/back spine).
-  const interiorWallIds: string[] = [];
-  for (const spec of interiorWalls) {
-    const wall: AddWallCommand = {
-      type: "wall.add",
-      wall: {
-        length: spec.length,
-        height: WALL_HEIGHT,
-        thickness: WALL_THICKNESS,
-        rotation: spec.rotation,
-        position: { x: spec.center.x, y: standingY, z: spec.center.z }
-      }
-    };
-    const result = run(wall);
-    if (!result) {
-      return fail(outcomes, "Could not place an interior wall.");
-    }
-    interiorWallIds.push(result.objectId!);
-  }
-
-  // 5. Entrance door, centered on the front wall (its first, and only, opening).
-  const entrance: AddDoorCommand = { type: "door.add", door: { ...DOOR, hostId: frontWall.objectId } };
-  if (!run(entrance)) {
-    return fail(outcomes, "Could not place the entrance door.");
-  }
-
-  // 6. One interior door per interior wall - centered on it, connecting the two rooms it separates.
-  for (const wallId of interiorWallIds) {
-    const door: AddDoorCommand = { type: "door.add", door: { ...DOOR, hostId: wallId } };
-    if (!run(door)) {
-      return fail(outcomes, "Could not place an interior door.");
-    }
-  }
-
-  // 7. Exterior windows: every back-row room, plus whichever room sits at
-  // each side (or the single room, which gets all three) - never the
-  // front wall, which already carries the entrance door. Skipped, not
-  // forced, when a room is too narrow for the window to fit cleanly
-  // (task section 11: avoid overlap rather than guess).
   let skippedWindows = 0;
   const addWindow = (hostId: string, roomSpan: number, point: { x?: number; z?: number }): void => {
     if (roomSpan < WINDOW.width + WINDOW_CLEARANCE) {
       skippedWindows += 1;
       return;
     }
-    const window: AddWindowCommand = { type: "window.add", window: { ...WINDOW, hostId, position: { x: center.x + (point.x ?? 0), z: center.z + (point.z ?? 0) } } };
-    run(window);
+    commands.push({ type: "window.add", window: { ...WINDOW, hostId, position: { x: center.x + (point.x ?? 0), z: center.z + (point.z ?? 0) } } });
   };
 
   if (rooms.length === 1) {
     const room = rooms[0];
-    addWindow(backWall.objectId!, room.width, { x: 0 });
-    addWindow(leftWall.objectId!, room.length, { z: 0 });
-    addWindow(rightWall.objectId!, room.length, { z: 0 });
+    addWindow(refs.backWallId, room.width, { x: 0 });
+    addWindow(refs.leftWallId, room.length, { z: 0 });
+    addWindow(refs.rightWallId, room.length, { z: 0 });
   } else {
     for (const room of rooms) {
       if (room.side === "back") {
-        addWindow(backWall.objectId!, room.length, { x: room.center.x - center.x });
+        addWindow(refs.backWallId, room.length, { x: room.center.x - center.x });
       }
     }
     // The front and back rows occupy disjoint Z-ranges of the same left/
@@ -431,50 +444,118 @@ export function buildHouseDesign(layout: HouseLayout, execute: Execute): HouseDe
     const leftRooms = [edge("front", (a, b) => a.center.x - b.center.x), edge("back", (a, b) => a.center.x - b.center.x)];
     const rightRooms = [edge("front", (a, b) => b.center.x - a.center.x), edge("back", (a, b) => b.center.x - a.center.x)];
     for (const room of leftRooms) {
-      if (room) addWindow(leftWall.objectId!, room.width, { z: room.center.z - center.z });
+      if (room) addWindow(refs.leftWallId, room.width, { z: room.center.z - center.z });
     }
     for (const room of rightRooms) {
-      if (room) addWindow(rightWall.objectId!, room.width, { z: room.center.z - center.z });
+      if (room) addWindow(refs.rightWallId, room.width, { z: room.center.z - center.z });
     }
   }
+  return { commands, skippedWindows };
+}
 
-  // 8. One "room" element per cell - a real, named, positioned space, not a floating label (task section 10).
-  for (const room of rooms) {
-    const element: AddElementCommand = {
-      type: "element.add",
-      element: {
-        kind: "room",
-        label: room.name,
-        position: { x: room.center.x, z: room.center.z },
-        dimensions: { length: room.length, width: room.width }
-      }
-    };
-    if (!run(element)) {
-      return fail(outcomes, `Could not place the "${room.name}" room.`);
-    }
-  }
-
-  // 9. Roof, sized to the footprint plus a small eave overhang - baseY in
-  // the "roof" catalog entry (elements/catalog.ts) is calibrated to sit
-  // exactly on top of this WALL_HEIGHT + SLAB_THICKNESS shell already,
-  // so omitting position.y lands it correctly without this file needing
-  // to know that number itself.
-  const eave = 0.6;
-  const roof: AddElementCommand = {
+/** Stage 4: one "room" element per cell - a real, named, positioned space, not a floating label (task section 10). */
+export function roomsStageCommands(layout: HouseLayout): AddElementCommand[] {
+  return layout.rooms.map((room) => ({
     type: "element.add",
-    element: { kind: "roof", position: { x: center.x, z: center.z }, dimensions: { length: footprint.length + eave, width: footprint.width + eave } }
+    element: {
+      kind: "room",
+      label: room.name,
+      position: { x: room.center.x, z: room.center.z },
+      dimensions: { length: room.length, width: room.width }
+    }
+  }));
+}
+
+/**
+ * Stage 5: the roof, sized to the footprint plus a small eave overhang -
+ * baseY in the "roof" catalog entry (elements/catalog.ts) is calibrated to
+ * sit exactly on top of this WALL_HEIGHT + SLAB_THICKNESS shell already,
+ * so omitting position.y lands it correctly without this file needing to
+ * know that number itself.
+ */
+export function roofStageCommands(layout: HouseLayout): AddElementCommand[] {
+  const eave = 0.6;
+  return [
+    {
+      type: "element.add",
+      element: { kind: "roof", position: { x: layout.center.x, z: layout.center.z }, dimensions: { length: layout.footprint.length + eave, width: layout.footprint.width + eave } }
+    }
+  ];
+}
+
+const EXTERIOR_WALL_NAMES = ["front", "back", "left", "right"];
+
+/**
+ * Executes a validated layout as one sequence of real commands, via
+ * `execute` (in the running app, CommandExecutor.execute()) - every stage
+ * above, in order: walls and pillars first (each one's real id read back
+ * from its CommandResult), then the openings that host in those specific
+ * walls, then the room elements, then the roof. Stops and reports the
+ * first failure (a window that doesn't fit is the one exception - it is
+ * left out, not fatal); the caller wraps this whole call in one history
+ * group, so a failure part-way through is fully rolled back by the caller
+ * (see AICommandPipeline.run()) - nothing here ever undoes anything itself.
+ */
+export function buildHouseDesign(layout: HouseLayout, execute: Execute): HouseDesignResult {
+  const outcomes: HouseDesignOutcome[] = [];
+  const run = (command: Command): CommandResult | null => {
+    const result = execute(command);
+    outcomes.push({ command, result });
+    return result.success ? result : null;
   };
-  if (!run(roof)) {
-    return fail(outcomes, "Could not place the roof.");
+
+  for (const slab of foundationStageCommands(layout)) {
+    if (!run(slab)) {
+      return fail(outcomes, "Could not place the floor slab.");
+    }
+  }
+
+  const structureResults: CommandResult[] = [];
+  for (const [index, command] of structureStageCommands(layout).entries()) {
+    const result = run(command);
+    if (!result) {
+      return fail(
+        outcomes,
+        index < 4 ? `Could not place the ${EXTERIOR_WALL_NAMES[index]} exterior wall.` : index < 8 ? "Could not place a corner pillar." : "Could not place an interior wall."
+      );
+    }
+    structureResults.push(result);
+  }
+  const refs = readStructureRefs(structureResults);
+  if (!refs) {
+    return fail(outcomes, "Could not read back the walls just built.");
+  }
+
+  const { commands: openings, skippedWindows } = openingsStageCommands(layout, refs);
+  for (const [index, command] of openings.entries()) {
+    if (command.type === "window.add") {
+      run(command);
+      continue;
+    }
+    if (!run(command)) {
+      return fail(outcomes, index === 0 ? "Could not place the entrance door." : "Could not place an interior door.");
+    }
+  }
+
+  for (const [index, command] of roomsStageCommands(layout).entries()) {
+    if (!run(command)) {
+      return fail(outcomes, `Could not place the "${layout.rooms[index].name}" room.`);
+    }
+  }
+
+  for (const roof of roofStageCommands(layout)) {
+    if (!run(roof)) {
+      return fail(outcomes, "Could not place the roof.");
+    }
   }
 
   const summary: HouseDesignSummary = {
-    footprint,
-    center,
-    rooms: rooms.map((room) => room.name),
+    footprint: layout.footprint,
+    center: layout.center,
+    rooms: layout.rooms.map((room) => room.name),
     exteriorWalls: 4,
-    interiorWalls: interiorWalls.length,
-    doors: 1 + interiorWalls.length,
+    interiorWalls: layout.interiorWalls.length,
+    doors: 1 + layout.interiorWalls.length,
     windows: outcomes.filter((outcome) => outcome.command.type === "window.add" && outcome.result.success).length,
     pillars: 4,
     hasRoof: true,

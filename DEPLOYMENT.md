@@ -356,14 +356,17 @@ don't set `PORT` yourself. The image's `PORT=8787` is only the default for
 other hosts and local runs. `NODE_ENV=production` comes from the image.
 
 **Environment variables** - set in Render → the service → **Environment**,
-where Render stores them encrypted. `render.yaml` sets `AI_PROVIDER` to
-the plain (non-secret) value `gemini`; every other variable below is only
-named (`sync: false`, no value), so applying the Blueprint asks for each:
+where Render stores them encrypted. `render.yaml` sets `AI_PROVIDER` and
+`ANTHROPIC_MODEL` to plain (non-secret) values; every other variable below
+is only named (`sync: false`, no value), so applying the Blueprint asks for
+each:
 
 | Variable | Value |
 |---|---|
-| `AI_PROVIDER` | `gemini` (set in `render.yaml` - staging's default, no paid OpenAI key needed) |
-| `GEMINI_API_KEY` | the backend's Gemini key (secret) - free to create at https://aistudio.google.com/apikey |
+| `AI_PROVIDER` | `anthropic` (set in `render.yaml` - staging uses Claude) |
+| `ANTHROPIC_MODEL` | `claude-sonnet-5-5` (set in `render.yaml`; also the code's default) |
+| `ANTHROPIC_API_KEY` | the backend's Anthropic API key (secret) - a regular key from the Claude Console, never an Admin key |
+| `GEMINI_API_KEY` | the backend's Gemini key (secret) - kept for rolling back to Gemini; free to create at https://aistudio.google.com/apikey |
 | `SUPABASE_URL` | `https://<ref>.supabase.co` (the staging project) |
 | `SUPABASE_ANON_KEY` | the staging anon/publishable key - never the service-role/secret key (the server refuses it) |
 | `FRONTEND_ORIGIN` | the exact Vercel production URL, e.g. `https://iarchitect-staging.vercel.app` - explicit origins, never a wildcard |
@@ -372,6 +375,15 @@ To use OpenAI on Render instead, change `AI_PROVIDER` to `openai` and add
 an `OPENAI_API_KEY` variable by hand in Render → Environment -
 `render.yaml` doesn't declare one, but `OpenAIProvider` is unchanged and
 fully supported (see `src/engine/ai/providers/`).
+
+Claude (Anthropic) is staging's provider. Optional: `ANTHROPIC_MODEL`
+(default `claude-sonnet-5-5`) and `ANTHROPIC_EFFORT` (`low`, `medium` -
+the default - `high`, `xhigh`, `max`). The startup log reads `AI provider:
+anthropic (<model>, effort <effort>).`, and every answered AI request logs
+one `{"event":"ai.anthropic", ...}` line with the model that served it and
+Anthropic's request id - never the instruction or the answer. To roll back
+to Gemini, set `AI_PROVIDER` to `gemini` (in Render → Environment for an
+immediate switch, and in `render.yaml` so a Blueprint sync keeps it).
 
 **HTTPS and CORS.** `https://<service>.onrender.com` is HTTPS, and Render
 redirects plain HTTP. The frontend (Vercel) and the backend (Render) are
@@ -411,9 +423,12 @@ request can fail - retry, or use a paid instance for demos.
 
 | Variable | Where | Example | Notes |
 |---|---|---|---|
-| `AI_PROVIDER` | host env var (plain, non-secret) | `gemini` | `gemini` or `openai`; defaults to `openai` if unset. `render.yaml` sets `gemini` for staging. |
+| `AI_PROVIDER` | host env var (plain, non-secret) | `anthropic` | `gemini`, `openai` or `anthropic`; defaults to `openai` if unset. `render.yaml` sets `anthropic` for staging. |
 | `GEMINI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Required when `AI_PROVIDER=gemini`. Free to create at https://aistudio.google.com/apikey. |
 | `OPENAI_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Required when `AI_PROVIDER=openai`. Set a monthly spend limit on its OpenAI project - any signed-in user can use the AI. |
+| `ANTHROPIC_API_KEY` | host secret (Render Environment / Fly secret) | - | Secret. Backend only. Required when `AI_PROVIDER=anthropic`. A regular API key - an Admin key is refused. Set a spend limit on its Claude Console workspace - any signed-in user can use the AI. |
+| `ANTHROPIC_MODEL` | host env var (plain) | `claude-sonnet-5-5` | Optional, `AI_PROVIDER=anthropic` only. Defaults to `claude-sonnet-5-5`; `claude-opus-5-5` is the slower, pricier alternative. |
+| `ANTHROPIC_EFFORT` | host env var (plain) | `medium` | Optional, `AI_PROVIDER=anthropic` only. `low`, `medium` (default), `high`, `xhigh` or `max`. Lower is faster - try `low` if AI requests time out. |
 | `SUPABASE_URL` | host secret | `https://abcdefgh.supabase.co` | |
 | `SUPABASE_ANON_KEY` | host secret | - | The anon/publishable key. A service-role/secret key is refused. |
 | `FRONTEND_ORIGIN` | host secret | `https://iarchitect-staging.vercel.app` | Comma-separated exact origins allowed by CORS. No wildcards, no paths; non-local origins must be https. |
@@ -482,5 +497,6 @@ variables without values.
 | Browser console: CORS error, backend log `origin not allowed` | `FRONTEND_ORIGIN` doesn't list the exact frontend origin (scheme, host, port, no trailing path) - or it's a Preview URL (by design). |
 | Sign-in says "Confirm your email address first" | Email confirmation is on and the account isn't confirmed - confirm it, or create it with Auto Confirm (staging). |
 | Save/Open say "temporarily unavailable" (503) | The backend can't reach Supabase - check the project is running (free projects pause when idle). |
-| AI says "Backend request failed with status 502" | The configured provider (Gemini or OpenAI) refused or failed - check `AI_PROVIDER`, its key, and the account's quota. |
-| Backend exits at start: "Missing GEMINI_API_KEY" / "Missing OPENAI_API_KEY" | `AI_PROVIDER` names a provider whose key isn't set on the host - set that key, or switch `AI_PROVIDER` to the one you did set. |
+| AI says "Backend request failed with status 502" | The configured provider (Gemini, OpenAI or Anthropic) refused or failed - check `AI_PROVIDER`, its key, and the account's quota. |
+| Sign-in, refresh or AI answer 502 "The sign-in service sent a malformed user/session" | Something at `SUPABASE_URL` answered HTTP 200 with a body that isn't a Supabase Auth user/session - Supabase Auth itself refuses bad tokens with 4xx, which the backend reports as 401. The usual cause is a Supabase **dashboard** link (`supabase.com/dashboard/project/…`) in `SUPABASE_URL`: the dashboard answers every request with a 200 web page. The backend now refuses to start with a dashboard link, or a `*.supabase.co` URL with a path. `GET /health/auth` answers 503 `unexpected-answer` in this state; the backend log line "Sign-in service answered: …" says what answered (status, media type, body kind, redirect, whether `SUPABASE_URL` has a path, which session fields - user id included - were present, and a `category:` such as `not-supabase-auth` or `missing-user-fields`) - never values. Locally, `cd backend && npm run check:supabase` runs the same checks against the settings in `backend/.env`. Compare `SUPABASE_URL` with Supabase → Project Settings → API → Project URL. |
+| Backend exits at start: "Missing GEMINI_API_KEY" / "Missing OPENAI_API_KEY" / "Missing ANTHROPIC_API_KEY" | `AI_PROVIDER` names a provider whose key isn't set on the host - set that key, or switch `AI_PROVIDER` to the one you did set. |

@@ -39,11 +39,19 @@ export interface AuthService {
  */
 export class AuthError extends Error {
   readonly status: number;
+  /**
+   * For the server's log only, never a response: what the sign-in service
+   * actually answered when it answered something unusable (see
+   * supabase/supabaseHttp.ts's describeUpstream()). Categories only - no
+   * URL, key, token or body content.
+   */
+  readonly diagnostic: string | undefined;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, diagnostic?: string) {
     super(message);
     this.name = "AuthError";
     this.status = status;
+    this.diagnostic = diagnostic;
   }
 }
 

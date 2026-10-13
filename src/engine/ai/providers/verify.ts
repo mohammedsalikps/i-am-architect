@@ -28,13 +28,16 @@
 // "node:fs"/"node:url" below are typed by src/node-builtins.d.ts, a
 // minimal shared ambient shim - see that file's own header comment for
 // why it exists instead of an @types/node dependency.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { OpenAIProvider } from "./OpenAIProvider.ts";
 import type { OpenAIFetch, OpenAIHttpResponse } from "./OpenAIProvider.ts";
 import { GeminiProvider } from "./GeminiProvider.ts";
 import type { GeminiFetch, GeminiHttpResponse } from "./GeminiProvider.ts";
-import { COMMAND_TYPES } from "./promptSchema.ts";
+import { COMMAND_TYPES, RESPONSE_JSON_SCHEMA, buildContextMessage, buildSystemPrompt } from "./promptSchema.ts";
+import { AnthropicProvider, DEFAULT_ANTHROPIC_MODEL, SUBMIT_TOOL } from "./AnthropicProvider.ts";
+import type { AnthropicEffort, AnthropicFetch, AnthropicMessageSummary, AnthropicProviderOptions } from "./AnthropicProvider.ts";
+import { friendlyAiErrorMessage } from "../AiPromptController.ts";
 import { BackendAIProvider } from "./BackendAIProvider.ts";
 import type { BackendFetch, BackendHttpResponse } from "./BackendAIProvider.ts";
 import { AICommandPipeline } from "../AICommandPipeline.ts";
@@ -281,6 +284,68 @@ function makeSlowBackendFetch(delayMs: number): BackendFetch {
         reject(new DOMException("The operation was aborted.", "AbortError"));
       });
     });
+}
+
+// --- AnthropicProvider-specific helpers ---
+// The provider uses the real Anthropic SDK; only its injected fetch is
+// mocked, so request building, response parsing, retries, timeouts and
+// typed errors are the SDK's own. No test here reaches the real API.
+
+interface RecordedAnthropicRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: unknown;
+}
+
+function makeMockAnthropicFetch(
+  reply: (request: RecordedAnthropicRequest, attempt: number) => Response | Promise<Response>
+): AnthropicFetch & { calls: RecordedAnthropicRequest[] } {
+  const calls: RecordedAnthropicRequest[] = [];
+  const fetchImpl = (async (input: unknown, init?: { method?: string; headers?: unknown; body?: unknown }) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+    const headers: Record<string, string> = {};
+    new Headers(init?.headers as HeadersInit | undefined).forEach((value, key) => {
+      headers[key] = value;
+    });
+    const request: RecordedAnthropicRequest = { url, method: init?.method ?? "GET", headers, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined };
+    calls.push(request);
+    return reply(request, calls.length - 1);
+  }) as unknown as AnthropicFetch & { calls: RecordedAnthropicRequest[] };
+  fetchImpl.calls = calls;
+  return fetchImpl;
+}
+
+/** A Messages API response, as the API sends it. */
+function anthropicMessage(content: unknown[], stopReason = "tool_use", extra: Record<string, unknown> = {}): Response {
+  return new Response(
+    JSON.stringify({
+      id: "msg_test",
+      type: "message",
+      role: "assistant",
+      model: "claude-sonnet-5-5",
+      content,
+      stop_reason: stopReason,
+      stop_sequence: null,
+      stop_details: null,
+      usage: { input_tokens: 10, output_tokens: 20 },
+      ...extra
+    }),
+    { status: 200, headers: { "content-type": "application/json", "request-id": "req_test" } }
+  );
+}
+
+/** A Messages API error, as the API sends it. */
+function anthropicError(status: number, type: string, message: string, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify({ type: "error", error: { type, message } }), {
+    status,
+    headers: { "content-type": "application/json", "request-id": "req_test", ...headers }
+  });
+}
+
+/** Claude's call of the submit tool with `input`. */
+function submitCall(input: unknown): Record<string, unknown> {
+  return { type: "tool_use", id: "toolu_test", name: "submit_construction_commands", input };
 }
 
 async function run(): Promise<void> {
@@ -1612,6 +1677,245 @@ async function run(): Promise<void> {
       assertEqual(executor.calls.length, 0, "executor should never be called");
     }
   );
+
+  console.log("\nAnthropicProvider verification (official SDK, mocked HTTP - no live API call)\n");
+
+  const ANTHROPIC_KEY = "sk-ant-test-fake"; // Short on purpose: e2e/verify.ts flags any "sk-" + 20 chars as a real key.
+
+  await check("AnthropicProvider requires an explicit API key and an injected transport, and validates effort", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [] })]));
+    for (const options of [{ apiKey: "", fetch: fetchImpl }, { apiKey: "   ", fetch: fetchImpl }]) {
+      await assertRejects(async () => new AnthropicProvider(options), "requires an API key", "a blank key");
+    }
+    await assertRejects(async () => new AnthropicProvider({ apiKey: ANTHROPIC_KEY } as unknown as AnthropicProviderOptions), 'injected "fetch"', "no transport");
+    await assertRejects(
+      async () => new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl, effort: "extreme" as unknown as AnthropicEffort }),
+      "effort must be one of",
+      "an unknown effort"
+    );
+  });
+
+  await check("one Messages API request: Claude Sonnet 5.5, the shared prompt and context, the raw instruction, the command schema as one tool, auto tool choice, medium effort - and no beta feature", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [] })]));
+    const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl });
+    const request = { instruction: "Add a 5m wall along the back", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES };
+    await provider.interpret(request);
+
+    assertEqual(fetchImpl.calls.length, 1, "exactly one request");
+    const call = fetchImpl.calls[0];
+    assertTrue(/^https:\/\/api\.anthropic\.com\/v1\/messages(\?beta=true)?$/.test(call.url), `the Messages API endpoint, got ${call.url}`);
+    assertEqual(call.method, "POST", "method");
+    assertEqual(call.headers["x-api-key"], ANTHROPIC_KEY, "the key travels only in the x-api-key header");
+    assertEqual(call.headers["anthropic-beta"], undefined, "no beta header: generally available features only");
+    const body = call.body as Record<string, unknown> & { system: { text: string }[]; messages: { role: string; content: { type: string; text: string }[] }[]; tools: { name: string; input_schema: unknown }[] };
+    assertEqual(body.model, DEFAULT_ANTHROPIC_MODEL, "model");
+    assertEqual(DEFAULT_ANTHROPIC_MODEL, "claude-sonnet-5-5", "the default is Claude Sonnet 5.5");
+    assertEqual(body.max_tokens, 16000, "max_tokens");
+    assertEqual(body.system[0].text, buildSystemPrompt(request), "the shared system prompt, unchanged");
+    assertTrue(body.system[1].text.includes(SUBMIT_TOOL.name), "plus how to deliver it: through the tool");
+    assertEqual(body.messages.length, 1, "one user turn");
+    assertEqual(body.messages[0].role, "user", "role");
+    assertEqual(body.messages[0].content[0].text, buildContextMessage(request), "the construction state first (user data, never in the system prompt)");
+    assertEqual(body.messages[0].content[1].text, request.instruction, "then the raw instruction");
+    assertEqual(body.tools.length, 1, "one tool");
+    assertEqual(body.tools[0].name, "submit_construction_commands", "the submit tool");
+    assertDeepEqual(body.tools[0].input_schema, RESPONSE_JSON_SCHEMA.schema, "whose input schema IS the shared command schema - the contract is unchanged");
+    assertTrue(!("strict" in (body.tools[0] as object)), "non-strict: the schema exceeds what strict tools / structured outputs accept");
+    assertDeepEqual(body.tool_choice, { type: "auto", disable_parallel_tool_use: true }, "auto (Opus 5.5 rejects a forced tool choice; every model accepts auto), at most one call");
+    assertDeepEqual(body.output_config, { effort: "medium" }, "medium effort, set explicitly - and no output_config.format");
+    assertTrue(!("fallbacks" in body), "refusal fallbacks off by default (a beta feature)");
+    assertTrue(!("thinking" in body) && !("temperature" in body), "no thinking or sampling parameters - the model's adaptive thinking, steered by effort");
+  });
+
+  await check("model and effort are configurable, and refusal fallbacks are opt-in", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [] })]));
+    const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl, model: "claude-opus-5-5", effort: "low", fallbacks: true });
+    await provider.interpret({ instruction: "Add a wall", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    const body = fetchImpl.calls[0].body as Record<string, unknown>;
+    assertEqual(body.model, "claude-opus-5-5", "model");
+    assertDeepEqual(body.output_config, { effort: "low" }, "effort");
+    assertEqual(body.fallbacks, "default", "fallbacks, when asked for");
+    assertTrue((fetchImpl.calls[0].headers["anthropic-beta"] ?? "").includes("server-side-fallback-2026-07-01"), "with their beta header");
+  });
+
+  await check("onMessage gets one metadata-only summary per answered request - the serving model and Anthropic's request id, never the instruction or the answer", async () => {
+    const summaries: AnthropicMessageSummary[] = [];
+    const commands = [{ type: "wall.add", wall: { length: 5, position: { x: 0, z: 0 } } }];
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands, notes: "secret-notes-text" })]));
+    const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl, onMessage: (summary) => summaries.push(summary) });
+    await provider.interpret({ instruction: "secret-instruction-text", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertEqual(summaries.length, 1, "one summary");
+    const { ms, ...rest } = summaries[0];
+    assertTrue(typeof ms === "number" && ms >= 0, "a duration");
+    assertDeepEqual(rest, { model: "claude-sonnet-5-5", requestId: "req_test", stopReason: "tool_use", inputTokens: 10, outputTokens: 20, toolCalls: 1 }, "metadata only");
+    const logged = JSON.stringify(summaries);
+    for (const secret of ["secret-instruction-text", "secret-notes-text", "wall.add", ANTHROPIC_KEY]) {
+      assertTrue(!logged.includes(secret), "no instruction, answer, command or key in the summary");
+    }
+
+    const failing = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: makeMockAnthropicFetch(() => anthropicError(401, "authentication_error", "invalid x-api-key")), maxRetries: 0, onMessage: (summary) => summaries.push(summary) });
+    await failing.interpret({ instruction: "Add a wall", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }).catch(() => undefined);
+    assertEqual(summaries.length, 1, "a failed request has no summary - its error says what happened");
+  });
+
+  await check("a valid tool call becomes { commands, notes } - thinking and text blocks are never commands", async () => {
+    const commands = [{ type: "wall.add", wall: { length: 5, position: { x: 0, z: -3 } } }, { type: "door.add", door: { hostId: "$previous" } }];
+    const fetchImpl = makeMockAnthropicFetch(() =>
+      anthropicMessage([{ type: "thinking", thinking: "", signature: "sig" }, { type: "text", text: "Adding the wall and its door." }, submitCall({ commands, notes: "A 5 m wall with a door." })])
+    );
+    const response = await new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }).interpret({ instruction: "Add a wall with a door", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertDeepEqual(response.commands, commands, "exactly the tool input's commands, in order");
+    assertEqual(response.notes, "A 5 m wall with a door.", "the tool input's notes");
+  });
+
+  await check("AICommandPipeline validates and executes Claude's commands through the executor - one request, nothing executed outside it", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [{ type: "pillar.add", pillar: { height: 3 } }, { type: "wall.add", wall: { length: 4 } }] })]));
+    const executor = makeExecutorSpy();
+    const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Add a pillar and a wall", emptySnapshot);
+    assertEqual(result.success, true, "success");
+    assertDeepEqual(executor.calls, [{ type: "pillar.add", pillar: { height: 3 } }, { type: "wall.add", wall: { length: 4 } }], "executed exactly as returned, through the executor");
+    assertEqual(fetchImpl.calls.length, 1, "one request");
+  });
+
+  await check("unsupported construction operations from Claude are rejected by the pipeline - and nothing at all executes", async () => {
+    const cases: [string, unknown[], string][] = [
+      ["an object type the engine doesn't have", [{ type: "wall.add", wall: {} }, { type: "roof.add", roof: {} }], "Unsupported object type"],
+      ["an action the engine doesn't have", [{ type: "wall.demolish", id: "wall-1" }], "Unsupported command type"],
+      ["a command with no type", [{ wall: { length: 3 } }], "Malformed command"],
+      ["something that isn't a command at all", ["rm -rf /"], "Malformed command"]
+    ];
+    for (const [name, commands, fragment] of cases) {
+      const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands })]));
+      const executor = makeExecutorSpy();
+      const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Do it", emptySnapshot);
+      assertEqual(result.success, false, `${name}: refused`);
+      assertTrue(result.errors.some((error) => error.stage === "validation" && error.message.includes(fragment)), `${name}: "${fragment}" - got ${JSON.stringify(result.errors)}`);
+      assertEqual(executor.calls.length, 0, `${name}: nothing executed, not even the valid commands before it`);
+    }
+    // An invented id passes the shape check but the executor - the engine's own validation - refuses it.
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [{ type: "update_object", objectId: "wall-999", changes: { rotation: 1 } }] })]));
+    const executor = makeExecutorSpy((input) =>
+      (input as { objectId?: string }).objectId === "wall-999" ? { success: false, message: 'No construction object found with id "wall-999".' } : { success: true, message: "ok" }
+    );
+    const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Turn wall 999", emptySnapshot);
+    assertEqual(result.success, false, "an invented id is refused by the engine");
+    assertTrue(result.errors[0].message.includes("wall-999"), "with the engine's own reason");
+  });
+
+  await check("malformed output is a clear provider error: tool input without a commands array, an unexpected tool, nothing at all", async () => {
+    const cases: [string, unknown[], string][] = [
+      ["tool input without commands", [submitCall({ notes: "oops" })], 'expected the tool input to be "{ commands: [] }"'],
+      ["commands that aren't an array", [submitCall({ commands: "wall.add" })], 'expected the tool input to be "{ commands: [] }"'],
+      ["an unexpected tool", [{ type: "tool_use", id: "toolu_x", name: "run_shell", input: { command: "ls" } }], 'unexpected tool "run_shell"'],
+      ["no tool call and no text", [{ type: "thinking", thinking: "", signature: "sig" }], "no tool call and no text"]
+    ];
+    for (const [name, content, fragment] of cases) {
+      const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: makeMockAnthropicFetch(() => anthropicMessage(content)) });
+      await assertRejects(() => provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }), fragment, name);
+    }
+  });
+
+  await check("a text-only answer (a question, or why it can't help) is shown as the result - no commands, nothing executed", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([{ type: "text", text: "Which wall should the window go in - the north or the south one?" }], "end_turn"));
+    const executor = makeExecutorSpy();
+    const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Add a window", emptySnapshot);
+    assertEqual(result.success, false, "nothing built");
+    assertEqual(result.errors[0].message, "Which wall should the window go in - the north or the south one?", "Claude's own words are the message");
+    assertEqual(executor.calls.length, 0, "nothing executed");
+  });
+
+  await check("a refusal: no commands and a plain note naming the category - nothing executes, even if a tool call came with it", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() =>
+      anthropicMessage([submitCall({ commands: [{ type: "wall.add", wall: {} }] })], "refusal", { stop_details: { type: "refusal", category: "cyber", explanation: "Declined." } })
+    );
+    const executor = makeExecutorSpy();
+    const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Something odd", emptySnapshot);
+    assertEqual(result.success, false, "nothing built");
+    assertTrue(result.errors[0].message.includes("Claude declined this request (cyber)"), result.errors[0].message);
+    assertEqual(friendlyAiErrorMessage(result.errors[0].message), result.errors[0].message, "shown as written - not turned into an outage message");
+    assertEqual(executor.calls.length, 0, "nothing executed");
+  });
+
+  await check("an answer cut off at max_tokens is never applied, even partly", async () => {
+    const fetchImpl = makeMockAnthropicFetch(() => anthropicMessage([submitCall({ commands: [{ type: "wall.add", wall: {} }] })], "max_tokens"));
+    const executor = makeExecutorSpy();
+    const result = await new AICommandPipeline(new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl }), executor).run("Build a lot", emptySnapshot);
+    assertTrue(result.errors[0].message.includes("cut off"), result.errors[0].message);
+    assertEqual(executor.calls.length, 0, "nothing executed");
+  });
+
+  await check("a timeout is reported as one - which the app shows as 'taking too long' - and the deadline covers the SDK's retries", async () => {
+    const hanging: AnthropicFetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+      });
+    const started = Date.now();
+    const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: hanging, timeoutMs: 60, maxRetries: 2 });
+    let message = "";
+    try {
+      await provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    assertEqual(message, "Anthropic request timed out after 60ms.", "a timeout");
+    assertTrue(Date.now() - started < 2000, `one overall deadline, not one per retry (${Date.now() - started}ms)`);
+    assertTrue(friendlyAiErrorMessage(`Provider threw an error: Error: ${message}`).includes("taking too long"), "the app's timeout message");
+  });
+
+  await check("API errors carry their status (401, 429, 529, 500, 400), never the API key; a network failure is a failed request", async () => {
+    const errors: [number, string, string][] = [
+      [401, "authentication_error", "invalid x-api-key"],
+      [429, "rate_limit_error", "Number of requests has exceeded your rate limit"],
+      [529, "overloaded_error", "Overloaded"],
+      [500, "api_error", "Internal server error"],
+      [400, "invalid_request_error", "max_tokens: too large"]
+    ];
+    for (const [status, type, text] of errors) {
+      const provider = new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: makeMockAnthropicFetch(() => anthropicError(status, type, text)), maxRetries: 0 });
+      let message = "";
+      try {
+        await provider.interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      assertTrue(message.startsWith(`Anthropic request failed with status ${status}`), `${status}: ${message}`);
+      assertTrue(!message.includes(ANTHROPIC_KEY), `${status}: never the key`);
+    }
+    const offline: AnthropicFetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    await assertRejects(
+      () => new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: offline, maxRetries: 0 }).interpret({ instruction: "x", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES }),
+      "Anthropic request failed",
+      "no response at all"
+    );
+  });
+
+  await check("a transient overload is retried by the SDK within the deadline, then succeeds", async () => {
+    const fetchImpl = makeMockAnthropicFetch((_request, attempt) =>
+      attempt === 0 ? anthropicError(529, "overloaded_error", "Overloaded", { "retry-after-ms": "5" }) : anthropicMessage([submitCall({ commands: [{ type: "wall.add", wall: {} }] })])
+    );
+    const response = await new AnthropicProvider({ apiKey: ANTHROPIC_KEY, fetch: fetchImpl, maxRetries: 2 }).interpret({ instruction: "Add a wall", projectContext: emptyContext, availableObjectTypes: AI_SUPPORTED_OBJECT_TYPES });
+    assertEqual(fetchImpl.calls.length, 2, "one retry");
+    assertEqual(response.commands.length, 1, "then the answer");
+  });
+
+  await check("the browser bundle never imports Claude: no file outside the backend's provider path references the Anthropic SDK or AnthropicProvider", () => {
+    const root = fileURLToPath(new URL("../../../", import.meta.url));
+    const allowed = new Set(["engine/ai/providers/AnthropicProvider.ts", "engine/ai/providers/verify.ts"]);
+    const offenders: string[] = [];
+    const walk = (dir: string, relative: string) => {
+      for (const name of readdirSync(dir)) {
+        const path = `${dir}/${name}`;
+        const rel = relative ? `${relative}/${name}` : name;
+        if (statSync(path).isDirectory()) walk(path, rel);
+        // Real imports only (static or dynamic) - a comment naming the file is fine.
+        else if (/\.ts$/.test(name) && !allowed.has(rel) && /(?:from\s*|import\s*\(\s*)["'](?:@anthropic-ai\/sdk[^"']*|[^"']*AnthropicProvider\.ts)["']/.test(readFileSync(path, "utf8"))) offenders.push(rel);
+      }
+    };
+    walk(root, "");
+    assertDeepEqual(offenders, [], "only AnthropicProvider.ts (and its tests) touch the SDK - the backend loads it on demand");
+  });
 
   console.log("\nBackendAIProvider verification\n");
 

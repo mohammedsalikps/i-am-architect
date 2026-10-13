@@ -106,6 +106,21 @@ const STATUS_CODE_PATTERN = /\bstatus (\d{3})\b/i;
 const TIMEOUT_PATTERNS: readonly RegExp[] = [/\btimed out\b/i, /\bETIMEDOUT\b/, /\bAbortError\b/];
 
 const SIGN_IN_AGAIN_MESSAGE = "Please sign in again to continue using EAVARA AI.";
+/** A signed-out AI request the backend refused - distinct from an expired session ("sign in again"), and never an outage. */
+const SIGN_IN_REQUIRED_MESSAGE = "Sign in to use EAVARA AI for this request (Sign in, top right). Your design was not changed.";
+/** The backend is up, but its sign-in service answered something it couldn't use - so no AI request can be authorised right now. */
+const SIGN_IN_SERVICE_MESSAGE = "EAVARA's sign-in service isn't responding correctly, so AI requests can't be authorised right now. Please try again later. Your design was not changed.";
+
+/**
+ * The backend's own refusals of an AI request (backend/src/createServer.ts
+ * and backend/src/auth/): on a 401, BackendAIProvider relays the message
+ * itself, with no "status 401" in it, and the pipeline then wraps it as
+ * "Provider threw an error: ...", which the technical patterns below
+ * would otherwise read as an outage. Checked first.
+ */
+const BACKEND_SIGN_IN_REQUIRED = /\bsign in to use the ai assistant\b/i;
+const BACKEND_SESSION_EXPIRED = /\bsession expired\b/i;
+const BACKEND_SIGN_IN_SERVICE = /\bthe sign-in service\b|\bcould not reach the sign-in service\b/i;
 const RATE_LIMITED_MESSAGE = "EAVARA AI is receiving a lot of requests right now. Please wait a moment and try again. Your design was not changed.";
 const TIMED_OUT_MESSAGE = "The AI service is taking too long to respond. Please try again. Your design was not changed.";
 /** Unchanged from before this milestone - pinned by ai/e2e/verify.ts's FRIENDLY_AI_FAILURE_MESSAGE across several existing failure-category tests, so this exact string is never changed casually. */
@@ -162,6 +177,15 @@ export function isNetworkUnreachable(raw: string): boolean {
 export function friendlyAiErrorMessage(raw: string): string {
   if (TIMEOUT_PATTERNS.some((pattern) => pattern.test(raw))) {
     return TIMED_OUT_MESSAGE;
+  }
+  if (BACKEND_SESSION_EXPIRED.test(raw)) {
+    return SIGN_IN_AGAIN_MESSAGE;
+  }
+  if (BACKEND_SIGN_IN_REQUIRED.test(raw)) {
+    return SIGN_IN_REQUIRED_MESSAGE;
+  }
+  if (BACKEND_SIGN_IN_SERVICE.test(raw)) {
+    return SIGN_IN_SERVICE_MESSAGE;
   }
   if (isNetworkUnreachable(raw)) {
     return NETWORK_UNREACHABLE_MESSAGE;

@@ -320,6 +320,65 @@ function run(): void {
     assertEqual(splashRemainingMs(-10, false), SPLASH_HOLD_MS, "never more than the hold");
   });
 
+  // --- Hosting headers (vercel.json): the deployed site's Permissions-Policy gates voice input ---
+
+  const vercelConfig = JSON.parse(readFileSync(fileURLToPath(new URL("../../vercel.json", import.meta.url)), "utf8")) as {
+    headers?: { source: string; headers: { key: string; value: string }[] }[];
+  };
+  const permissionsPolicies = (vercelConfig.headers ?? [])
+    .filter((entry) => entry.source === "/(.*)")
+    .flatMap((entry) => entry.headers)
+    .filter((header) => header.key.toLowerCase() === "permissions-policy")
+    .map((header) => header.value);
+  const policy = new Map(
+    permissionsPolicies
+      .flatMap((value) => value.split(","))
+      .map((directive) => directive.trim())
+      .filter((directive) => directive.length > 0)
+      .map((directive): [string, string] => [directive.slice(0, directive.indexOf("=")).trim(), directive.slice(directive.indexOf("=") + 1).trim()])
+  );
+  const sourceOf = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+
+  check("the deployed site lets its own pages use the microphone - microphone=() would block the Architect's voice input", () => {
+    assertEqual(permissionsPolicies.length, 1, "exactly one Permissions-Policy header, applied to every path");
+    assertEqual(policy.get("microphone"), "(self)", "microphone=(self): this origin only, never embedded or third-party frames");
+  });
+
+  check("camera and geolocation stay disabled, and no allowlist uses a wildcard", () => {
+    assertEqual(policy.get("camera"), "()", "camera=()");
+    assertEqual(policy.get("geolocation"), "()", "geolocation=()");
+    assertTrue(![...policy.values()].some((allowlist) => allowlist.includes("*")), "no * allowlist");
+    // If the app ever starts using these, the policy above must change with it.
+    const appSources = [sourceOf("./architectPanel.ts"), sourceOf("./voiceInput.ts"), mainSource];
+    assertTrue(!appSources.some((source) => /getUserMedia|navigator\.geolocation/.test(source)), "nothing in the app asks for the camera or location");
+  });
+
+  check("the voice path is wired: the Architect panel's mic comes from voiceInput.ts, and main.ts mounts the panel", () => {
+    const panel = sourceOf("./architectPanel.ts");
+    assertTrue(/import \{ createVoiceInput \} from "\.\/voiceInput"/.test(panel) && panel.includes("createVoiceInput({"), "the panel builds its voice input");
+    assertTrue(panel.includes("architect__mic"), "and shows a mic button");
+    assertTrue(mainSource.includes("createArchitectPanel({") && mainSource.includes("architect: architectPanel"), "main.ts creates the panel and hands it to the shell");
+  });
+
+  // --- Install (PWA) basics: what the deployed site already declares ---
+
+  check("the web app manifest is linked and declares what install needs: names, start URL, standalone display, 192 and 512 px icons", () => {
+    assertTrue(/<link rel="manifest" href="\/manifest\.webmanifest"/.test(indexHtml), "index.html links the manifest");
+    assertTrue(/<meta name="viewport" content="width=device-width, initial-scale=1(\.0)?"/.test(indexHtml), "a mobile viewport");
+    const manifest = JSON.parse(sourceOf("../../public/manifest.webmanifest")) as Record<string, unknown> & { icons?: { src: string; sizes: string; type: string }[] };
+    for (const field of ["name", "short_name", "start_url", "background_color", "theme_color"]) {
+      assertTrue(typeof manifest[field] === "string" && (manifest[field] as string).length > 0, `manifest ${field}`);
+    }
+    assertEqual(manifest.display, "standalone", "display");
+    for (const size of [192, 512]) {
+      const icon = (manifest.icons ?? []).find((entry) => entry.sizes === `${size}x${size}` && entry.type === "image/png");
+      assertTrue(icon, `a ${size}x${size} PNG icon`);
+      // The file's own PNG header must agree with the size the manifest declares.
+      const png = readFileSync(fileURLToPath(new URL(`../../public${icon.src}`, import.meta.url)));
+      assertEqual(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, `${size}x${size}`, `${icon.src} pixel size`);
+    }
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} verification check(s) failed`);
