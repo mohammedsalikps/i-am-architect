@@ -227,7 +227,7 @@ function pickArchitectLocation(footprint: HouseFootprint | null, done: (point: P
   };
   controller.arm({
     id: "architect:location",
-    label: "House location",
+    label: "Architect location",
     ghostSize: footprint ? { x: footprint.length, y: 0.05, z: footprint.width } : { x: 0.8, y: 0.05, z: 0.8 },
     place: (point) => settle(point)
   });

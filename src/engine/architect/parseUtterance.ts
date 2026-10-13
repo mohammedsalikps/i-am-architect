@@ -51,6 +51,8 @@ export type Utterance =
   | { kind: "refurnish"; text: string }
   | { kind: "move-opening"; text: string; opening: "door" | "window"; distance?: number; direction?: Direction }
   | { kind: "wall-length"; text: string; length?: number }
+  /** One new wall, built by conversation (wallBuilder.ts) - "add a 5 m brick wall", "build a wall". */
+  | { kind: "build-wall"; text: string }
   | { kind: "unknown" };
 
 const NUMBER = String.raw`(-?\d+(?:\.\d+)?)`;
@@ -202,6 +204,9 @@ const REFURNISH = /\b(?:re-?furnish(?:ing)?|re-?decorate|rearrange\s+(?:the\s+)?
 const MOVE = /\b(?:move|shift|slide|nudge)\b/i;
 const OPENING_REF = /\b(doors?|windows?|entrance)\b|\b(door|window)-\d+\b/i;
 const RESIZE = /\b(?:make|set|change|resize|extend|shorten|lengthen|stretch|cut)\b/i;
+const WALL_BUILD_VERB = /\b(?:build|add|create|construct|put\s+up|place|raise|erect|draw|make|want|need|give\s+me)\b/i;
+const ONE_NEW_WALL = /\b(?:a|an|one|another|new|1)\s+(?:[\w.,×-]+\s+){0,20}?wall\b(?!s)/i;
+const NOT_ONE_NEW_WALL = /\b(?:walls|doors?|windows?|selected|house|home|bungalow|cottage|room|kitchen|bedroom|bathroom)\b/i;
 
 function stageIn(text: string): ArchitectStage | undefined {
   return STAGE_PATTERNS.find(({ pattern }) => pattern.test(text))?.stage;
@@ -231,6 +236,13 @@ export function parseUtterance(raw: string): Utterance {
   if (CLEAR.test(text) && !HOUSE_NOUN.test(text)) return { kind: "clear-conflicts" };
   if (NEAREST.test(text)) return { kind: "nearest-free" };
   if (DEFAULTS.test(text) && !HOUSE_NOUN.test(text)) return { kind: "defaults" };
+
+  // One NEW wall: a build verb and "a/an/another/new ... wall" - never
+  // "the ... wall" (an existing one), walls (the structure stage), or
+  // anything about doors, windows, rooms or a whole house.
+  if (WALL_BUILD_VERB.test(text) && ONE_NEW_WALL.test(text) && !NOT_ONE_NEW_WALL.test(text)) {
+    return { kind: "build-wall", text };
+  }
 
   // Room-aware edits on the house as it stands (see roomEdits.ts). A
   // "selected" object is left to the AI pipeline's own deterministic

@@ -290,6 +290,17 @@ export function createAppShell(options: AppShellOptions): AppShell {
     emptyState.hidden = !isProjectEmpty(options);
   };
   updateEmptyState();
+  // The Measurements record book follows the scene - coalesced to one
+  // rebuild per frame, since a build stage changes dozens of objects.
+  let recordRefreshQueued = false;
+  const refreshRecordBook = (): void => {
+    if (recordRefreshQueued) return;
+    recordRefreshQueued = true;
+    requestAnimationFrame(() => {
+      recordRefreshQueued = false;
+      commandBar.refreshRecordBook();
+    });
+  };
   for (const store of [
     options.wallStore,
     options.pillarStore,
@@ -301,6 +312,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
     options.assetStore
   ]) {
     store.subscribe(updateEmptyState);
+    store.subscribe(refreshRecordBook);
   }
 
   const viewportArea = el("main", { className: options.architect ? "viewport-area viewport-area--with-architect" : "viewport-area" }, [

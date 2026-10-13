@@ -1,5 +1,6 @@
 import { el } from "./dom";
 import { createTabStrip, comingSoon } from "./tabStrip";
+import { buildRecordBookTab } from "./recordBookPanel";
 import { AiPromptController, isAiPromptSubmitKey, isNetworkUnreachable } from "../engine/ai/AiPromptController";
 import type { AiBuildSummary, AiInstructionSubmitter, AiPromptState, AiUpdateSummary } from "../engine/ai/AiPromptController";
 import type { HouseDesignSummary } from "../engine/ai/houseDesign.ts";
@@ -487,13 +488,17 @@ function buildManualBuildTab(onAddWall: () => void): HTMLElement {
  * project's real objects and highlights each step's objects in the
  * viewport - see constructionMethodPanel.ts and
  * engine/construction/generateConstructionSequence.ts.
- * Measurements/Quotation/Design Review are "Coming soon" - out of scope
- * for this milestone.
+ * Measurements is the construction record book - every element's
+ * material, dimensions, position and supported quantities, derived from
+ * the same real objects (see recordBookPanel.ts). Quotation/Design Review
+ * are "Coming soon" - out of scope for this milestone.
  */
 export interface CommandBar {
   element: HTMLElement;
   /** Switches to the AI Prompt tab and focuses its input - the viewport empty-state's "Ask AI to Design" action (see ui/layout.ts). */
   focusAiInput(): void;
+  /** Re-derives the Measurements record book from the scene - layout.ts calls it whenever the model changes. A no-op until the tab is first opened. */
+  refreshRecordBook(): void;
 }
 
 export function createCommandBar(
@@ -515,6 +520,7 @@ export function createCommandBar(
   // switched away and back.
   const aiPromptTab = buildAiPromptTab(onSubmitAiInstruction, onFocusCreated, onSelectObject, onUndo, onSaveProject);
   let constructionMethodTab: ReturnType<typeof buildConstructionMethodTab> | null = null;
+  let recordBookTab: ReturnType<typeof buildRecordBookTab> | null = null;
 
   const { strip, panel, activate } = createTabStrip(
     [
@@ -529,7 +535,14 @@ export function createCommandBar(
         },
         onDeactivate: () => constructionMethodTab?.clearHighlight()
       },
-      { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },
+      {
+        id: "measurements",
+        label: "Measurements",
+        build: () => {
+          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject);
+          return recordBookTab.element;
+        }
+      },
       { id: "quotation", label: "Quotation", build: () => comingSoon("Quotation"), disabled: true },
       { id: "design-review", label: "Design Review", build: () => comingSoon("Design review"), disabled: true }
     ],
@@ -543,6 +556,7 @@ export function createCommandBar(
     focusAiInput: () => {
       activate("ai-prompt");
       aiPromptTab.focusInput();
-    }
+    },
+    refreshRecordBook: () => recordBookTab?.refresh()
   };
 }

@@ -23,6 +23,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // Explicit .ts extension: Node runs this file directly (see above).
 import { SPLASH_HOLD_MS, SPLASH_REDUCED_HOLD_MS, splashRemainingMs } from "./splash.ts";
+import { createHandsFree, matchSpokenChoice, spokenReply } from "./handsFree.ts";
+import type { HandsFreeStatus } from "./handsFree.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -377,6 +379,145 @@ function run(): void {
       const png = readFileSync(fileURLToPath(new URL(`../../public${icon.src}`, import.meta.url)));
       assertEqual(`${png.readUInt32BE(16)}x${png.readUInt32BE(20)}`, `${size}x${size}`, `${icon.src} pixel size`);
     }
+  });
+
+  // --- Hands-free voice (handsFree.ts): spoken questions and choices, the mic reopened after each answer ---
+
+  type Spoken = { text: string; choices: { label: string; say: string }[] };
+  const fakeListener = (supported = true) => {
+    const log: string[] = [];
+    return { log, listener: { supported, start: () => void log.push("start"), stop: () => void log.push("stop") } };
+  };
+  const fakeSpeech = () => {
+    const spoken: string[] = [];
+    let pending: (() => void) | null = null;
+    let cancelled = 0;
+    return {
+      spoken,
+      finish: () => {
+        const done = pending;
+        pending = null;
+        done?.();
+      },
+      cancelled: () => cancelled,
+      output: {
+        speak: (text: string, onDone: () => void) => {
+          spoken.push(text);
+          pending = onDone;
+        },
+        cancel: () => {
+          cancelled += 1;
+        }
+      }
+    };
+  };
+  const materialQuestion: Spoken = {
+    text: "What should the wall be built of? Brick, Concrete block, Stone masonry.",
+    choices: [
+      { label: "Brick", say: "brick" },
+      { label: "Concrete block", say: "concrete block" },
+      { label: "Stone masonry", say: "stone masonry" },
+      { label: "Cancel", say: "cancel" }
+    ]
+  };
+
+  check("hands-free: a reply is spoken without emoji, with units in words and its choices read out", () => {
+    const text = spokenReply({
+      text: "Ready to build a 5 m long, 230 mm thick brick wall, centred at (2, 3) - 3.105 m³ of masonry. Build it?",
+      choices: [
+        { label: "Build it", say: "yes" },
+        { label: "📍 Pick another spot", say: "pick a location" },
+        { label: "Cancel", say: "cancel" }
+      ]
+    });
+    assertTrue(text.includes("5 metres long") && text.includes("230 millimetres thick") && text.includes("3.105 cubic metres"), text);
+    assertTrue(text.endsWith("You can say: Build it, Pick another spot, or Cancel."), text);
+    assertTrue(!/\p{Extended_Pictographic}/u.test(text), "no emoji read aloud");
+  });
+
+  check("hands-free: a spoken answer picks the offered choice it names; anything else is sent as said", () => {
+    assertEqual(matchSpokenChoice("Concrete block", materialQuestion.choices)?.say, "concrete block", "exact");
+    assertEqual(matchSpokenChoice("concrete", materialQuestion.choices)?.say, "concrete block", "the only choice it starts");
+    assertEqual(matchSpokenChoice("stone", materialQuestion.choices)?.say, "stone masonry", "stone");
+    const direction = [
+      { label: "East–west (along X)", say: "east-west" },
+      { label: "North–south (along Z)", say: "north-south" }
+    ];
+    assertEqual(matchSpokenChoice("east west", direction)?.say, "east-west", "dashes and brackets don't matter");
+    assertEqual(matchSpokenChoice("3 m", [{ label: "3 m", say: "3 m" }, { label: "4 m", say: "4 m" }])?.say, "3 m", "a size choice");
+    assertEqual(matchSpokenChoice("yes", [{ label: "Build it", say: "yes" }, { label: "Cancel", say: "cancel" }]), null, "not a label: sent as said (the architect understands 'yes')");
+    assertEqual(matchSpokenChoice("a 5 metre wall at 2 3", materialQuestion.choices), null, "a new instruction is never squeezed into a choice");
+  });
+
+  check("hands-free: each question is read out, then the microphone opens - and again after every reply", () => {
+    const speech = fakeSpeech();
+    const { log, listener } = fakeListener();
+    const statuses: string[] = [];
+    const handsFree = createHandsFree({ speech: speech.output, listener, onStatus: (status) => statuses.push(status.kind) });
+    assertTrue(handsFree.enableWith(materialQuestion), "turned on");
+    assertTrue(speech.spoken[0].startsWith("Hands-free is on.") && speech.spoken[0].includes("What should the wall be built of?"), "reads the waiting question");
+    assertTrue(!log.includes("start"), "the mic stays shut while speaking - it mustn't hear itself");
+    speech.finish();
+    assertEqual(log[log.length - 1], "start", "then listens");
+    handsFree.heard();
+    handsFree.replied({ text: "How long should the wall be, in metres?", choices: [{ label: "3 m", say: "3 m" }] });
+    assertEqual(log[log.length - 1], "stop", "a new reply first closes the mic");
+    assertEqual(speech.spoken[1], "How long should the wall be, in metres? You can say: 3 metres.", "reads the next question");
+    speech.finish();
+    assertEqual(log[log.length - 1], "start", "and listens for that answer");
+    assertEqual(statuses.join(" "), "speaking listening speaking listening", "speaking, then listening, each turn");
+  });
+
+  check("hands-free: silence gets one more listen, then pauses and says so - it never listens forever", () => {
+    const { log, listener } = fakeListener();
+    const seen: HandsFreeStatus[] = [];
+    const last = (): HandsFreeStatus => seen[seen.length - 1] ?? { kind: "off" };
+    const handsFree = createHandsFree({ speech: null, listener, onStatus: (status) => void seen.push(status) });
+    handsFree.enableWith(materialQuestion);
+    const starts = () => log.filter((entry) => entry === "start").length;
+    assertEqual(starts(), 1, "listening (no speech output: straight to the mic)");
+    handsFree.listenerError("no-speech", "I didn't hear anything — try again.");
+    assertEqual(starts(), 1, "doesn't restart until that session has ended");
+    handsFree.listenerEnded();
+    assertEqual(starts(), 2, "listens once more");
+    handsFree.listenerEnded();
+    assertEqual(handsFree.enabled, false, "a second silent turn pauses it");
+    const paused = last();
+    assertTrue(paused.kind === "stopped" && paused.message.includes("hands-free is paused"), "and says so");
+  });
+
+  check("hands-free: a blocked microphone turns it off with the reason; afterwards nothing is spoken or heard", () => {
+    const speech = fakeSpeech();
+    const { log, listener } = fakeListener();
+    const seen: HandsFreeStatus[] = [];
+    const last = (): HandsFreeStatus => seen[seen.length - 1] ?? { kind: "off" };
+    const handsFree = createHandsFree({ speech: speech.output, listener, onStatus: (status) => void seen.push(status) });
+    handsFree.enableWith(null);
+    speech.finish();
+    handsFree.listenerError("not-allowed", "Microphone access was blocked. Allow it in the browser's site settings to speak commands.");
+    assertEqual(handsFree.enabled, false, "off");
+    const blocked = last();
+    assertTrue(blocked.kind === "stopped" && blocked.message.includes("Microphone access was blocked") && blocked.message.includes("type your answer instead"), "the honest reason, and the text fallback");
+    const spokenBefore = speech.spoken.length;
+    const startsBefore = log.filter((entry) => entry === "start").length;
+    handsFree.replied(materialQuestion);
+    assertEqual(speech.spoken.length, spokenBefore, "nothing more is spoken");
+    assertEqual(log.filter((entry) => entry === "start").length, startsBefore, "and the mic isn't reopened");
+  });
+
+  check("hands-free: without speech recognition it can't be turned on (and says why); turning it off cancels speech and keeps the mic shut", () => {
+    const unsupported = createHandsFree({ speech: fakeSpeech().output, listener: fakeListener(false).listener, onStatus: () => undefined });
+    assertEqual(unsupported.enableWith(materialQuestion), false, "refused");
+    assertEqual(unsupported.enabled, false, "still off");
+
+    const speech = fakeSpeech();
+    const { log, listener } = fakeListener();
+    const handsFree = createHandsFree({ speech: speech.output, listener, onStatus: () => undefined });
+    handsFree.enableWith(materialQuestion);
+    handsFree.setEnabled(false);
+    assertTrue(speech.cancelled() > 0 && log[log.length - 1] === "stop", "speech cancelled, mic closed");
+    speech.finish();
+    assertTrue(!log.includes("start"), "a late “finished speaking” never reopens the mic");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);
