@@ -46,7 +46,7 @@ export interface RecordedBackendRequest {
 
 /** What a test wants the mock backend to answer with for a given request. */
 export type MockBackendReply =
-  | { kind: "ok"; commands: unknown[]; notes?: string }
+  | { kind: "ok"; commands: unknown[]; notes?: string; house?: unknown }
   /** A non-2xx response, mirroring the real backend's 400/413/502/500 paths. */
   | { kind: "status"; status: number; error: string }
   /** A transport-level failure (server unreachable), mirroring a real `fetch` rejection. */
@@ -153,7 +153,11 @@ export function createMockBackend(handler: MockBackendHandler): MockBackend {
     const reply = await handler(recorded);
     switch (reply.kind) {
       case "ok":
-        return jsonResponse(200, reply.notes === undefined ? { commands: reply.commands } : { commands: reply.commands, notes: reply.notes });
+        return jsonResponse(200, {
+          commands: reply.commands,
+          ...(reply.notes === undefined ? {} : { notes: reply.notes }),
+          ...(reply.house === undefined ? {} : { house: reply.house })
+        });
       case "status":
         return jsonResponse(reply.status, { error: reply.error });
       case "malformedBody":

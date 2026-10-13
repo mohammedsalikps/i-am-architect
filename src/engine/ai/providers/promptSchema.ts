@@ -6,6 +6,8 @@ import type { ConstructionGeometryAnalysis, GeometryVector } from "../geometry/t
 import { ELEMENT_KINDS } from "../../elements/catalog.ts";
 import { ASSET_DEFINITIONS } from "../../assets/catalog.ts";
 import { MATERIAL_LIBRARY } from "../../materials/materialLibrary.ts";
+import { HOUSE_BEDROOM_LIMITS, HOUSE_ROOM_LABELS } from "../houseIntent.ts";
+import { HOUSE_FOOTPRINT_LIMITS } from "../housePlan.ts";
 
 /**
  * The provider-neutral half of "how to ask a model for construction
@@ -158,6 +160,9 @@ const ASSET_OPTION_SCHEMA = {
  * AICommandPipeline validation/execution errors, same as any other
  * provider's bad output.
  */
+/** The most commands one response should hold before the model splits a large build into parts (see buildSystemPrompt) - keeps each AI request well inside its time budget. */
+export const STAGED_COMMAND_LIMIT = 40;
+
 export const RESPONSE_JSON_SCHEMA = {
   name: "construction_commands",
   schema: {
@@ -287,6 +292,23 @@ export const RESPONSE_JSON_SCHEMA = {
       notes: {
         type: "string",
         description: "Optional free-text notes, e.g. parts of the instruction that could not be mapped to a command."
+      },
+      house: {
+        type: "object",
+        description:
+          "ONLY when the instruction asks for an entire new house or home, in any wording. Then \"commands\" stays empty: the application plans the layout and builds the house itself, in validated stages. Include only what the user specified.",
+        properties: {
+          bedrooms: { type: "integer", description: `Number of bedrooms, ${HOUSE_BEDROOM_LIMITS.min}-${HOUSE_BEDROOM_LIMITS.max}.` },
+          footprint: {
+            type: "object",
+            description: `The house's outer size in meters, each side ${HOUSE_FOOTPRINT_LIMITS.min}-${HOUSE_FOOTPRINT_LIMITS.max} m: length along X, width along Z. A size the user gives for the house's plot or site is its footprint.`,
+            properties: { length: { type: "number" }, width: { type: "number" } },
+            required: ["length", "width"]
+          },
+          rooms: { type: "array", description: "Only the rooms the user named, one entry per room.", items: { type: "string", enum: HOUSE_ROOM_LABELS } },
+          size: { type: "string", enum: ["small", "medium", "large"], description: "Only when the user gave a size word instead of dimensions." },
+          floors: { type: "integer", description: "Only when the user asked for a number of storeys." }
+        }
       }
     },
     required: ["commands"]
@@ -508,7 +530,7 @@ export function buildSystemPrompt(request: AIProviderRequest): string {
     `Only these object types are currently available: ${request.availableObjectTypes.join(", ") || "none"}.`,
     'Supported commands: "<type>.add" creates a new object; "update_object" edits an existing one. Never produce delete or duplicate commands.',
     "Every dimension/color/material/rotation/position field is optional - omit a field entirely to use the application's default for it.",
-    "Produce one command per distinct object the user asked for, in the order they were mentioned. A request for a whole structure, such as a house, asks for every object that structure needs: return all of them in one response. If the instruction asks for something outside the available object types or commands, omit it and explain why in \"notes\" instead of guessing.",
+    `Produce one command per distinct object the user asked for, in the order they were mentioned - except for an entire house (see WHOLE HOUSES below). Keep each response small enough to answer quickly: if an instruction needs more than ${STAGED_COMMAND_LIMIT} commands, return only its first coherent part and say in "notes" what to ask for next. If the instruction asks for something outside the available object types or commands, omit it and explain why in "notes" instead of guessing.`,
     [
       "Current project: ",
       `${snapshot.wallCount} wall(s), `,
@@ -544,7 +566,8 @@ export function buildSystemPrompt(request: AIProviderRequest): string {
     `Before rotation, an object's dimensions run along these axes: wall length X, height Y, thickness Z; pillar width X, height Y, depth Z; beam length X, height Y, width Z; slab length X, thickness Y, width Z; door and window width X, height Y, thickness Z. "rotation" turns an object around the vertical axis, in radians: 1.5707963267948966 (90 degrees) makes a wall's length run along Z.`,
     `The application gives every new object its own unique id - never put an id in a "<type>.add" command. Ids appear only in "update_object", copied exactly from the current construction state.`,
     `Build coherent geometry: size and place every new object so the parts fit together - walls meet at corners, and everything rests on the ground or on the slab - and never place a new object inside another new or existing object; the geometry section shows what is already occupied. Doors and windows are separate objects: put each flush against the outside face of its wall, not inside the wall.`,
-    `A simple house on an L x W footprint (L along X, W along Z) is: one L x W slab, 0.2 m thick, on the ground; four 0.4 x 0.4 m corner pillars on the slab, flush with its corners; four 0.2 m thick perimeter walls on the slab, running pillar to pillar with their outer faces flush with the slab's edges; one door on the outside face of the front (+Z) wall; and windows on the outside faces of other walls. Center it on the origin unless existing objects are in the way; then move it clear of them. Rooms, finishes, services, furniture, and exterior works are element kinds: add them only when the instruction asks for them.`
+    `WHOLE HOUSES: when the instruction asks for an entire new house or home - in any wording ("build a 3 bedroom house", "I want a home on a 10 x 8 m plot", "generate the walls, doors and windows for a house") - never list its slab, pillars, walls, doors, windows or rooms yourself. Return an empty "commands" array and a "house" plan holding only what the user specified (bedrooms, footprint, rooms, size, floors); the application plans the layout and builds the house in validated stages. Never use "house" to add to or edit an existing house.`,
+    `Rooms, finishes, services, furniture, and exterior works are element kinds: add them only when the instruction asks for them.`
   ];
   if (request.availableObjectTypes.includes("element")) {
     lines.push(...elementPromptLines());

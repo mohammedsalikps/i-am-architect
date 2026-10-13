@@ -2,6 +2,7 @@ import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
 import type { ConstructionGeometryAnalysis } from "./geometry/types";
 import type { HouseDesignSummary } from "./houseDesign.ts";
+import type { HouseDesignRequest } from "./houseIntent.ts";
 
 /**
  * Provider-independent AI command pipeline - shared type definitions.
@@ -367,6 +368,26 @@ export interface AIProviderResponse {
   commands: unknown[];
   /** Optional free-text notes from the provider (e.g. which parts of the instruction it couldn't map to a command) - for logs/debugging, not yet surfaced in the UI. */
   notes?: string;
+  /**
+   * A whole-house PLAN (bedrooms, footprint, rooms...), returned instead of
+   * commands when the instruction asks for an entire house - raw and not
+   * yet trusted, exactly like `commands`: AICommandPipeline validates it
+   * (houseIntent.ts's validateHousePlan) and the deterministic house
+   * builder constructs it. The provider never supplies a house's geometry.
+   */
+  house?: unknown;
+}
+
+/** How AICommandPipeline.run() treats a whole-house plan from the provider. */
+export interface AIRunOptions {
+  /**
+   * "build" (the default): plan and build it at once, as one undo step -
+   * what the AI Prompt tab does with a recognized house request. "return":
+   * build nothing and hand the validated plan back as
+   * `AIPipelineResult.housePlan` - for a caller with its own staged build
+   * (the EAVARA Architect: clarifications, then one undo step per stage).
+   */
+  housePlan?: "build" | "return";
 }
 
 /** One command's outcome after passing through validation and (if valid) CommandExecutor. */
@@ -410,4 +431,10 @@ export interface AIPipelineResult {
    * provider-mapped instruction, an edit, a partial/failed request).
    */
   houseSummary?: HouseDesignSummary;
+  /**
+   * Present only with `housePlan: "return"` (see AIRunOptions), when the
+   * provider answered with a valid whole-house plan: nothing was built -
+   * the caller builds it. `outcomes` is empty.
+   */
+  housePlan?: HouseDesignRequest;
 }

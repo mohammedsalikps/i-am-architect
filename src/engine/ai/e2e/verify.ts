@@ -44,6 +44,7 @@ import type { ProjectContext } from "../../project/ProjectContext.ts";
 import { AIService } from "../AIService.ts";
 import { AiPromptController, isNetworkUnreachable } from "../AiPromptController.ts";
 import { BackendAIProvider } from "../providers/BackendAIProvider.ts";
+import type { BackendFetch, BackendHttpResponse } from "../providers/BackendAIProvider.ts";
 import { createMockBackend } from "./mockBackend.ts";
 import { MockAIProvider } from "../MockAIProvider.ts";
 import { buildSimpleHousePlan } from "../housePlan.ts";
@@ -53,6 +54,7 @@ import { validateSlab } from "../../slab/validateSlab.ts";
 import { validateDoor } from "../../door/validateDoor.ts";
 import { validateWindow } from "../../window/validateWindow.ts";
 import { AI_SUPPORTED_OBJECT_TYPES, buildAIProjectSnapshot } from "../types.ts";
+import { parseHouseIntent } from "../houseIntent.ts";
 import { analyzeConstructionGeometry } from "../geometry/analyzeConstructionGeometry.ts";
 import { buildAIProjectContext } from "../aiProjectContext.ts";
 import { ObjectManipulator, createStoreObjectReader } from "../../manipulation/ObjectManipulator.ts";
@@ -1910,6 +1912,125 @@ async function run(): Promise<void> {
     assertEqual(buildAIProjectSnapshot(app.context).objects.length, 1 + HOUSE_OBJECT_COUNT, "the restored wall plus the whole AI-built house");
     app.context.history.undo();
     assertEqual(objectsJson(app.context), restored, "one undo leaves exactly the loaded project");
+  });
+
+  // --- Whole houses the local planner doesn't recognize (the live 3-bedroom-house timeout) ---
+  // Such a request used to make the AI write the entire house as individual
+  // commands in one answer - large and slow enough to hit the AI deadline.
+  // Now the AI returns a small plan and the house builder builds it.
+
+  const AI_ONLY_HOUSE = "I want a complete 3-bedroom house on a 10 m × 8 m plot";
+  const AI_HOUSE_PLAN = { bedrooms: 3, footprint: { length: 10, width: 8 } };
+
+  await check("AI Prompt tab: a whole house only the AI recognizes comes back as a small plan and is built by the house builder - one request, one undo step", async () => {
+    assertEqual(parseHouseIntent(AI_ONLY_HOUSE).kind, "none", "the local recognizer misses this wording, so it reaches the AI");
+    const app = wireApp(() => ({ kind: "ok", commands: [], house: AI_HOUSE_PLAN, notes: "A 3-bedroom house on the plot." }));
+    addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, position: { x: 30, z: 30 } } });
+    const before = objectsJson(app.context);
+
+    await app.controller.submit(AI_ONLY_HOUSE);
+
+    const state = app.controller.getState();
+    assertEqual(state.status, "success", `built: ${state.message}`);
+    assertEqual(app.backend.requests.length, 1, "one AI request");
+    assertTrue(state.houseSummary !== null, "reported as a designed house");
+    const slab = app.context.slabStore.getAll()[0];
+    assertEqual(`${slab.dimensions.length} x ${slab.dimensions.width}`, "10 x 8", "on the 10 m x 8 m footprint");
+    const rooms = app.context.elementStore.getAll().filter((element) => element.kind === "room").map((element) => element.label);
+    assertEqual(rooms.filter((label) => /^Bedroom/.test(label ?? "")).length, 3, `three bedrooms (${rooms.join(", ")})`);
+    assertTrue(app.context.wallStore.getAll().length > 4, "walls from the house builder, beside the existing one");
+    app.context.history.undo();
+    assertEqual(objectsJson(app.context), before, "one undo removes the whole house and leaves the existing scene exactly as it was");
+  });
+
+  await check("AI Prompt tab: a timed-out AI request changes nothing and says so; trying again builds the house", async () => {
+    let attempt = 0;
+    const app = wireApp(() => {
+      attempt += 1;
+      // What the real backend relays when Claude's 25 s deadline passes.
+      return attempt === 1 ? { kind: "status", status: 502, error: "Anthropic request timed out after 25000ms." } : { kind: "ok", commands: [], house: AI_HOUSE_PLAN };
+    });
+    addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, position: { x: 30, z: 30 } } });
+    const before = objectsJson(app.context);
+
+    await app.controller.submit(AI_ONLY_HOUSE);
+    let state = app.controller.getState();
+    assertEqual(state.status, "error", "a failure, never a success");
+    assertTrue(state.message?.includes("taking too long") && state.message.includes("Your design was not changed."), `an honest timeout message: ${state.message}`);
+    assertEqual(objectsJson(app.context), before, "the scene is exactly as it was");
+
+    await app.controller.submit(AI_ONLY_HOUSE);
+    state = app.controller.getState();
+    assertEqual(state.status, "success", `the retry builds it: ${state.message}`);
+    assertEqual(app.backend.requests.length, 2, "two requests in all");
+    assertEqual(app.context.slabStore.getAll().length, 1, "exactly one house - the timed-out attempt left nothing behind");
+    const bedrooms = app.context.elementStore.getAll().filter((element) => element.kind === "room" && /^Bedroom/.test(element.label ?? ""));
+    assertEqual(bedrooms.length, 3, "three bedrooms, not six");
+  });
+
+  await check("AI Prompt tab: when the browser gives up first, the late answer is never applied, and trying again builds exactly one house", async () => {
+    const context = createProjectContext();
+    const housePlanReply = (): BackendHttpResponse => {
+      const body = JSON.stringify({ commands: [], house: AI_HOUSE_PLAN });
+      return { ok: true, status: 200, json: async () => JSON.parse(body), text: async () => body };
+    };
+    let slow = true;
+    // Like a real fetch: the answer would arrive after 120 ms, but aborting rejects at once.
+    const fetchImpl: BackendFetch = (_url, init) =>
+      new Promise<BackendHttpResponse>((resolve, reject) => {
+        if (!slow) {
+          resolve(housePlanReply());
+          return;
+        }
+        const timer = setTimeout(() => resolve(housePlanReply()), 120);
+        init.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    const service = new AIService({
+      provider: new BackendAIProvider({ baseUrl: BASE_URL, fetch: fetchImpl, timeoutMs: 40 }),
+      commandExecutor: context.commandExecutor,
+      history: context.history,
+      snapshotSource: context
+    });
+    const controller = new AiPromptController((instruction) => service.submit(instruction));
+
+    await controller.submit(AI_ONLY_HOUSE);
+    assertEqual(controller.getState().status, "error", "the browser's own timeout is a failure");
+    assertTrue(controller.getState().message?.includes("taking too long"), `says so: ${controller.getState().message}`);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 0, "nothing appears when the late answer would have arrived");
+
+    slow = false;
+    await controller.submit(AI_ONLY_HOUSE);
+    assertEqual(controller.getState().status, "success", `the retry builds it: ${controller.getState().message}`);
+    assertEqual(context.slabStore.getAll().length, 1, "exactly one house");
+    context.history.undo();
+    assertEqual(buildAIProjectSnapshot(context).objects.length, 0, "and one undo removes it entirely");
+  });
+
+  await check("AI Prompt tab: an invalid, ambiguous or unsupported house plan from the AI changes nothing", async () => {
+    const plans: [string, { commands: unknown[]; house: unknown }, string][] = [
+      ["a plan plus individual commands", { commands: [{ type: "wall.add", wall: { length: 3 } }], house: AI_HOUSE_PLAN }, "both a whole-house plan and individual commands"],
+      ["not an object", { commands: [], house: "a nice house" }, "house plan was invalid"],
+      ["an unknown field", { commands: [], house: { ...AI_HOUSE_PLAN, garage: true } }, "house plan was invalid"],
+      ["half a bedroom", { commands: [], house: { bedrooms: 2.5 } }, "house plan was invalid"],
+      ["a room the planner doesn't know", { commands: [], house: { rooms: ["Garage"] } }, "house plan was invalid"],
+      ["a footprint as text", { commands: [], house: { footprint: { length: "10", width: 8 } } }, "house plan was invalid"],
+      ["two storeys", { commands: [], house: { ...AI_HOUSE_PLAN, floors: 2 } }, "multiple floors"],
+      ["a 100 m house", { commands: [], house: { footprint: { length: 100, width: 8 } } }, "outside what the house planner supports"]
+    ];
+    for (const [name, reply, fragment] of plans) {
+      const app = wireApp(() => ({ kind: "ok", ...reply }));
+      addThroughExecutor(app.context, { type: "wall.add", wall: { length: 4, position: { x: 30, z: 30 } } });
+      const before = objectsJson(app.context);
+      await app.controller.submit(AI_ONLY_HOUSE);
+      const state = app.controller.getState();
+      assertEqual(state.status, "error", `${name}: an error`);
+      assertTrue((state.message ?? "").includes(fragment), `${name}: says why (${state.message})`);
+      assertEqual(objectsJson(app.context), before, `${name}: nothing changed`);
+    }
   });
 
   // --- Secrets and harness discipline ---

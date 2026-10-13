@@ -75,7 +75,8 @@ export interface BackendAIProviderOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** How long the browser waits for the backend's AI answer - longer than the backend's own provider deadline (e.g. ANTHROPIC_TIMEOUT_MS), so the backend's explicit error arrives first. */
+export const BACKEND_AI_TIMEOUT_MS = 30_000;
 const INTERPRET_PATH = "/api/ai/interpret";
 
 function describeError(error: unknown): string {
@@ -129,7 +130,7 @@ export class BackendAIProvider implements AIProvider {
     // Strip a trailing slash so `${baseUrl}${INTERPRET_PATH}` never produces a doubled "//".
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = options.fetch;
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs ?? BACKEND_AI_TIMEOUT_MS;
   }
 
   async interpret(request: AIProviderRequest): Promise<AIProviderResponse> {
@@ -203,7 +204,7 @@ export class BackendAIProvider implements AIProvider {
       throw new Error('Backend response was malformed: expected "{ commands: [] }".');
     }
 
-    const { commands, notes } = payload as { commands: unknown[]; notes?: unknown };
+    const { commands, notes, house } = payload as { commands: unknown[]; notes?: unknown; house?: unknown };
 
     // Unsupported/invalid commands in `commands` are deliberately NOT
     // checked here - they're handed back exactly as `unknown[]`, same
@@ -212,7 +213,9 @@ export class BackendAIProvider implements AIProvider {
     // layers, not one".
     return {
       commands,
-      notes: typeof notes === "string" ? notes : undefined
+      notes: typeof notes === "string" ? notes : undefined,
+      // A whole-house plan, passed on as-is: AICommandPipeline validates it.
+      ...(house !== undefined ? { house } : {})
     };
   }
 }

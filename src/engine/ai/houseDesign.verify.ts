@@ -13,7 +13,7 @@
  * or as part of:
  *   npm run verify
  */
-import { parseHouseIntent } from "./houseIntent.ts";
+import { parseHouseIntent, validateHousePlan } from "./houseIntent.ts";
 import { planHouseDesign, designAndBuildHouse } from "./houseDesign.ts";
 import type { Execute } from "./houseDesign.ts";
 import type { Command, CommandResult } from "../commands/types";
@@ -265,6 +265,39 @@ async function run(): Promise<void> {
     const result = designAndBuildHouse({ footprint: { length: 10, width: 8 } }, [], failingExecute);
     assertTrue(!result.success, "not success");
     assertTrue(!result.success && result.error.length > 0, "a clear error message");
+  });
+
+  await check("an AI's whole-house plan is validated into the same request a recognized instruction gives - anything unexpected refuses the whole plan", () => {
+    const valid = validateHousePlan({ bedrooms: 3, footprint: { length: 10, width: 8 }, rooms: ["kitchen", " Living Room "], size: "medium", floors: 1 });
+    assertTrue(valid.ok && valid.intent.kind === "house", "a valid plan");
+    if (valid.ok && valid.intent.kind === "house") {
+      assertEqual(
+        JSON.stringify(valid.intent.request),
+        JSON.stringify({ floors: 1, footprint: { length: 10, width: 8 }, bedrooms: 3, size: "medium", rooms: ["Kitchen", "Living Room"] }),
+        "room names are matched to the planner's own labels"
+      );
+    }
+    assertTrue(validateHousePlan({}).ok, "an empty plan is a house with every default");
+    for (const [name, plan] of [
+      ["not an object", "a house"],
+      ["an array", [3]],
+      ["an unknown field", { bedrooms: 3, pool: true }],
+      ["zero bedrooms", { bedrooms: 0 }],
+      ["seven bedrooms", { bedrooms: 7 }],
+      ["half a bedroom", { bedrooms: 2.5 }],
+      ["a footprint without a width", { footprint: { length: 10 } }],
+      ["an unknown room", { rooms: ["Garage"] }],
+      ["no rooms", { rooms: [] }],
+      ["a size that isn't one", { size: "enormous" }],
+      ["zero floors", { floors: 0 }]
+    ] as const) {
+      const result = validateHousePlan(plan);
+      assertTrue(!result.ok, `${name}: refused`);
+    }
+    const twoStoreys = validateHousePlan({ floors: 2 });
+    assertTrue(twoStoreys.ok && twoStoreys.intent.kind === "unsupported" && twoStoreys.intent.reason.includes("multiple floors"), "two storeys: unsupported, as when typed");
+    const huge = validateHousePlan({ footprint: { length: 100, width: 8 } });
+    assertTrue(huge.ok && huge.intent.kind === "unsupported" && huge.intent.reason === (parseHouseIntent("build a 100m x 8m house") as { reason: string }).reason, "out of range: the same reason as when typed");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

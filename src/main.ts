@@ -41,7 +41,7 @@ import type {
   AddDoorCommand,
   AddWindowCommand
 } from "./engine/commands/types";
-import type { AIPipelineResult } from "./engine/ai/types";
+import type { AIPipelineResult, AIRunOptions } from "./engine/ai/types";
 import { buildAIProjectSnapshot } from "./engine/ai/types";
 import { buildAIProjectContext } from "./engine/ai/aiProjectContext";
 import { parseHouseIntent } from "./engine/ai/houseIntent";
@@ -183,11 +183,11 @@ function resolvesLocally(instruction: string): boolean {
  * the request actually needs the AI provider - a selection edit ("make the
  * selected wall 5 metres long") runs locally, signed in or not.
  */
-async function submitArchitectFallback(instruction: string): Promise<AIPipelineResult> {
+async function submitArchitectFallback(instruction: string, options: AIRunOptions): Promise<AIPipelineResult> {
   if (!auth.isSignedIn() && !resolvesLocally(instruction)) {
     await authDialog.open("Sign in to use the AI assistant for this request.");
   }
-  return aiService.submit(instruction);
+  return aiService.submit(instruction, options);
 }
 
 /**

@@ -18,7 +18,7 @@ import type { HouseLayout, HouseStructureRefs } from "../ai/houseDesign.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
 import { friendlyAiErrorMessage, isNetworkUnreachable, summarizeCreatedObjects, summarizeUpdatedObjects } from "../ai/AiPromptController.ts";
-import type { AIPipelineResult, AIProjectSnapshot } from "../ai/types";
+import type { AIPipelineResult, AIProjectSnapshot, AIRunOptions } from "../ai/types";
 import { planFurnishingsInScene } from "./interiors.ts";
 import { parseUtterance } from "./parseUtterance.ts";
 import { addOpeningToRoom, furnishRooms, moveOpening, setWallLength, showRoom } from "./roomEdits.ts";
@@ -100,8 +100,13 @@ export interface ArchitectSessionOptions {
   snapshot: () => AIProjectSnapshot;
   /** The app's Undo. */
   undo?: () => void;
-  /** Where unrecognized turns go - AIService.submit in the running app. */
-  fallback?: (instruction: string) => Promise<AIPipelineResult>;
+  /**
+   * Where unrecognized turns go - AIService.submit in the running app. The
+   * session always asks for `housePlan: "return"`: a whole house the AI
+   * interprets comes back as a plan, which this session builds in its own
+   * stages (one undo step each), never as one AI-built batch.
+   */
+  fallback?: (instruction: string, options: AIRunOptions) => Promise<AIPipelineResult>;
 }
 
 export const ARCHITECT_STAGES: readonly { id: ArchitectStage; label: string; say: string }[] = [
@@ -1053,9 +1058,15 @@ export class ArchitectSession {
     }
     let result: AIPipelineResult;
     try {
-      result = await this.options.fallback(text);
+      result = await this.options.fallback(text, { housePlan: "return" });
     } catch (error) {
       return this.aiFailure(text, error instanceof Error ? error.message : String(error));
+    }
+    if (result.success && result.housePlan) {
+      // The AI read the turn as a whole house: the same staged design flow
+      // as a house this session recognizes itself - location and size
+      // questions first, then one stage (one undo step) at a time.
+      return this.startHouse(result.housePlan, undefined, undefined);
     }
     if (result.success) {
       const created = summarizeCreatedObjects(result.outcomes);

@@ -6,7 +6,7 @@ import type { AIProvider } from "./AIProvider";
 import { AICommandPipeline } from "./AICommandPipeline.ts";
 import type { CommandExecutorLike } from "./AICommandPipeline";
 import { buildAIProjectSnapshot } from "./types.ts";
-import type { AIProjectSnapshotSource, AIPipelineResult } from "./types";
+import type { AIProjectSnapshotSource, AIPipelineResult, AIRunOptions } from "./types";
 import type { HistoryGroupLike } from "../commands/executeCommandBatch";
 
 export interface AIServiceOptions {
@@ -72,8 +72,8 @@ export class AIService {
   }
 
   /** Runs one instruction end-to-end: builds a fresh read-only snapshot of the current project, then delegates entirely to AICommandPipeline.run(). */
-  submit(instruction: string): Promise<AIPipelineResult> {
+  submit(instruction: string, options: AIRunOptions = {}): Promise<AIPipelineResult> {
     const snapshot = buildAIProjectSnapshot(this.snapshotSource);
-    return this.pipeline.run(instruction, snapshot);
+    return this.pipeline.run(instruction, snapshot, undefined, options);
   }
 }

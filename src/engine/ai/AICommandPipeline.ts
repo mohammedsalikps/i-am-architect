@@ -5,14 +5,14 @@ import type { AIProvider } from "./AIProvider";
 // allowImportingTsExtensions in tsconfig.json. Harmless for Vite too.
 import { AI_SUPPORTED_OBJECT_TYPES } from "./types.ts";
 import { buildAIProjectContext } from "./aiProjectContext.ts";
-import { parseHouseIntent } from "./houseIntent.ts";
+import { parseHouseIntent, validateHousePlan } from "./houseIntent.ts";
 import { buildHouseDesign, planHouseDesign, summarizeHouseDesign } from "./houseDesign.ts";
 import { tryDeterministicIntent } from "./deterministicIntent.ts";
 import type { DeterministicIntentResult } from "./deterministicIntent";
 import { resolveCommandReferences } from "./referenceResolution.ts";
 import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
 import type { HistoryGroupLike } from "../commands/executeCommandBatch";
-import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectContext, AIProjectSnapshot } from "./types";
+import type { AICommandOutcome, AIPipelineError, AIPipelineResult, AIProjectContext, AIProjectSnapshot, AIProviderResponse, AIRunOptions } from "./types";
 import type { ObjectType } from "../objects/types";
 import type { CommandResult } from "../commands/types";
 
@@ -164,6 +164,14 @@ function validateCommandShape(
  * "build a wall", "add a door", or an edit) falls through to the next
  * check.
  *
+ * A whole-house request worded in a way parseHouseIntent() doesn't
+ * recognize ("I want a home on a 10 x 8 m plot") reaches the provider,
+ * which answers with a small PLAN (`house`: bedrooms, footprint, rooms...)
+ * instead of the house's objects - see runProviderHousePlan(). The plan is
+ * validated (validateHousePlan) and built by the same deterministic
+ * planner as above; the provider still never supplies a house's geometry,
+ * and its answer stays small enough for the AI's time budget.
+ *
  * A COMMON, UNAMBIGUOUS EDIT ON THE CURRENT SELECTION ("make the selected
  * wall 5 metres long", "rotate the selected sofa 90 degrees", "move the
  * selected object 2 metres to the right") is recognized next, by
@@ -211,7 +219,8 @@ export class AICommandPipeline {
   async run(
     instruction: string,
     snapshot: AIProjectSnapshot,
-    availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES
+    availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES,
+    options: AIRunOptions = {}
   ): Promise<AIPipelineResult> {
     const trimmedInstruction = typeof instruction === "string" ? instruction.trim() : "";
 
@@ -272,6 +281,13 @@ export class AICommandPipeline {
           { stage: "provider", message: 'Provider returned a malformed response: expected "{ commands: [] }".' }
         ]
       };
+    }
+
+    // A whole-house PLAN instead of commands (see promptSchema.ts): the
+    // provider interpreted the request, the deterministic house builder
+    // constructs it - exactly like a house request recognized locally.
+    if (response.house !== undefined) {
+      return this.runProviderHousePlan(instruction, response, projectContext, availableObjectTypes, options);
     }
 
     const commands: unknown[] = response.commands;
@@ -440,6 +456,47 @@ export class AICommandPipeline {
    * so a caller (AiPromptController, ai/verify.ts) can't tell which path
    * produced a given result except by its `errors[].stage`.
    */
+  /**
+   * A provider's whole-house plan: validated in full first (an invalid
+   * plan, or a plan alongside individual commands, changes nothing), then
+   * either built by runHouseDesign() - the same planner, validation and
+   * one-undo-step build as a locally recognized house request - or, with
+   * `housePlan: "return"`, handed back unbuilt for the caller's own staged
+   * build. The provider never supplies the house's geometry.
+   */
+  private runProviderHousePlan(
+    instruction: string,
+    response: AIProviderResponse,
+    projectContext: AIProjectContext,
+    availableObjectTypes: readonly ObjectType[],
+    options: AIRunOptions
+  ): AIPipelineResult {
+    const notes = response.notes;
+    if (response.commands.length > 0) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "validation", message: "The AI answered with both a whole-house plan and individual commands, so nothing was changed. Please try again." }],
+        notes
+      };
+    }
+    const plan = validateHousePlan(response.house);
+    if (!plan.ok) {
+      return {
+        success: false,
+        instruction,
+        outcomes: [],
+        errors: [{ stage: "validation", message: `The AI's house plan was invalid (${plan.error}), so nothing was changed.` }],
+        notes
+      };
+    }
+    if (options.housePlan === "return" && plan.intent.kind === "house") {
+      return { success: true, instruction, outcomes: [], errors: [], housePlan: plan.intent.request, ...(notes ? { notes } : {}) };
+    }
+    return this.runHouseDesign(instruction, plan.intent, projectContext, availableObjectTypes);
+  }
+
   private runHouseDesign(
     instruction: string,
     houseIntent: Extract<ReturnType<typeof parseHouseIntent>, { kind: "unsupported" | "house" }>,
