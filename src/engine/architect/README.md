@@ -76,6 +76,78 @@ houses.
   VisibilityStore (a view setting, never the model); "show the roof"
   brings it back.
 
+## Exterior style
+
+```
+"Keep the dimensions but make the exterior modern."    "Make the exterior traditional."
+"Make the roof flat."    "Change the roof to a gable roof."    "Give it a mono-pitch roof."
+```
+
+- A generated house is **contemporary by default**: a flat roof with a
+  parapet in dark metal, the four outside walls rendered warm white and
+  the interior walls plastered. The walls' material stays the masonry the
+  user chose (the record book still says brick) - only the finish colour
+  changes, and the build reply says so.
+- A roof's **style** (`flat`, `mono-pitch`, `gable` - see
+  `engine/elements/roofStyles.ts`) changes only the shape drawn inside its
+  box, with a height to suit it and its finish; its length, span, plan
+  position and base on the walls never change. "Modern" is a flat roof and
+  rendered outside walls; "traditional" a clay-tile gable and the masonry's
+  own colour. The inspector's roof **Style** row restyles the same way
+  (`roofStyleChanges()` is shared).
+- A restyle never moves or resizes a room, wall, door or window; it is one
+  undo step, says what changed, and says so when there is nothing to change
+  or nothing built yet.
+- Projects saved before roofs had a style open with their roofs as gables
+  (the parameter's `legacy` value in `projectDocument.ts`) - nothing old
+  changes appearance.
+
+## Coordinates, grid and dimensions
+
+```
+"Set the plot to 30 metres by 40 metres."    "Set the grid spacing to half a metre."
+"Create a 4.5 by 5 metre kitchen at X 8, Y 6."   "Move the room to X 10, Y 8."
+"Move the kitchen two metres to the right."   "Make the kitchen 4.5 metres wide."
+"Turn snapping off."                          "Snap to 0.25 m."
+```
+
+One coordinate system everywhere - the scene, the inspector, the record
+book and the conversation (documented in
+`engine/workspace/workspaceSettings.ts`):
+
+- **X** runs east (+) / west (-), **Y** is up, **Z** runs south (+, the
+  Front view's "front") / north (-). Metres.
+- **Origin** (0, 0, 0): ground level at the world centre - marked in the
+  viewport with the X/Y/Z axes and a "0, 0" ring.
+- **Plan coordinates** are said as X and Y: "at X 8, Y 6" is world x 8,
+  z 6, because the plan's second axis is world Z. Replies answer in the
+  same terms ("moved to X 10, Y 8").
+- A room's position is its centre; its **length** runs along X
+  (east-west), its **width** along Z (north-south).
+
+The **plot** is the site - a real landscape element, so it is saved and
+undoable. Resizing it replaces it and never rescales anything built. The
+**grid** is a view guide over a 200 m workspace, separate from the plot;
+its spacing, **snapping** (on/off and its step), and whether the axes and
+dimension labels show are viewer preferences - remembered per browser
+(`localStorage`, key `iarchitect.workspace`), never in the project or the
+undo history. Change them by voice/text, or in the viewport's **Grid &
+plot** popover beside the Snap button.
+
+Rooms move and resize **with their own walls** whichever way they're
+asked - by conversation, or in the inspector's room rows
+(`ArchitectSession.editRoom`, the same checks: overlap with another room,
+shared walls, 1.5-30 m sides, 2-6 m ceilings). Each change is one undo
+step; a refused one changes nothing and says why. While a room is still
+being planned, "move it 2 m east" or "move it to X 12, Y 8" re-plans its
+centre, and is never taken as the answer to the open question.
+
+Dimension labels (each room's "Kitchen 4.5 × 5 m" on its floor, each
+wall's length above it, the plot's edges) are drawn from the model every
+time it changes - never stored. They keep a readable size at any zoom; a
+wall's label steps aside while it would overlap a room's label or its wall
+is too short on screen to carry it.
+
 ## Known limits
 
 - Single storey; the planner's two-row room grid only.
@@ -87,3 +159,10 @@ houses.
   back/left/right sides (no compass points).
 - Changing a wall's length doesn't move the walls it meets - the reply
   warns that a gap or overlap may result.
+- Coordinates: rooms turned off the plan's axes can't be moved or resized
+  with their walls (the inspector and the conversation both say so).
+  Doors and windows keep their existing inspector rows (offset along the
+  host wall, sizes); walls keep theirs (length, height, thickness).
+- Dimension labels pass through the viewport's filmic tone mapping, so
+  their white backgrounds read slightly grey; many rooms seen from far
+  away can still crowd each other's labels.

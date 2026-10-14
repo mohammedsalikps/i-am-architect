@@ -28,6 +28,7 @@ import { describeRoom, listRooms, resolveRooms } from "./roomModel.ts";
 import { BackendAIProvider } from "../ai/providers/BackendAIProvider.ts";
 import { createMockBackend } from "../ai/e2e/mockBackend.ts";
 import type { MockBackendHandler } from "../ai/e2e/mockBackend.ts";
+import { WorkspaceSettings, WORKSPACE_KEY } from "../workspace/workspaceSettings.ts";
 
 let passed = 0;
 let failed = 0;
@@ -68,7 +69,7 @@ interface Wired {
 }
 
 /** Wires a session the way main.ts does - the shared executor and history, a fresh snapshot per turn, the real AIService (with the offline MockAIProvider) as the fallback. */
-function wire(): Wired {
+function wire(options: { workspace?: WorkspaceSettings } = {}): Wired {
   const context = createProjectContext();
   const service = new AIService({ provider: new MockAIProvider(), commandExecutor: context.commandExecutor, history: context.history, snapshotSource: context });
   const session = new ArchitectSession({
@@ -77,7 +78,8 @@ function wire(): Wired {
     snapshot: () => buildAIProjectSnapshot(context),
     elementParams: (id) => context.elementStore.get(id)?.params,
     undo: () => context.history.undo(),
-    fallback: (instruction, options) => service.submit(instruction, options)
+    fallback: (instruction, submitOptions) => service.submit(instruction, submitOptions),
+    workspace: options.workspace
   });
   return {
     context,
@@ -144,6 +146,20 @@ async function main(): Promise<void> {
       if (stage) assertEqual((parsed as { stage?: string }).stage, stage, `${text} stage`);
     });
   }
+  await check("workspace settings are read only when phrased as settings", () => {
+    const said = (text: string) => JSON.stringify(parseUtterance(text));
+    assertEqual(said("Set the grid spacing to half a metre."), JSON.stringify({ kind: "grid", spacing: 0.5 }), "grid spacing, spoken");
+    assertEqual(said("change the grid to 25 cm"), JSON.stringify({ kind: "grid", spacing: 0.25 }), "grid in centimetres");
+    assertEqual(said("use a 0.5 m grid"), JSON.stringify({ kind: "grid", spacing: 0.5 }), "a 0.5 m grid");
+    assertEqual(said("Turn snapping off."), JSON.stringify({ kind: "snapping", on: false }), "snapping off");
+    assertEqual(said("disable snapping"), JSON.stringify({ kind: "snapping", on: false }), "disable");
+    assertEqual(said("turn on snapping"), JSON.stringify({ kind: "snapping", on: true }), "turn on");
+    assertEqual(said("snap to 0.25 m"), JSON.stringify({ kind: "snapping", on: true, step: 0.25 }), "a snap step");
+    assertEqual(said("snapping every half a metre"), JSON.stringify({ kind: "snapping", on: true, step: 0.5 }), "a spoken snap step");
+    assertTrue(parseUtterance("put the wall on the grid 3 m long").kind !== "grid", "a wall on the grid is about the wall");
+    assertTrue(parseUtterance("snap the window on the wall").kind !== "snapping", "snapping a window to a wall isn't the snap setting");
+    assertTrue(parseUtterance("no, turn snapping off").kind === "snapping", "a setting even after 'no'");
+  });
   await check("coordinates are read as plan points", () => {
     const parsed = parseUtterance("x=5 z=-3");
     assertTrue(parsed.kind === "location" && parsed.location.kind === "point", "point");
@@ -300,7 +316,12 @@ async function main(): Promise<void> {
     const counts = app.count();
     assertEqual(counts.pillars, 4, "pillars");
     assertTrue(counts.walls >= 7, `exterior + interior walls (${counts.walls})`);
-    assertTrue(app.context.wallStore.getAll().every((wall) => wall.material === "brick" && wall.color === "#a0522d"), "every wall in brick, with the library colour");
+    // Every wall is brick; the finish is contemporary - the four exterior walls rendered warm white, the interior walls plastered.
+    const walls = app.context.wallStore.getAll();
+    assertTrue(walls.every((wall) => wall.material === "brick"), "every wall in brick");
+    assertEqual(walls.slice(0, 4).map((wall) => wall.color).join(" "), "#ece8df #ece8df #ece8df #ece8df", "the four exterior walls rendered warm white");
+    assertTrue(walls.slice(4).every((wall) => wall.color === "#e8e4da"), "the interior walls plastered");
+    assertIncludes(r.text, "brick, rendered warm white outside, plastered inside", "and the reply says so");
   });
   await check("“add a window” with no wall selected asks which is meant", async () => {
     app.context.selectionStore.clear();
@@ -1581,6 +1602,308 @@ async function main(): Promise<void> {
     assertTrue(r.applied === true, `the kitchen grows west, away from the shared wall: ${r.text}`);
     const kitchenNow = roomPartsOf(buildAIProjectSnapshot(app.context), kitchen.id)!;
     assertEqual(`${kitchenNow.center.x} east edge ${kitchenNow.center.x + kitchenNow.room.length / 2}`, "-1 east edge 2", "its east side stays on the shared wall");
+  });
+
+  // --- milestone 3: coordinates, grid and dimensions ---
+  console.log("Coordinates, grid and dimensions - by conversation, the inspector and the plot controls");
+
+  /** A browser's localStorage, for the workspace settings - kept in a map. */
+  const memoryStorage = () => {
+    const values = new Map<string, string>();
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        values.set(key, value);
+      },
+      values
+    };
+  };
+  /** Says "Create a 4.5 by 5 metre kitchen at <at>" and answers its questions (ceiling, floor, walls, build it). */
+  const buildKitchen = async (app: Wired, at = "X 8, Y 6"): Promise<string> => {
+    let answer = await app.say(`Create a 4.5 by 5 metre kitchen at ${at}.`);
+    for (const said of ["2.7 m", "ground floor", "brick", "yes"]) answer = await app.say(said);
+    assertTrue(answer.applied === true, `the kitchen is built: ${answer.text}`);
+    return roomsOf(app.context).find((room) => room.label === "Kitchen")!.id;
+  };
+  /** A room as the scene has it: plan centre, plan size, and which of its four walls sit exactly where its own walls belong. */
+  const roomNow = (app: Wired, roomId: string) => {
+    const parts = roomPartsOf(buildAIProjectSnapshot(app.context), roomId)!;
+    return `${parts.center.x},${parts.center.z} ${parts.room.length}x${parts.room.width} own ${Object.keys(parts.own).sort().join(" ")}`;
+  };
+  const inventory = (app: Wired) => {
+    const counts = app.count();
+    return `${counts.sites} plot, ${counts.rooms} room, ${counts.walls} walls`;
+  };
+  const plotsOf = (app: Wired) =>
+    app.context.elementStore
+      .getAll()
+      .filter((element) => element.kind === "landscape")
+      .map((plot) => `${plot.dimensions.length}x${plot.dimensions.width}`)
+      .join(" ");
+
+  await check("the seven milestone phrases drive the real model and the workspace settings, each confirmed in words", async () => {
+    const workspace = new WorkspaceSettings(memoryStorage());
+    const app = wire({ workspace });
+    let answer = await app.say("Set the plot to 30 metres by 40 metres.");
+    assertTrue(answer.applied === true, `the plot is laid out: ${answer.text}`);
+    assertIncludes(answer.text, "30 × 40 m", "and its size is confirmed");
+    const plot = app.context.elementStore.getAll().find((element) => element.kind === "landscape")!;
+    assertEqual(`${plot.dimensions.length} x ${plot.dimensions.width} @ ${plot.position.x},${plot.position.z}`, "30 x 40 @ 0,0", "30 m east-west by 40 m north-south, centred on the origin");
+
+    answer = await app.say("Set the grid spacing to half a metre.");
+    assertEqual(workspace.get().gridSpacing, 0.5, "the grid is now 0.5 m");
+    assertIncludes(answer.text, "Grid spacing: 0.5 m", "and says so");
+    assertTrue(!answer.applied, "a view setting - the model didn't change");
+
+    const kitchen = await buildKitchen(app);
+    assertEqual(roomNow(app, kitchen), "8,6 4.5x5 own back front left right", "the kitchen at X 8, Y 6 (world x 8, z 6), 4.5 m by 5 m, inside its own four walls");
+
+    answer = await app.say("Move the kitchen two metres to the right.");
+    assertIncludes(answer.text, "moved 2 m right", "the move is confirmed");
+    assertEqual(roomNow(app, kitchen), "10,6 4.5x5 own back front left right", "two metres east (+X), walls and all");
+
+    answer = await app.say("Make the kitchen 4.5 metres wide.");
+    assertIncludes(answer.text, "width 5 m → 4.5 m", "the resize is confirmed");
+    assertEqual(roomNow(app, kitchen), "10,6 4.5x4.5 own back front left right", "4.5 m north-south, walls and all");
+
+    answer = await app.say("Move the room to X 10, Y 8.");
+    assertIncludes(answer.text, "moved to X 10, Y 8", "the new position is confirmed in the same X/Y terms");
+    assertEqual(roomNow(app, kitchen), "10,8 4.5x4.5 own back front left right", "the one room resolved; its walls followed");
+
+    answer = await app.say("Turn snapping off.");
+    assertEqual(workspace.get().snapping, false, "snapping is off");
+    assertIncludes(answer.text, "Snapping is off", "and says so");
+    assertEqual(inventory(app), "1 plot, 1 room, 4 walls", "nothing was duplicated along the way");
+    assertIncludes(book(app.context), `${kitchen} 4.5 20.25 @ 10,8`, "the record book agrees: 4.5 m × 4.5 m at X 10, Y 8");
+  });
+
+  await check("a move or a named size said while a room is still being planned changes the plan - never the open question's answer", async () => {
+    const app = wire();
+    let answer = await app.say("Create a 4.5 by 5 metre kitchen at X 8, Y 6.");
+    assertIncludes(answer.text, "ceiling height", "it asks for the ceiling");
+    answer = await app.say("Move the kitchen two metres to the right.");
+    assertIncludes(answer.text, "now centres on X 10, Y 6", "the planned centre moved 2 m east, and it says where");
+    assertIncludes(answer.text, "ceiling height", "and the ceiling is still the open question - 'two metres' wasn't taken as it");
+    answer = await app.say("Make the kitchen 4.5 metres wide.");
+    assertIncludes(answer.text, "ceiling height", "a stated width isn't a ceiling either");
+    answer = await app.say("Move the room to X 12, Y 8.");
+    assertIncludes(answer.text, "now centres on X 12, Y 8", "an absolute move re-plans the centre");
+    for (const said of ["2.7 m", "ground floor", "brick"]) answer = await app.say(said);
+    assertIncludes(answer.text, "4.5 m × 4.5 m", "the confirmation has the stated width");
+    assertIncludes(answer.text, "2.7 m ceiling", "and the ceiling that was actually answered");
+    assertIncludes(answer.text, "(12, 8)", "and the moved centre");
+    await app.say("yes");
+    const kitchen = roomsOf(app.context)[0].id;
+    assertEqual(roomNow(app, kitchen), "12,8 4.5x4.5 own back front left right", "built exactly as confirmed");
+  });
+
+  await check("an edit naming a room that's already built goes to that room, not to the one being planned", async () => {
+    const app = wire();
+    await app.say("Create a 3 m by 3 m bedroom, 2.7 m high, on the ground floor, brick walls, at 0, 0");
+    await app.say("yes");
+    const bedroom = roomsOf(app.context)[0].id;
+    await app.say("Create a 4.5 by 5 metre kitchen at X 8, Y 6.");
+    const answer = await app.say("move the bedroom 1 m south");
+    assertTrue(answer.applied === true, `the bedroom moved: ${answer.text}`);
+    assertEqual(roomNow(app, bedroom), "0,1 3x3 own back front left right", "1 m south (+Z), with its walls");
+    assertEqual(roomsOf(app.context).length, 1, "and no kitchen was built by it");
+  });
+
+  await check("'the room' is the room just built (or selected); with two rooms and no such room it asks which - and changes nothing until answered", async () => {
+    const built = wire();
+    await built.say("Create a 3 m by 3 m bedroom, 2.7 m high, on the ground floor, brick walls, at 0, 0");
+    await built.say("yes");
+    const kitchen = await buildKitchen(built);
+    let answer = await built.say("Move the room to X 10, Y 8.");
+    assertIncludes(answer.text, `Changed ${kitchen} (the kitchen): moved to X 10, Y 8`, "right after building it, 'the room' is the kitchen");
+    built.context.history.undo();
+    const app = reopen(built);
+    const before = book(app.context);
+    answer = await app.say("Move the room to X 10, Y 8.");
+    assertEqual(answer.tone, "question", `reopened, with no room just built or selected, it asks which: ${answer.text}`);
+    assertEqual(book(app.context), before, "nothing moved");
+    answer = await app.say("Kitchen");
+    assertIncludes(answer.text, "moved to X 10, Y 8", `answered, the kitchen moves: ${answer.text}`);
+    assertEqual(roomNow(app, kitchen), "10,8 4.5x5 own back front left right", "walls and all");
+    assertEqual(inventory(app), "0 plot, 2 room, 8 walls", "nothing duplicated");
+  });
+
+  await check("grid and snapping by conversation are validated, never touch the model, and are remembered", async () => {
+    const storage = memoryStorage();
+    const workspace = new WorkspaceSettings(storage);
+    const app = wire({ workspace });
+    let answer = await app.say("set the grid spacing to 0.05 m");
+    assertEqual(answer.tone, "error", `too fine a grid is refused: ${answer.text}`);
+    assertEqual(workspace.get().gridSpacing, 1, "and the grid stays 1 m");
+    answer = await app.say("snap to 0.25 m");
+    assertEqual(`${workspace.get().snapping} ${workspace.get().snapStep}`, "true 0.25", "snapping on, every 0.25 m");
+    assertIncludes(answer.text, "0.25 m", "and it says the step");
+    await app.say("Turn snapping off.");
+    await app.say("set the grid spacing to 0.25 m");
+    assertEqual(app.context.history.canUndo(), false, "none of it reached the undo history");
+    assertEqual(app.count().walls + app.count().rooms + app.count().sites, 0, "or the model");
+    const reopened = new WorkspaceSettings(storage);
+    assertEqual(JSON.stringify(reopened.get()), JSON.stringify({ gridSpacing: 0.25, snapping: false, snapStep: 0.25, showAxes: true, showDimensions: true }), "a reload reads the same settings back");
+    assertTrue(storage.values.has(WORKSPACE_KEY), "saved under the workspace key");
+  });
+
+  await check("the inspector's room edits (editRoom) move and resize a room with its walls, refuse impossible values, and undo in one step each", async () => {
+    const app = wire();
+    const kitchen = await buildKitchen(app);
+    await app.say("Create a 3 m by 3 m bedroom, 2.7 m high, on the ground floor, brick walls, at 0, 0");
+    await app.say("yes");
+    const before = book(app.context);
+    let result = app.session.editRoom(kitchen, { x: 9.5, z: 7.25 });
+    assertTrue(result.ok, `moved: ${result.message}`);
+    assertIncludes(result.message, "moved to X 9.5, Y 7.25", "confirmed in X/Y terms");
+    assertEqual(roomNow(app, kitchen), "9.5,7.25 4.5x5 own back front left right", "the room and its four walls, exactly there");
+    const moved = book(app.context);
+    result = app.session.editRoom(kitchen, { length: 6, width: 4, height: 3 });
+    assertTrue(result.ok, `resized: ${result.message}`);
+    assertEqual(`${roomNow(app, kitchen)} h ${app.context.elementStore.get(kitchen)!.dimensions.height}`, "9.5,7.25 6x4 own back front left right h 3", "length, width and ceiling at once, walls following");
+    const resized = book(app.context);
+    result = app.session.editRoom(kitchen, { width: 0.5 });
+    assertTrue(!result.ok, "a room 0.5 m wide is refused");
+    assertIncludes(result.message, "Nothing was changed", "and says nothing changed");
+    result = app.session.editRoom(kitchen, { x: 0, z: 0 });
+    assertTrue(!result.ok, `onto the bedroom is refused: ${result.message}`);
+    assertEqual(book(app.context), resized, "neither refusal changed anything");
+    app.context.history.undo();
+    assertEqual(book(app.context), moved, "one undo reverses the resize");
+    app.context.history.undo();
+    assertEqual(book(app.context), before, "a second reverses the move");
+    app.context.history.redo();
+    app.context.history.redo();
+    assertEqual(book(app.context), resized, "redo restores both");
+    assertEqual(inventory(app), "0 plot, 2 room, 8 walls", "nothing duplicated");
+  });
+
+  await check("a quarter-turned room's Length row edits the element's own length (its north-south side)", async () => {
+    const app = wire();
+    const kitchen = await buildKitchen(app);
+    // Turn the room record a quarter with its sides swapped - the same footprint, so the same walls are still its own.
+    const element = app.context.elementStore.get(kitchen)!;
+    app.context.commandExecutor.execute({ type: "element.update", id: kitchen, changes: { rotation: Math.PI / 2, dimensions: { ...element.dimensions, length: element.dimensions.width, width: element.dimensions.length } } });
+    assertEqual(roomNow(app, kitchen), "8,6 4.5x5 own back front left right", "the plan footprint is unchanged");
+    const result = app.session.editRoom(kitchen, { length: 6 });
+    assertTrue(result.ok, `resized: ${result.message}`);
+    assertEqual(app.context.elementStore.get(kitchen)!.dimensions.length, 6, "the element's own length is now 6 m");
+    assertEqual(roomNow(app, kitchen).split(" ")[1], "4.5x6", "which runs north-south in the plan");
+  });
+
+  await check("the plot controls (setPlot) resize the plot without rescaling anything built, and a refusal leaves no question pending", async () => {
+    const app = wire();
+    await app.say("Set the plot to 20 metres by 20 metres.");
+    const kitchen = await buildKitchen(app, "X 4, Y 3");
+    const room = roomNow(app, kitchen);
+    let result = app.session.setPlot(30, 40);
+    assertTrue(result.ok, `resized: ${result.message}`);
+    assertIncludes(result.message, "Nothing already built moved or changed size", "and it says the building is untouched");
+    assertEqual(plotsOf(app), "30x40", "one plot, 30 m by 40 m");
+    assertEqual(roomNow(app, kitchen), room, "the kitchen and its walls are exactly where and as big as they were");
+    result = app.session.setPlot(2, 2);
+    assertTrue(!result.ok, `a 2 m plot is refused: ${result.message}`);
+    assertTrue(result.message.includes("The plot is unchanged.") && !result.message.includes("?"), `a button gets a statement, not a question: ${result.message}`);
+    assertEqual(plotsOf(app), "30x40", "the plot is unchanged");
+    const next = await app.say("Move the kitchen 1 m north");
+    assertIncludes(next.text, "moved 1 m north", `the next sentence is an ordinary command, not a plot size: ${next.text}`);
+    app.context.history.undo();
+    app.context.history.undo();
+    assertEqual(plotsOf(app), "20x20", "undo restores the 20 m plot");
+  });
+
+  await check("'move it to X 3, Y 2' puts a selected wall's centre exactly there, in one undo step", async () => {
+    const app = wire();
+    const wallId = addStartupWall(app.context);
+    app.context.selectionStore.select(wallId);
+    const answer = await app.say("move it to X 3, Y 2");
+    assertTrue(answer.applied === true, `moved: ${answer.text}`);
+    assertIncludes(answer.text, "moved to X 3, Y 2", "confirmed in X/Y terms");
+    const wall = app.context.wallStore.get(wallId)!;
+    assertEqual(`${wall.position.x},${wall.position.z} ${wall.dimensions.length}`, "3,2 4", "world x 3, z 2 - the same length");
+    app.context.history.undo();
+    assertEqual(app.context.wallStore.get(wallId)!.position.z, -4, "one undo puts it back");
+  });
+
+  await check("room coordinates survive save and reopen, and the reopened room moves to absolute coordinates with its walls", async () => {
+    const built = wire();
+    await built.say("Set the plot to 30 metres by 40 metres.");
+    const kitchen = await buildKitchen(built);
+    const app = reopen(built);
+    assertEqual(roomNow(app, kitchen), "8,6 4.5x5 own back front left right", "reopened at X 8, Y 6, 4.5 m by 5 m, with its walls");
+    const answer = await app.say("Move the kitchen to X 10, Y 8.");
+    assertIncludes(answer.text, "moved to X 10, Y 8", `moved: ${answer.text}`);
+    assertEqual(roomNow(app, kitchen), "10,8 4.5x5 own back front left right", "walls and all");
+    assertEqual(inventory(app), "1 plot, 1 room, 4 walls", "nothing duplicated");
+  });
+
+  // --- the exterior's look: modern by default, restyled without resizing anything ---
+  console.log("Exterior style - a contemporary default, restyled by conversation without resizing anything");
+
+  /** A 3-bedroom house built to completion through the conversation, brick walls. */
+  const modernHouse = async (): Promise<Wired> => {
+    const app = wire();
+    for (const line of ["Set up a 30 x 20 m site", "Build a house", "3 bedrooms, 12 x 9 m", "Use the site centre", "yes", "Build the rest of the house", "Brick"]) await app.say(line);
+    return app;
+  };
+  /** Every room's and wall's position and size, and every opening's - what a restyle must never change. */
+  const layoutOf = (app: Wired) =>
+    JSON.stringify([
+      ...app.context.wallStore.getAll().map((wall) => [wall.id, wall.position, wall.dimensions]),
+      ...app.context.doorStore.getAll().map((door) => [door.id, door.position, door.dimensions]),
+      ...app.context.windowStore.getAll().map((window) => [window.id, window.position, window.dimensions]),
+      ...roomsOf(app.context).map((room) => [room.id, room.position, room.dimensions])
+    ]);
+  const roofOf = (app: Wired) => {
+    const roof = app.context.elementStore.getAll().find((element) => element.kind === "roof")!;
+    return `${roof.params.style} rise ${roof.dimensions.height} base ${Math.round((roof.position.y - roof.dimensions.height / 2) * 1000) / 1000} ${roof.dimensions.length}x${roof.dimensions.width} ${roof.material}`;
+  };
+  const outsideColours = (app: Wired) => [...new Set(app.context.wallStore.getAll().slice(0, 4).map((wall) => wall.color))].join(" ");
+
+  await check("a generated house is contemporary: a flat roof with a parapet in dark metal, sitting on the walls", async () => {
+    const app = await modernHouse();
+    assertEqual(roofOf(app), "flat rise 0.5 base 2.9 12.6x9.6 metal-roofing", "flat, 0.5 m deep, on the 2.9 m wall tops, the footprint plus its overhang");
+    assertEqual(outsideColours(app), "#ece8df", "outside walls rendered warm white");
+  });
+
+  await check("“keep the dimensions but make the exterior modern / traditional” and “make the roof …” change shape and finish only - one undo each", async () => {
+    const app = await modernHouse();
+    const layout = layoutOf(app);
+    let answer = await app.say("Keep the dimensions but make the exterior modern.");
+    assertEqual(answer.tone, "info", `already modern: ${answer.text}`);
+    assertIncludes(answer.text, "Nothing was changed", "and nothing changed");
+
+    answer = await app.say("make the exterior traditional");
+    assertTrue(answer.applied === true, `restyled: ${answer.text}`);
+    assertIncludes(answer.text, "Every room, wall, door and window kept its size and position", "it says the layout is kept");
+    assertEqual(roofOf(app), "gable rise 1.6 base 2.9 12.6x9.6 clay-roof-tile", "a clay-tile gable on the same walls, the same length and span");
+    assertEqual(outsideColours(app), "#a0522d", "the outside walls back to the brick's own colour");
+    assertEqual(layoutOf(app), layout, "no room, wall, door or window moved or changed size");
+
+    answer = await app.say("make the roof mono-pitch");
+    assertIncludes(answer.text, "mono-pitch", `the roof alone: ${answer.text}`);
+    assertEqual(roofOf(app), "mono-pitch rise 1 base 2.9 12.6x9.6 metal-roofing", "one slope, still on the walls");
+    assertEqual(outsideColours(app), "#a0522d", "the walls untouched by a roof change");
+
+    answer = await app.say("Keep the dimensions but make the exterior modern.");
+    assertTrue(answer.applied === true, `back to modern: ${answer.text}`);
+    assertEqual(`${roofOf(app)} | ${outsideColours(app)}`, "flat rise 0.5 base 2.9 12.6x9.6 metal-roofing | #ece8df", "flat roof, rendered walls");
+    assertEqual(layoutOf(app), layout, "still no room, wall, door or window changed");
+    app.context.history.undo();
+    assertEqual(roofOf(app), "mono-pitch rise 1 base 2.9 12.6x9.6 metal-roofing", "one undo reverses the whole restyle");
+    assertEqual(outsideColours(app), "#a0522d", "walls included");
+  });
+
+  await check("restyling with nothing built says so; building and roof stages aren't mistaken for restyles", async () => {
+    const app = wire();
+    const answer = await app.say("make the exterior modern");
+    assertEqual(answer.tone, "info", `nothing to restyle: ${answer.text}`);
+    assertIncludes(answer.text, "nothing built to restyle", "it says why");
+    assertEqual(parseUtterance("Build a modern house").kind, "house", "a modern house to build is a house request");
+    assertEqual(parseUtterance("Put the roof on").kind, "stage", "the roof stage is still the roof stage");
+    assertEqual(JSON.stringify(parseUtterance("change the roof to a gable roof")), JSON.stringify({ kind: "roof-style", style: "gable" }), "a gable");
+    assertEqual(JSON.stringify(parseUtterance("give it a mono-pitched roof instead")), JSON.stringify({ kind: "roof-style", style: "mono-pitch" }), "mono-pitched isn't read as a gable's pitched");
+    assertEqual(JSON.stringify(parseUtterance("make the house look traditional with a flat roof")), JSON.stringify({ kind: "exterior", style: "traditional", roof: "flat" }), "a look with a roof said too");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

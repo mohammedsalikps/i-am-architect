@@ -1,6 +1,7 @@
 // Explicit .ts extension on this value import lets Node run this file
 // directly (the verify suites and the backend do). Harmless for Vite.
 import { getMaterial } from "../materials/materialLibrary.ts";
+import { ROOF_STYLES } from "./roofStyles.ts";
 import type { MaterialCategory } from "../materials/materialLibrary";
 
 /**
@@ -81,8 +82,9 @@ export interface DimensionSpec {
 }
 
 export type ParamSpec =
-  | { key: string; label: string; kind: "integer"; default: number; min: number; max: number }
-  | { key: string; label: string; kind: "choice"; default: string; options: readonly string[] };
+  /** `legacy`: the value read for a project saved before this parameter existed (projectDocument.ts). */
+  | { key: string; label: string; kind: "integer"; default: number; min: number; max: number; legacy?: number }
+  | { key: string; label: string; kind: "choice"; default: string; options: readonly string[]; legacy?: string };
 
 export interface ElementKindDefinition {
   kind: string;
@@ -165,8 +167,11 @@ export const ELEMENT_KINDS: readonly ElementKindDefinition[] = Object.freeze([
     kind: "roof",
     label: "Roof",
     category: "structure",
-    description: "A pitched gable roof: the ridge runs along its length, the slopes fall across its width.",
+    description:
+      "A roof: flat (a deck with a parapet), mono-pitch (one slope falling across its width) or gable (the ridge along its length). Its style changes only its shape - never its length, span or position.",
     shape: "roof-gable",
+    // Gable by default and for projects saved before roofs had a style - they open exactly as they were.
+    params: [{ key: "style", label: "Style", kind: "choice", default: "gable", options: ROOF_STYLES, legacy: "gable" }],
     dimensions: [dimension("length", "Length", 10.6, 0.5, 0.1), dimension("height", "Rise", 1.6, 0.1, 0.1), dimension("width", "Span", 8.6, 0.5, 0.1)],
     axes: BOX_LWH,
     baseY: 2.9,

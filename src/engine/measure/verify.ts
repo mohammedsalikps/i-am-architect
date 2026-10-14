@@ -69,6 +69,16 @@ check("measuring between a room's inner wall faces gives the clear span, not the
   assertEqual(describeMeasurement(measureBetween(a, b)), "3.77 m east", "the clear span");
 });
 
+check("away from objects a measured point snaps to the workspace's snap step - 0.1 m unless it was changed", () => {
+  const raw = { x: 1.13, z: 2.38 };
+  const byDefault = snapMeasurePoint(raw, [], true);
+  assertEqual(`${byDefault.x},${byDefault.z} ${byDefault.snap}`, "1.1,2.4 grid", "the 0.1 m default");
+  const quarter = snapMeasurePoint(raw, [], true, 0.25);
+  assertEqual(`${quarter.x},${quarter.z} ${quarter.snap}`, "1.25,2.5 grid", "a 0.25 m step");
+  const free = snapMeasurePoint(raw, [], false, 0.25);
+  assertEqual(`${free.x},${free.z} ${free.snap}`, "1.13,2.38 free", "Snap off: exactly where clicked");
+});
+
 console.log(`\n${passed} passed, ${failed} failed.`);
 if (failed > 0) {
   throw new Error(`${failed} measure check(s) failed`);

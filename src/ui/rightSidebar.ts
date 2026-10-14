@@ -21,6 +21,7 @@ import type { DoorStore } from "../engine/door/DoorStore";
 import type { WindowData } from "../engine/window/types";
 import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementData } from "../engine/elements/types";
+import { isRoofStyle, roofStyleChanges } from "../engine/elements/roofStyles";
 import type { ElementStore } from "../engine/elements/ElementStore";
 import { getAssetDefinition } from "../engine/assets/catalog";
 import type { AssetData } from "../engine/assets/types";
@@ -270,8 +271,9 @@ function buildWallPanels(
 
   const rotationDegrees = displayDegrees(wall.rotation);
 
-  const updateWall = (changes: UpdateWallCommand["changes"]): void => {
-    commandExecutor.execute({ type: "wall.update", id: wall.id, changes });
+  // The command's verdict: false (a value the model refuses) puts the field back.
+  const updateWall = (changes: UpdateWallCommand["changes"]): boolean => {
+    return commandExecutor.execute({ type: "wall.update", id: wall.id, changes }).success;
   };
 
   const transform = section("Transform", [
@@ -574,8 +576,9 @@ function buildDoorPanels(
 
   const rotationDegrees = displayDegrees(door.rotation);
 
-  const updateDoor = (changes: UpdateDoorCommand["changes"]): void => {
-    commandExecutor.execute({ type: "door.update", id: door.id, changes });
+  // The command's verdict: false (a value the model refuses) puts the field back.
+  const updateDoor = (changes: UpdateDoorCommand["changes"]): boolean => {
+    return commandExecutor.execute({ type: "door.update", id: door.id, changes }).success;
   };
 
   const transform = section("Transform", [
@@ -650,8 +653,9 @@ function buildWindowPanels(
 
   const rotationDegrees = displayDegrees(windowData.rotation);
 
-  const updateWindow = (changes: UpdateWindowCommand["changes"]): void => {
-    commandExecutor.execute({ type: "window.update", id: windowData.id, changes });
+  // The command's verdict: false (a value the model refuses) puts the field back.
+  const updateWindow = (changes: UpdateWindowCommand["changes"]): boolean => {
+    return commandExecutor.execute({ type: "window.update", id: windowData.id, changes }).success;
   };
 
   const transform = section("Transform", [
@@ -835,6 +839,7 @@ function buildElementPanels(
     allObjects: () => ListedObject[];
     onDuplicateSelected: () => void;
     onDeleteSelected: () => void;
+    onRoomEdit?: RoomEditHandler;
   }
 ): HTMLElement[] {
   const actions = buildActionsRow(context.onDuplicateSelected, context.onDeleteSelected);
@@ -878,14 +883,39 @@ function buildElementPanels(
     );
   }
 
-  panels.push(
-    section("Transform", [
-      numberInputRow("Position X", element.position.x, (value) => update({ position: { ...element.position, x: value } }), { step: 0.1 }),
-      numberInputRow("Position Y", element.position.y, (value) => update({ position: { ...element.position, y: value } }), { step: 0.1 }),
-      numberInputRow("Position Z", element.position.z, (value) => update({ position: { ...element.position, z: value } }), { step: 0.1 }),
-      numberInputRow("Rotation Y", displayDegrees(element.rotation), (value) => update({ rotation: degreesToRadians(value) }), { step: 1 })
-    ])
-  );
+  // A room moves and resizes with its own walls, through the same checks as
+  // "move the kitchen to X 10, Y 8" (ArchitectSession.editRoom): one undo
+  // step, refused - with the reason shown and the field put back - if it
+  // would overlap another room or pull a shared wall.
+  const roomEdit = isRoom(element) ? context.onRoomEdit : undefined;
+  const roomNote = el("p", { className: "relation-note", attrs: { role: "status", "aria-live": "polite" } });
+  const editRoom = (edit: RoomEdit): boolean => {
+    if (!roomEdit) return false;
+    const result = roomEdit(element.id, edit);
+    roomNote.textContent = result.ok ? "" : result.message;
+    return result.ok;
+  };
+  if (roomEdit) {
+    panels.push(
+      section("Position", [
+        numberInputRow("X (east)", element.position.x, (value) => editRoom({ x: value }), { step: 0.1 }),
+        numberInputRow("Z (south · plan Y)", element.position.z, (value) => editRoom({ z: value }), { step: 0.1 }),
+        readOnlyRow("Y (up)", `${Number(element.position.y.toFixed(3))} m`),
+        readOnlyRow("Rotation", `${displayDegrees(element.rotation)}°`),
+        descriptionRow("The room's centre, in metres from 0, 0. A room stays square to the plan so its walls can follow it."),
+        roomNote
+      ])
+    );
+  } else {
+    panels.push(
+      section("Transform", [
+        numberInputRow("Position X", element.position.x, (value) => update({ position: { ...element.position, x: value } }), { step: 0.1 }),
+        numberInputRow("Position Y", element.position.y, (value) => update({ position: { ...element.position, y: value } }), { step: 0.1 }),
+        numberInputRow("Position Z", element.position.z, (value) => update({ position: { ...element.position, z: value } }), { step: 0.1 }),
+        numberInputRow("Rotation Y", displayDegrees(element.rotation), (value) => update({ rotation: degreesToRadians(value) }), { step: 1 })
+      ])
+    );
+  }
 
   if (definition.linear) {
     const { start, end } = linearEnds(element);
@@ -910,7 +940,10 @@ function buildElementPanels(
         numberInputRow(
           spec.label,
           element.dimensions[spec.key],
-          (value) => update({ dimensions: { ...element.dimensions, [spec.key]: value } }),
+          (value) =>
+            roomEdit && (spec.key === "length" || spec.key === "width" || spec.key === "height")
+              ? editRoom({ [spec.key]: value })
+              : update({ dimensions: { ...element.dimensions, [spec.key]: value } }),
           { min: spec.min, step: spec.step }
         )
       )
@@ -922,7 +955,12 @@ function buildElementPanels(
       section(
         "Parameters",
         definition.params.map((spec) =>
-          paramRow(spec, element.params[spec.key], (value) => update({ params: { ...element.params, [spec.key]: value } }))
+          paramRow(spec, element.params[spec.key], (value) =>
+            // A roof's style brings its own height and finish, exactly as "make the roof flat" does.
+            element.kind === "roof" && spec.key === "style" && isRoofStyle(value)
+              ? update(roofStyleChanges(element, value))
+              : update({ params: { ...element.params, [spec.key]: value } })
+          )
         )
       )
     );
@@ -961,9 +999,54 @@ function buildEmptyState(objectCount: number, roomCount: number): HTMLElement {
     stats,
     el("p", {
       className: "sidebar__placeholder",
-      text: "Select an object - in the viewport or the Project hierarchy - to view and edit its properties."
+      text:
+        objectCount === 0
+          ? "Ask the EAVARA Architect to start (“Build a 3-bedroom house”), or pick a tool from the ribbon."
+          : "Select an object - in the viewport or the Project hierarchy - to view and edit its properties."
     })
   ]);
+}
+
+/**
+ * Nothing selected, with something built: the project at a glance - the
+ * plot, the rooms' floor area, the roof's style, each room (a click
+ * selects it) and how many walls, doors and windows there are. Read from
+ * the stores every time, like everything else here.
+ */
+function buildProjectSummary(options: RightSidebarOptions): HTMLElement[] {
+  const elements = options.elementStore.getAll();
+  const rooms = elements.filter(isRoom);
+  const site = elements.find((element) => element.kind === "landscape");
+  const roofs = elements.filter((element) => element.kind === "roof");
+  const floorArea = Math.round(rooms.reduce((sum, room) => sum + roomArea(room), 0) * 100) / 100;
+  const facts: HTMLElement[] = [];
+  if (site) facts.push(readOnlyRow("Plot", `${displayNumber(site.dimensions.length)} × ${displayNumber(site.dimensions.width)} m`));
+  if (rooms.length > 0) facts.push(readOnlyRow("Floor area", `${floorArea.toFixed(2)} m² in ${rooms.length} room${rooms.length === 1 ? "" : "s"}`));
+  if (roofs.length > 0) {
+    const styles = [...new Set(roofs.map((roof) => String(roof.params.style ?? "gable")))];
+    facts.push(readOnlyRow("Roof", styles.map((style) => `${style.charAt(0).toUpperCase()}${style.slice(1)}`).join(", ")));
+  }
+  const counts: [string, number][] = [
+    ["Walls", options.wallStore.getAll().length],
+    ["Doors", options.doorStore.getAll().length],
+    ["Windows", options.windowStore.getAll().length],
+    ["Columns", options.pillarStore.getAll().length],
+    ["Furniture", options.assetStore.getAll().length]
+  ];
+  for (const [label, count] of counts) {
+    if (count > 0) facts.push(readOnlyRow(label, String(count)));
+  }
+  const panels: HTMLElement[] = [];
+  if (facts.length > 0) panels.push(section("Project", facts));
+  if (rooms.length > 0) {
+    const items = rooms.map((room) => {
+      const button = el("button", { className: "room-contents__item", text: `${room.label} — ${roomArea(room).toFixed(2)} m²`, attrs: { type: "button", title: `Select ${room.label}` } });
+      button.addEventListener("click", () => options.selectionStore.select(room.id));
+      return button;
+    });
+    panels.push(section("Rooms", [el("div", { className: "room-contents" }, items)]));
+  }
+  return panels;
 }
 
 export type RightSidebarOptions = {
@@ -979,7 +1062,13 @@ export type RightSidebarOptions = {
   commandExecutor: CommandExecutor;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
+  /** Moves or resizes a room together with its walls (ArchitectSession.editRoom). Without it, a room's rows edit only the room record. */
+  onRoomEdit?: RoomEditHandler;
 };
+
+/** A room's new centre (plan X/Z) and/or size, metres - see ArchitectSession.editRoom. */
+export type RoomEdit = { x?: number; z?: number; length?: number; width?: number; height?: number };
+export type RoomEditHandler = (roomId: string, edit: RoomEdit) => { ok: boolean; message: string };
 
 const MATERIAL_CATEGORY_LABELS: Readonly<Record<string, string>> = {
   generic: "Generic",
@@ -1108,7 +1197,7 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   const panelsFor = (selectedId: string | null): HTMLElement[] => {
     if (!selectedId) {
       const objects = allObjects();
-      return [buildEmptyState(objects.length, objects.filter(isRoom).length)];
+      return [buildEmptyState(objects.length, objects.filter(isRoom).length), ...buildProjectSummary(options)];
     }
     const { commandExecutor, onDuplicateSelected, onDeleteSelected } = options;
     const wall = options.wallStore.get(selectedId);
@@ -1143,7 +1232,8 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
         selectionStore: options.selectionStore,
         allObjects,
         onDuplicateSelected,
-        onDeleteSelected
+        onDeleteSelected,
+        onRoomEdit: options.onRoomEdit
       });
     }
     const asset = options.assetStore.get(selectedId);

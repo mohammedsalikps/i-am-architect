@@ -45,7 +45,7 @@ export function createViewportTools(actions: ViewportToolActions): ViewportTools
   const measure = toolButton(
     ICONS.measure,
     "Measure",
-    "Measure a plan distance: click two points on the ground. Points snap to object ends, corners and centres, or the 0.1 m grid, while Snap is on. Nothing is changed or recorded."
+    "Measure a plan distance: click two points on the ground. Points snap to object ends, corners and centres, or the snap grid (Grid & plot sets its step), while Snap is on. Nothing is changed or recorded."
   );
   const annotate = toolButton(ICONS.annotate, "Annotate", "Annotations aren't available yet", true);
   annotate.classList.add("viewport-tool--unavailable");

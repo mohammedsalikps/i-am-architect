@@ -86,7 +86,7 @@ No flow, pressure, voltage, load, or routing is modeled.
 
 While the viewport's **Snap** toggle is on, drags snap - in order:
 point to point (endpoints, then corners, then centers, within 0.3 m),
-then alignment of edges and centers per axis, then the 0.1 m grid.
+then alignment of edges and centers per axis, then the snap-step grid (0.1 m by default; set in the viewport's Grid & plot popover).
 Deterministic: ties go by distance, point kind, then object id.
 
 - A wall's end snaps onto another wall's end; a pillar onto a wall's

@@ -14,6 +14,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
+import { inflateSync } from "node:zlib";
 
 export const PROFILE_ROOT = join(tmpdir(), "iarchitect-browser-checks");
 const MIN_FREE_BYTES = 500 * 1024 * 1024;
@@ -160,6 +161,53 @@ export async function launch({ name, width = 1440, height = 900, port = 9340, ma
       ws.close();
     }
   };
+}
+
+/** Decodes an 8-bit, non-interlaced RGB(A) PNG - what Page.captureScreenshot returns. */
+export function decodePng(buffer) {
+  let position = 8;
+  let width = 0;
+  let height = 0;
+  let colorType = 6;
+  const idat = [];
+  while (position < buffer.length) {
+    const length = buffer.readUInt32BE(position);
+    const type = buffer.toString("ascii", position + 4, position + 8);
+    const data = buffer.subarray(position + 8, position + 8 + length);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      colorType = data[9];
+    } else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    position += 12 + length;
+  }
+  const bpp = colorType === 6 ? 4 : 3;
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * bpp;
+  const out = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)];
+    for (let x = 0; x < stride; x += 1) {
+      const value = raw[y * (stride + 1) + 1 + x];
+      const left = x >= bpp ? out[y * stride + x - bpp] : 0;
+      const up = y > 0 ? out[(y - 1) * stride + x] : 0;
+      const upLeft = x >= bpp && y > 0 ? out[(y - 1) * stride + x - bpp] : 0;
+      let result = value;
+      if (filter === 1) result = value + left;
+      else if (filter === 2) result = value + up;
+      else if (filter === 3) result = value + ((left + up) >> 1);
+      else if (filter === 4) {
+        const p = left + up - upLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - up);
+        const pc = Math.abs(p - upLeft);
+        result = value + (pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft);
+      }
+      out[y * stride + x] = result & 255;
+    }
+  }
+  return { width, height, bpp, data: out };
 }
 
 /** Runs `checks`, printing PASS/FAIL lines; exits 0 only when every expectation held. */

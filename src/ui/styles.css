@@ -1022,6 +1022,155 @@ button {
   color: var(--color-accent);
 }
 
+/* Grid & plot (ui/workspacePanel.ts): a popover under the Snap row. */
+.workspace-control {
+  position: relative;
+  display: inline-flex;
+}
+
+.workspace-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  width: 270px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.workspace-panel[hidden] {
+  display: none;
+}
+
+.workspace-panel__convention {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.workspace-panel__heading {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-strong);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.workspace-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 4px 0;
+}
+
+.workspace-panel__number,
+.workspace-panel__select {
+  width: 96px;
+  height: 26px;
+  padding: 2px 6px;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-panel__select:disabled {
+  opacity: var(--disabled-opacity);
+}
+
+.workspace-panel__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 4px 0;
+}
+
+.workspace-panel__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.workspace-panel__summary,
+.workspace-panel__note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
+.workspace-panel__note:empty {
+  display: none;
+}
+
+.workspace-panel__note[data-tone="error"] {
+  color: var(--color-danger);
+}
+
+.workspace-panel__note[data-tone="success"] {
+  color: var(--color-success);
+}
+
+/* The orientation gizmo (ui/axisGizmo.ts): X/Y/Z as the camera sees them, bottom-right above the scale bar. */
+.axis-gizmo {
+  position: absolute;
+  right: 12px;
+  bottom: 50px;
+  z-index: 1;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-elevation-1);
+  pointer-events: none;
+}
+
+.axis-gizmo svg {
+  display: block;
+}
+
+/* The scale bar (ui/scaleBar.ts): bottom-right over the scene, true at the view's centre. */
+.scale-bar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.scale-bar[hidden] {
+  display: none;
+}
+
+.scale-bar__bar {
+  height: 6px;
+  border: 2px solid var(--color-text);
+  border-top: none;
+}
+
 /* ---------- View controls (viewport overlay) ---------- */
 
 .view-controls {
@@ -1662,6 +1811,106 @@ button {
 
 .hierarchy-room__name:hover {
   background: var(--color-surface);
+}
+
+/* Two lines: the room's name, then its area and contents. */
+.hierarchy-room__name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.hierarchy-room__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A room's floor area and contents, quietly under its name. */
+.hierarchy-room__meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "Other objects", by type: a collapsible header per group. */
+.hierarchy-group__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hierarchy-group__header:hover {
+  background: var(--color-surface-raised);
+}
+
+.hierarchy-group__chevron {
+  width: 12px;
+  color: var(--color-text-muted);
+  font-size: 10px;
+}
+
+.hierarchy-group__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hierarchy-group__members {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 0 4px 14px;
+}
+
+/* How many objects the room holds - quiet, beside its name. */
+.hierarchy-room__count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* Focus / Isolate: shown on hover, keyboard focus or selection, so names read in full. */
+.hierarchy-room__actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.hierarchy-room__header:hover .hierarchy-room__actions,
+.hierarchy-room__header:focus-within .hierarchy-room__actions,
+.hierarchy-room__header--active .hierarchy-room__actions {
+  display: inline-flex;
+}
+
+@media (hover: none) {
+  .hierarchy-room__actions {
+    display: inline-flex;
+  }
 }
 
 .hierarchy-room__action {
@@ -2940,7 +3189,7 @@ button {
 
 /* The empty state centres in the space beside the panel, not under it. */
 .viewport-area--with-architect .empty-state {
-  padding-left: 384px;
+  padding-left: 376px;
 }
 
 @media (max-width: 1023px) {
@@ -3144,7 +3393,7 @@ button {
 .architect {
   bottom: auto;
   max-height: calc(100% - 24px);
-  width: 380px;
+  width: 352px;
   min-width: 300px;
   max-width: calc(100% - 24px);
   min-height: 0;
@@ -3154,22 +3403,26 @@ button {
 
 .architect__log {
   flex: 1 1 auto;
-  min-height: 80px;
+  /* Small enough that the composer always fits a short laptop viewport (1280 x 800). */
+  min-height: 56px;
 }
 
 .architect__composer {
   flex-wrap: wrap;
+  gap: 5px;
 }
 
+/* First line: the instruction and Send, side by side; the tools on one line beneath. */
 .architect__input {
-  flex: 1 1 100%;
-  order: -1;
+  flex: 1 1 calc(100% - 96px);
+  box-sizing: border-box;
+  order: -2;
   padding: 9px 12px;
   font-size: 13px;
 }
 
 .architect__send {
-  margin-left: auto;
+  order: -1;
   min-height: 32px;
 }
 
@@ -3352,6 +3605,7 @@ button {
 
 /* The copilot's optional parts really disappear when hidden (their own display rules would otherwise win). */
 .copilot__status[hidden],
+.copilot__steps[hidden],
 .copilot__level[hidden],
 .copilot__transcript[hidden],
 .copilot__stop[hidden] {
@@ -3365,7 +3619,7 @@ button {
    laptop included) - the panel moves below the controls instead. */
 @media (max-width: 1420px) {
   .architect {
-    width: 320px;
+    width: 336px;
     min-width: 260px;
     /* Below the view controls, never over them. */
     top: 84px;
@@ -3508,7 +3762,7 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 0 8px;
+  padding: 0 6px;
   color: var(--color-text);
   font-size: var(--font-size-sm);
 }

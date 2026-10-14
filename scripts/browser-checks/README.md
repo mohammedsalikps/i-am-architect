@@ -32,6 +32,7 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
    node scripts/browser-checks/voice-simulated.mjs
    node scripts/browser-checks/plumbing.mjs
    node scripts/browser-checks/workspace.mjs
+   node scripts/browser-checks/coordinates.mjs
    ```
 
    `WIN=1280x800` (or `1024x768`) changes the window size; an optional first argument is a folder for screenshots (default: `<temp>/iarchitect-browser-checks/shots`).
@@ -56,6 +57,17 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - text on each region meets 4.5:1 contrast in both themes
 - the choice is saved, and after a reload the page is already dark when `<body>` is created (before the first paint and before the app starts)
 - at 1280, 1366, 1440 and 1920 px the AI panel covers neither the view controls, the inspector nor the bottom panel
+
+**`coordinates.mjs`** (milestone 3) blocks every hosted backend like `workspace.mjs` and uses a throwaway account on the local mock backend. It checks:
+- the defaults: "Snap: 0.1 m" on the Snap button, Snap 0.1 m and Grid 1 m in the status bar, a scale bar with a round length that grows when the view zooms out
+- the X/Y/Z axes and origin marker in the rendered pixels (hiding them in Grid & plot changes the view)
+- "Set the plot to 30 metres by 40 metres." and "Set the grid spacing to half a metre." by conversation; the popover's plot fields and grid select follow; choosing a 0.25 m snap step in the popover updates the Snap button and status bar
+- "Create a 4.5 by 5 metre kitchen at X 8, Y 6." (answering its questions): the record book and the inspector (X 8, Z 6, 4.5 × 5 m, 2.7 m ceiling; rotation and height read-only)
+- an inspector move (X 9.5) taking all four of the kitchen's walls with it; an impossible width refused with its reason, the field put back, nothing changed; top-bar Undo and Redo
+- "Move the kitchen two metres to the right.", "Make the kitchen 4.5 metres wide.", "Move the room to X 10, Y 8." and "Turn snapping off." - each applied and confirmed, nothing duplicated, inspector in agreement
+- the dimension labels in the rendered pixels in the light and dark themes, with the summary unchanged and the model untouched by the switch
+- the popover's 30 × 40 m preset and a refused 2 m plot, the kitchen untouched
+- save, reload (workspace settings kept: Snap Off, Grid 0.5 m) and reopen: the record book identical, the labels back, and the reopened kitchen moving to X 12, Y 8 with its walls
 
 **`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. Its stand-in recogniser behaves like Chrome's continuous mode: a session never ends by itself, so the app's own end-of-turn pause is what is tested. It checks:
 - hands-free speaking with the mic closed by default (interrupting by speaking is opt-in); turning it on in ⚙ Voice (saved), then speaking with the mic held open (recognition continuous, in English (India)), and barge-in with the mic button

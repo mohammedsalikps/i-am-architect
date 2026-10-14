@@ -35,6 +35,10 @@ import { searchProjectItems } from "./projectSearch.ts";
 import { THEME_STORAGE_KEY, createThemeStore, readSavedTheme, themeToggleLabel } from "./theme.ts";
 import type { Theme } from "./theme.ts";
 import { SCENE_PALETTES } from "../scene/sceneTheme.ts";
+import { DEFAULT_WORKSPACE, WORKSPACE_KEY, WorkspaceSettings, formatSpacing, readWorkspace } from "../engine/workspace/workspaceSettings.ts";
+import { dimensionSummary, formatLength, plotEdgeText, roomDimensionText, wallDimensionText } from "../engine/workspace/dimensions.ts";
+import { metresPerPixelAt, scaleBarFor } from "../engine/workspace/scaleBar.ts";
+import { GROUND_SIZE, MAJOR_GRID_SPACING, minorGrid } from "../scene/ground.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -1065,6 +1069,113 @@ function run(): void {
     const quiet = createHandsFree({ speech: fakeSpeech().output, listener: fakeListener().listener, bargeIn: () => false, onStatus: () => undefined });
     quiet.enableWith(reply);
     assertEqual(quiet.heardWhileSpeaking("make it four point five metres wide"), false, "with barge-in off, only the mic button or Stop interrupts");
+  });
+
+  // --- Milestone 3: coordinates, grid and dimensions ---
+  check("workspace settings: defaults, validated, saved and read back - anything odd falls back field by field", () => {
+    const saved = new Map<string, string>();
+    const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => void saved.set(key, value) };
+    assertEqual(JSON.stringify(readWorkspace(null)), JSON.stringify(DEFAULT_WORKSPACE), "no storage: the defaults");
+    assertEqual(JSON.stringify(DEFAULT_WORKSPACE), JSON.stringify({ gridSpacing: 1, snapping: true, snapStep: 0.1, showAxes: true, showDimensions: true }), "1 m grid, snapping on every 0.1 m, axes and dimensions shown");
+    const settings = new WorkspaceSettings(storage);
+    const seen: number[] = [];
+    settings.subscribe((state) => seen.push(state.gridSpacing));
+    assertEqual(settings.setGridSpacing(0.5), null, "0.5 m is a valid grid");
+    assertTrue(settings.setGridSpacing(0.05) !== null && settings.setGridSpacing(Number.NaN) !== null && settings.setGridSpacing(50) !== null, "too fine, not a number, or too coarse: refused with a reason");
+    assertEqual(settings.get().gridSpacing, 0.5, "a refused value changes nothing");
+    settings.setGridSpacing(0.5);
+    assertEqual(seen.join(" "), "1 0.5", "told now, then once per real change - never for a repeat");
+    assertTrue(settings.setSnapStep(0) !== null, "a zero snap step is refused");
+    assertEqual(settings.setSnapStep(0.25), null, "0.25 m is a valid step");
+    settings.setSnapping(false);
+    settings.setShowAxes(false);
+    assertEqual(saved.get(WORKSPACE_KEY), JSON.stringify({ gridSpacing: 0.5, snapping: false, snapStep: 0.25, showAxes: false, showDimensions: true }), "saved as it changes");
+    assertEqual(JSON.stringify(new WorkspaceSettings(storage).get()), saved.get(WORKSPACE_KEY), "a reload reads it back");
+    saved.set(WORKSPACE_KEY, JSON.stringify({ gridSpacing: -1, snapping: "yes", snapStep: 99, showAxes: false }));
+    assertEqual(JSON.stringify(readWorkspace(storage)), JSON.stringify({ ...DEFAULT_WORKSPACE, showAxes: false }), "each invalid field falls back; the valid one is kept");
+    saved.set(WORKSPACE_KEY, "{not json");
+    assertEqual(JSON.stringify(readWorkspace(storage)), JSON.stringify(DEFAULT_WORKSPACE), "unreadable: the defaults");
+    const refusing = new WorkspaceSettings({ getItem: () => null, setItem: () => { throw new Error("quota"); } });
+    refusing.setGridSpacing(0.25);
+    assertEqual(refusing.get().gridSpacing, 0.25, "storage that refuses to save: the change still applies");
+    assertEqual(`${formatSpacing(0.5)} ${formatSpacing(0.25)} ${formatSpacing(1)}`, "0.5 m 0.25 m 1 m", "spacings read as metres");
+  });
+
+  check("dimension labels: one rounding rule (1 cm, trailing zeros dropped), length east-west by width north-south", () => {
+    assertEqual(`${formatLength(4.5)} | ${formatLength(4.7349)} | ${formatLength(3)} | ${formatLength(0.005)}`, "4.5 m | 4.73 m | 3 m | 0.01 m", "metres to the centimetre");
+    assertEqual(roomDimensionText("Kitchen", 4.5, 5), "Kitchen 4.5 × 5 m", "a room: name, length × width");
+    assertEqual(roomDimensionText(undefined, 3.333, 4), "3.33 × 4 m", "unnamed: the size alone");
+    assertEqual(`${wallDimensionText(4.73)} ${plotEdgeText(30)}`, "4.73 m 30 m", "walls and plot edges the same way");
+    assertEqual(dimensionSummary(1, 4), "Dimensions shown: 1 room, 4 walls.", "the summary counts what is labelled");
+    assertEqual(dimensionSummary(2, 1), "Dimensions shown: 2 rooms, 1 wall.", "singular and plural");
+    assertEqual(dimensionSummary(0, 0), "No dimensions to show.", "nothing to label");
+    assertEqual(
+      dimensionSummary(0, 0, { rooms: 6, walls: 9 }),
+      "No dimensions shown. 6 rooms and 9 walls are under the roof - hide the roof to label them.",
+      "a roofed house: what's under the roof, and how to see it"
+    );
+    assertEqual(dimensionSummary(1, 4, { rooms: 0, walls: 0 }), "Dimensions shown: 1 room, 4 walls.", "nothing covered: as before");
+  });
+
+  check("scale bar: the longest 1-2-5 length that fits, drawn to the zoom at the view's centre", () => {
+    const bar = scaleBarFor(0.05, 120)!;
+    assertEqual(`${bar.label} ${bar.pixels}`, "5 m 100", "6 m fit in 120 px at 5 cm a pixel: a 5 m bar, 100 px long");
+    assertEqual(scaleBarFor(0.001, 120)!.label, "0.1 m", "zoomed right in: 0.1 m");
+    assertEqual(scaleBarFor(0.004, 120)!.label, "0.2 m", "0.48 m fit: 0.2 m (never 0.5)");
+    assertEqual(scaleBarFor(1, 120)!.label, "100 m", "zoomed right out: 100 m");
+    assertTrue(scaleBarFor(0, 120) === null && scaleBarFor(Number.NaN, 120) === null && scaleBarFor(-1, 120) === null, "no zoom to measure: no bar");
+    const perPixel = metresPerPixelAt(10, 45, 800);
+    assertTrue(Math.abs(perPixel - (2 * 10 * Math.tan(Math.PI / 8)) / 800) < 1e-12, "10 m away with a 45° view 800 px tall: the visible height over the pixels");
+    assertTrue(Number.isNaN(metresPerPixelAt(0, 45, 800)) && Number.isNaN(metresPerPixelAt(10, 45, 0)), "a degenerate view has no scale");
+  });
+
+  check("the workspace grid keeps a line on every multiple of any allowed spacing, the origin included", () => {
+    for (const spacing of [0.1, 0.25, 0.3, 0.5, 0.75, 1, 2, 5, 7, 10]) {
+      const { size, divisions } = minorGrid(spacing);
+      assertTrue(divisions % 2 === 0, `${spacing} m: an even number of cells, so a line runs through 0, 0`);
+      assertTrue(Math.abs(size / divisions - spacing) < 1e-9, `${spacing} m: each cell exactly ${spacing} m (got ${size / divisions})`);
+      assertTrue(size >= 20 && size <= GROUND_SIZE, `${spacing} m: drawn over ${size} m - within the ground`);
+    }
+    assertEqual(MAJOR_GRID_SPACING, 5, "major lines every 5 m");
+  });
+
+  check("the axes, origin, plot and labels have their own colours in each theme", () => {
+    const { light, dark } = SCENE_PALETTES;
+    for (const palette of [light, dark]) {
+      assertTrue([palette.axisX, palette.axisY, palette.axisZ, palette.origin, palette.plot].every((color) => typeof color === "number"), "every guide colour is set");
+      assertTrue(new Set([palette.axisX, palette.axisY, palette.axisZ]).size === 3, "the three axes are told apart by colour");
+      assertTrue(palette.labelText !== palette.labelBackground, "label text stands out from its background");
+    }
+    assertTrue(light.axisX !== dark.axisX && light.origin !== dark.origin && light.labelBackground !== dark.labelBackground && light.labelText !== dark.labelText, "and they change with the theme");
+  });
+
+  check("one coordinate convention everywhere: X east, Y up, Z south (the plan's Y)", () => {
+    const overlay = sourceOf("../scene/coordinateOverlay.ts");
+    assertTrue(/x: "X {2}east"/.test(overlay) && /y: "Y {2}up"/.test(overlay) && /z: "Z {2}south \(plan Y\)"/.test(overlay), "the axis labels drawn in the scene");
+    assertTrue(/X runs east, Z south \(the plan's Y\), Y up\. 0, 0 is the world centre\. Metres\./.test(sourceOf("./workspacePanel.ts")), "the Grid & plot popover states it");
+    assertTrue(/"X \(east\)"/.test(sourceOf("./rightSidebar.ts")) && /"Z \(south · plan Y\)"/.test(sourceOf("./rightSidebar.ts")), "the inspector's room position rows name the same axes");
+    assertTrue(/world x 10, z 8 \(the plan's Y is the world Z axis\)/.test(sourceOf("../engine/architect/adjust.ts")), "and the conversation's 'to X 10, Y 8' means world x 10, z 8");
+  });
+
+  check("main.ts wires one workspace: snapping both ways, the scene, the status bar, the popover, the inspector and the conversation", () => {
+    assertTrue(/const workspace = new WorkspaceSettings\(sessionStore\(\)\);/.test(mainSource), "one settings object, remembered per browser");
+    assertTrue(/fallback: submitArchitectFallback,\s*workspace\s*}\);/.test(mainSource), "the conversation changes it");
+    assertTrue(/snapSettings\.setStep\(state\.snapStep\);\s*snapSettings\.setEnabled\(state\.snapping\);/.test(mainSource) && /snapSettings\.subscribe\(\(enabled\) => workspace\.setSnapping\(enabled\)\);/.test(mainSource), "SnapSettings and the workspace kept in step both ways");
+    assertTrue(/workspace\.subscribe\(\(state\) => sceneManager\.current\?\.setWorkspace\(state\)\);/.test(mainSource), "the scene follows it (grid, axes, labels)");
+    assertTrue(/onRoomEdit: \(roomId, edit\) => architect\.editRoom\(roomId, edit\)/.test(mainSource), "the inspector's room rows go through editRoom");
+    assertTrue(/onSetPlot: \(length, width\) => architect\.setPlot\(length, width\)/.test(mainSource), "the plot controls go through setPlot");
+    assertTrue(/snapStep: \(\) => snapSettings\.getStep\(\)/.test(mainSource), "the Measure tool snaps to the same step");
+    assertTrue(/workspace: options\.workspace/.test(layoutSource) && /`Snap: \$\{step\}`/.test(layoutSource), "the status bar and the Snap button show the live step");
+  });
+
+  check("the Grid & plot popover and the scale bar use theme tokens only", () => {
+    const css = sourceOf("./styles.css");
+    for (const selector of [".workspace-panel {", ".scale-bar {", ".scale-bar__bar {"]) {
+      const start = css.indexOf(`\n${selector}`);
+      assertTrue(start >= 0, `${selector} is styled`);
+      const body = css.slice(start, css.indexOf("}", start));
+      assertTrue(!/#[0-9a-f]{3,8}\b|rgba?\(/i.test(body), `${selector} has no hard-coded colour`);
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

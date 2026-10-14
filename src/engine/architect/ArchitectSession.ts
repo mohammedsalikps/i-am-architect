@@ -1,5 +1,8 @@
 // Explicit .ts extensions on value imports let Node run this file directly
 // (engine/architect/verify.ts does). Harmless for Vite.
+import { formatSpacing } from "../workspace/workspaceSettings.ts";
+import type { WorkspaceControls } from "../workspace/workspaceSettings.ts";
+import type { Adjustment } from "./adjust.ts";
 import { executeCommandBatch } from "../commands/executeCommandBatch.ts";
 import { resolveCommandReferences } from "../ai/referenceResolution.ts";
 import { resolveJoints } from "../plumbing/fittings.ts";
@@ -27,7 +30,10 @@ import { planFurnishingsInScene } from "./interiors.ts";
 import { parseUtterance } from "./parseUtterance.ts";
 import { addOpeningToRoom, furnishRooms, moveOpening, relocateOpening, setWallLength, showRoom } from "./roomEdits.ts";
 import type { PendingOption, RoomEditContext, RoomEditResult } from "./roomEdits.ts";
-import { listRooms } from "./roomModel.ts";
+import { describeRoom, listRooms, resolveRooms } from "./roomModel.ts";
+import { EXTERIOR_ROOF, PLASTER_FINISH, RENDER_WHITE, ROOF_FINISH, ROOF_RISE, ROOF_STYLE_TEXT, roofStyleChanges } from "../elements/roofStyles.ts";
+import type { ExteriorStyle, RoofStyle } from "../elements/roofStyles.ts";
+import { getMaterial } from "../materials/materialLibrary.ts";
 import {
   describeWall,
   fmtMeters,
@@ -167,6 +173,8 @@ export interface ArchitectSessionOptions {
   history?: HistoryGroupLike;
   /** A fresh read-only snapshot of the model (buildAIProjectSnapshot). */
   snapshot: () => AIProjectSnapshot;
+  /** The workspace view settings (grid spacing, snapping) - "set the grid spacing to half a metre", "turn snapping off". Never the model. */
+  workspace?: WorkspaceControls;
   /** An element's params (the snapshot doesn't carry them) - a water pipe's hot/cold System, so a run never joins hot to cold. */
   elementParams?: (id: string) => Readonly<Record<string, unknown>> | undefined;
   /** The app's Undo. */
@@ -574,6 +582,14 @@ export class ArchitectSession {
         return this.continueWall(readWallDraft(u.text));
       case "adjust":
         return u.room ? this.adjustThatRoom(u.text) : this.adjustElement(u.text);
+      case "exterior":
+        return this.restyleExterior(u.style, u.roof);
+      case "roof-style":
+        return this.restyleRoof(u.style);
+      case "grid":
+        return this.setGridSpacing(u.spacing);
+      case "snapping":
+        return this.setSnapping(u.on, u.step);
       case "build-room":
         return this.startRoom(u.text);
       case "pipe-run":
@@ -607,11 +623,12 @@ export class ArchitectSession {
     );
   }
 
-  private defineSite(size: HouseFootprint, at: PlanPoint | undefined): ArchitectReply {
+  /** `converse`: false from the workspace's plot controls - the plot is laid out, but a house request is only ever continued in the conversation. */
+  private defineSite(size: HouseFootprint, at: PlanPoint | undefined, converse = true): ArchitectReply {
     const { min, max } = SITE_LIMITS;
     if (size.length < min || size.length > max || size.width < min || size.width > max) {
       this.pending = { kind: "site-size" };
-      return reply(`A site of ${fmtSize(size)} is outside what I can lay out — each side must be ${min}–${max} m. What size is it?`, "error");
+      return reply(`A site of ${fmtSize(size)} is outside what I can lay out — each side must be ${min}–${max} m.${converse ? " What size is it?" : " The plot is unchanged."}`, "error");
     }
     const exists = this.existence();
     const previous = this.activeSite(exists);
@@ -638,13 +655,15 @@ export class ArchitectSession {
     }
     this.site = { id: siteId, length: size.length, width: size.width, center };
 
-    const next = this.request
+    const next = !converse
+      ? "Nothing already built moved or changed size."
+      : this.request
       ? this.location
         ? "Let me re-check the house against it."
         : "Now, where on it should the house go?"
       : "Next, where should the house go? Click a spot on the site, or give coordinates like “at 4, -2”.";
     const text = `${previous ? "Site resized" : "Site set"}: ${fmtSize(size)}, centred at ${fmtPoint(center)} — the green area in the viewport. ${next}`;
-    if (this.request && this.location && !this.started(this.existence())) {
+    if (converse && this.request && this.location && !this.started(this.existence())) {
       const continued = this.advance();
       return { ...continued, text: `${text}\n\n${continued.text}`, focusIds: continued.focusIds ?? [siteId] };
     }
@@ -1113,11 +1132,16 @@ export class ArchitectSession {
         commands = foundationStageCommands(layout);
         break;
       case "structure": {
-        // Every wall in the chosen material, with its library colour; the planned thickness is kept.
+        // Every wall in the chosen material; the planned thickness is kept. A contemporary
+        // finish: the four exterior walls (structureStageCommands' first four) rendered warm
+        // white, the interior walls plastered. Only the colour - the material itself stays.
         const material = wallMaterial(this.houseWallMaterial ?? undefined);
-        commands = structureStageCommands(layout).map((command) =>
-          command.type === "wall.add" && material ? { ...command, wall: { ...command.wall, material: material.id, color: material.color } } : command
-        );
+        let wallIndex = 0;
+        commands = structureStageCommands(layout).map((command) => {
+          if (command.type !== "wall.add" || !material) return command;
+          const exterior = wallIndex++ < 4;
+          return { ...command, wall: { ...command.wall, material: material.id, color: exterior ? RENDER_WHITE : PLASTER_FINISH } };
+        });
         break;
       }
       case "openings": {
@@ -1149,13 +1173,13 @@ export class ArchitectSession {
     const { footprint, interiorWalls, rooms } = layout;
     const lines: Record<typeof stage, string> = {
       foundation: `Foundation laid — a ${fmtSize(footprint)} floor slab, 0.2 m thick.`,
-      structure: `Walls & columns up — 4 exterior walls, ${plural(interiorWalls.length, "interior wall")} and 4 corner columns, 2.7 m high.`,
+      structure: `Walls & columns up — 4 exterior walls${this.houseWallMaterial ? ` (${wallMaterial(this.houseWallMaterial)?.label.toLowerCase() ?? this.houseWallMaterial}, rendered warm white outside, plastered inside)` : ""}, ${plural(interiorWalls.length, "interior wall")} and 4 corner columns, 2.7 m high.`,
       openings: `Doors & windows in — ${plural(commands.filter((c) => (c as { type: string }).type === "door.add").length, "door")} and ${plural(
         commands.filter((c) => (c as { type: string }).type === "window.add").length,
         "window"
       )}, each cut into its wall${skippedNote}.`,
       rooms: `Rooms marked — ${list(rooms.map((room) => room.name))}.`,
-      roof: "Roof on — a pitched gable roof with a 0.3 m eave all round."
+      roof: `Roof on — ${ROOF_STYLE_TEXT.flat}, with a 0.3 m overhang all round. (“Make the roof gable” or “make the exterior traditional” changes its shape, never its size.)`
     };
     return { ok: true, line: lines[stage], ids };
   }
@@ -1310,7 +1334,10 @@ export class ArchitectSession {
     const changes: { position?: { x: number; z: number }; dimensions?: Record<string, number>; material?: string; color?: string } = {};
     const said: string[] = [];
     for (const adjustment of adjustments) {
-      if (adjustment.kind === "move") {
+      if (adjustment.kind === "move-to") {
+        changes.position = { x: adjustment.x, z: adjustment.z };
+        said.push(`moved to X ${fmt(adjustment.x)}, Y ${fmt(adjustment.z)}: centre (${fmt(object.position.x)}, ${fmt(object.position.z)}) → (${fmt(adjustment.x)}, ${fmt(adjustment.z)})`);
+      } else if (adjustment.kind === "move") {
         const x = Math.round((object.position.x + adjustment.dx) * 1000) / 1000;
         const z = Math.round((object.position.z + adjustment.dz) * 1000) / 1000;
         changes.position = { x, z };
@@ -1536,11 +1563,22 @@ export class ArchitectSession {
       const side = readRoomSide(text);
       if (side && draft.placement?.kind === "beside") return this.continueRoom({ ...draft, placement: { ...draft.placement, side } });
     }
-    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "build-room", "pipe-run", "next"].includes(u.kind)) {
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "build-room", "pipe-run", "grid", "snapping", "exterior", "roof-style", "next"].includes(u.kind)) {
       return null;
     }
+    // An edit naming a room that's already built ("move the bedroom 2 m east"
+    // while a kitchen is being planned) is about that room, not this draft.
+    const named = resolveRooms(rooms, text);
+    const draftName = draft.name?.toLowerCase();
+    const edit = readAdjustments(text).some((adjustment) => adjustment.kind !== "ambiguous-size");
+    if (edit && named.kind !== "none" && named.kind !== "unknown" && !(named.kind === "found" && named.rooms.some((room) => room.name.toLowerCase() === draftName))) return null;
     const corrected = this.roomCorrection(draft, slot, text);
-    if (Object.keys(corrected).length > 0) return this.continueRoom({ ...draft, ...corrected });
+    if (Object.keys(corrected).length > 0) {
+      const next = this.continueRoom({ ...draft, ...corrected });
+      // Moved while a question is open: say where it now goes before asking again.
+      const placed = corrected.placement && slot !== "placement" && slot !== "confirm" ? this.roomCenter({ ...draft, ...corrected }) : null;
+      return placed && "center" in placed ? { ...next, text: `The planned ${(draft.name ?? "room").toLowerCase()} now centres on X ${fmt(placed.center.x)}, Y ${fmt(placed.center.z)}. ${next.text}` } : next;
+    }
     // A size with no dimension word: ask which one rather than guess.
     const size = readAdjustments(`make it ${text}`).find((adjustment) => adjustment.kind === "ambiguous-size");
     if (size && size.kind === "ambiguous-size" && (slot === "confirm" || slot === "side")) {
@@ -1570,18 +1608,30 @@ export class ArchitectSession {
     const rooms = this.roomsNow();
     const stated = readRoomDraft(text, rooms);
     const { unknownNeighbour: _unknown, otherFloor: _other, ...values } = stated;
-    const answer = slot === "confirm" || slot === "side" ? undefined : readRoomSlotAnswer(slot, text, rooms);
+    // A move or a size named for another dimension isn't the answer to this
+    // question: "move it two metres east" is no ceiling height, and "4.5 m
+    // wide" no length.
+    const adjustments = readAdjustments(text);
+    const aside =
+      adjustments.some((adjustment) => adjustment.kind === "move" || adjustment.kind === "move-to" || (adjustment.kind === "resize" && adjustment.dimension !== slot)) ||
+      (["length", "width", "height"] as const).some((key) => key !== slot && values[key] !== undefined);
+    const answer = slot === "confirm" || slot === "side" || aside ? undefined : readRoomSlotAnswer(slot, text, rooms);
     const changes: Partial<RoomDraft> = {};
     for (const [key, value] of Object.entries({ ...values, ...answer })) {
       if (value !== undefined && JSON.stringify((draft as Record<string, unknown>)[key]) !== JSON.stringify(value)) (changes as Record<string, unknown>)[key] = value;
     }
     // "Move it 2 m east" before it's built: shift the planned centre.
-    const move = readAdjustments(text).find((adjustment) => adjustment.kind === "move");
+    const move = adjustments.find((adjustment) => adjustment.kind === "move");
     if (move && move.kind === "move" && !changes.placement) {
       const placed = this.roomCenter(draft);
       if ("center" in placed) {
         changes.placement = { kind: "location", location: { kind: "point", point: { x: Math.round((placed.center.x + move.dx) * 1000) / 1000, z: Math.round((placed.center.z + move.dz) * 1000) / 1000 } } };
       }
+    }
+    // "Move it to X 10, Y 8": a new planned centre (plan Y is world Z).
+    const moveTo = adjustments.find((adjustment) => adjustment.kind === "move-to");
+    if (moveTo && moveTo.kind === "move-to" && !changes.placement) {
+      changes.placement = { kind: "location", location: { kind: "point", point: { x: moveTo.x, z: moveTo.z } } };
     }
     return changes;
   }
@@ -1633,6 +1683,162 @@ export class ArchitectSession {
    * a room named by its name (not "it"). Null when the words don't name
    * exactly one room to move or resize - the AI fallback gets them.
    */
+  /**
+   * The workspace's plot controls (ui/workspacePanel.ts): lays out or
+   * resizes the plot - the site - exactly as "set the plot to 30 by 40
+   * metres" does (same limits, one undo step, buildings never rescaled),
+   * without continuing a house request from a button. A refused size
+   * leaves no question pending in the conversation.
+   */
+  setPlot(length: number, width: number): { ok: boolean; message: string } {
+    const pending = this.pending;
+    const result = this.defineSite({ length, width }, undefined, false);
+    if (result.tone === "error") this.pending = pending;
+    this.emit();
+    return { ok: result.tone !== "error", message: result.text };
+  }
+
+  /**
+   * The inspector's room edit: a new centre and/or size, in the room
+   * element's own terms (its Length and Width rows), applied exactly as a
+   * spoken edit - its own walls with it, one undo step, refused with the
+   * reason if it would move a wall it shares or overlap something.
+   */
+  editRoom(roomId: string, edit: { x?: number; z?: number; length?: number; width?: number; height?: number }): { ok: boolean; message: string } {
+    const parts = roomPartsOf(this.options.snapshot(), roomId);
+    if (!parts) return { ok: false, message: `${roomId} is turned at an angle, and only rooms square to the plan can be edited with their walls. Nothing was changed.` };
+    const adjustments: Adjustment[] = [];
+    if (edit.x !== undefined || edit.z !== undefined) adjustments.push({ kind: "move-to", x: edit.x ?? parts.center.x, z: edit.z ?? parts.center.z });
+    // Turned a quarter, the element's own length runs north-south: its Length row is the room's width.
+    const along = (key: "length" | "width"): "length" | "width" => (parts.swapped ? (key === "length" ? "width" : "length") : key);
+    if (edit.length !== undefined) adjustments.push({ kind: "resize", dimension: along("length"), value: edit.length });
+    if (edit.width !== undefined) adjustments.push({ kind: "resize", dimension: along("width"), value: edit.width });
+    if (edit.height !== undefined) adjustments.push({ kind: "resize", dimension: "height", value: edit.height });
+    if (adjustments.length === 0) return { ok: true, message: "Nothing to change." };
+    const result = this.adjustRoom(roomId, "", adjustments);
+    this.emit();
+    return { ok: result.tone === "success", message: result.text };
+  }
+
+  // --- the exterior's look (never a size) ---
+
+  /** The roofs in the scene now. */
+  private roofsNow(): AIContextObject[] {
+    return this.options.snapshot().objects.filter((object) => object.type === "element" && object.kind === "roof");
+  }
+
+  /**
+   * The outside walls: every wall with nothing but the outside beyond it,
+   * read from the rooms in the scene - or, with no rooms marked yet, every
+   * wall there is.
+   */
+  private exteriorWalls(): AIContextObject[] {
+    const snapshot = this.options.snapshot();
+    const walls = snapshot.objects.filter((object) => object.type === "wall");
+    const rooms = listRooms(snapshot);
+    if (rooms.length === 0) return walls;
+    const outside = new Set<string>();
+    for (const room of rooms) {
+      for (const entry of describeRoom(snapshot, room).walls) if (entry.exterior) outside.add(entry.wall.id);
+    }
+    return walls.filter((wall) => outside.has(wall.id));
+  }
+
+  /** Whether `roof` already has `style`'s shape, height and finish. */
+  private roofIs(roof: AIContextObject, style: RoofStyle): boolean {
+    const current = this.options.elementParams?.(roof.id)?.style ?? "gable";
+    return current === style && roof.dimensions.height === ROOF_RISE[style] && roof.material === ROOF_FINISH[style].material && roof.color === ROOF_FINISH[style].color;
+  }
+
+  /** Gives `roof` the style: its shape, its height to suit it, and its finish - its base stays on the walls, its length, span and plan position untouched. */
+  private roofStyleCommand(roof: AIContextObject, style: RoofStyle): unknown {
+    return { type: "element.update", id: roof.id, changes: roofStyleChanges({ ...roof, params: this.options.elementParams?.(roof.id) ?? {} }, style) };
+  }
+
+  /** "Make the exterior modern": a flat roof and rendered walls - or back to a gable roof and the masonry's own colour. Sizes never change. */
+  private restyleExterior(style: ExteriorStyle, roofStyle?: RoofStyle): ArchitectReply {
+    const roofs = this.roofsNow();
+    const walls = this.exteriorWalls();
+    if (roofs.length === 0 && walls.length === 0) {
+      return reply("There's nothing built to restyle yet. Build a house or a room first, then I can make its exterior modern or traditional.", "info", [
+        { label: "Build a 3-bedroom house", say: "Build a 3-bedroom house" }
+      ]);
+    }
+    const roofTo = roofStyle ?? EXTERIOR_ROOF[style];
+    const finish = (wall: AIContextObject): string => (style === "modern" ? RENDER_WHITE : (getMaterial(wall.material)?.color ?? wall.color));
+    const roofChanges = roofs.filter((roof) => !this.roofIs(roof, roofTo));
+    const wallChanges = walls.filter((wall) => wall.color.toLowerCase() !== finish(wall).toLowerCase());
+    if (roofChanges.length === 0 && wallChanges.length === 0) return reply(`The exterior is already ${style}. Nothing was changed.`, "info");
+    const commands = [
+      ...roofChanges.map((roof) => this.roofStyleCommand(roof, roofTo)),
+      ...wallChanges.map((wall) => ({ type: "wall.update", id: wall.id, changes: { color: finish(wall) } }))
+    ];
+    const batch = executeCommandBatch(this.options.commandExecutor, commands, this.options.history);
+    if (!batch.success) return reply(`I couldn't restyle the exterior: ${batch.message ?? "a change was refused"}. Nothing was changed.`, "error");
+    const parts: string[] = [];
+    if (roofs.length > 0) parts.push(`${roofs.length === 1 ? `the roof (${roofs[0].id}) is` : `${roofs.length} roofs are`} ${ROOF_STYLE_TEXT[roofTo]}`);
+    if (walls.length > 0) {
+      const materials = [...new Set(walls.map((wall) => getMaterial(wall.material)?.label.toLowerCase() ?? wall.material))];
+      parts.push(style === "modern" ? `${plural(walls.length, "outside wall")} rendered warm white (still ${list(materials)} underneath)` : `${plural(walls.length, "outside wall")} back to the ${list(materials)}'s own colour`);
+    }
+    const roofNote = roofChanges.length > 0 ? ` Only the roof's height changed - ${fmt(ROOF_RISE[roofTo])} m, to suit its shape.` : "";
+    return reply(
+      `Exterior now ${style}: ${parts.join("; ")}. Every room, wall, door and window kept its size and position.${roofNote} One undo reverses it.`,
+      "success",
+      [
+        style === "modern" ? { label: "Traditional exterior", say: "make the exterior traditional" } : { label: "Modern exterior", say: "make the exterior modern" },
+        { label: "Undo", say: "undo" }
+      ],
+      { focusIds: [...roofs, ...walls].map((object) => object.id) }
+    );
+  }
+
+  /** "Make the roof flat": the roof's shape, height to suit and finish - its length, span and position kept. */
+  private restyleRoof(style: RoofStyle): ArchitectReply {
+    const roofs = this.roofsNow();
+    if (roofs.length === 0) return reply("There's no roof yet. Once the walls are up, say “put the roof on”.", "info");
+    const changing = roofs.filter((roof) => !this.roofIs(roof, style));
+    if (changing.length === 0) return reply(`The roof is already ${style}. Nothing was changed.`, "info");
+    const batch = executeCommandBatch(this.options.commandExecutor, changing.map((roof) => this.roofStyleCommand(roof, style)), this.options.history);
+    if (!batch.success) return reply(`I couldn't change the roof: ${batch.message ?? "the change was refused"}. Nothing was changed.`, "error");
+    const which = changing.length === 1 ? `The roof (${changing[0].id}) is` : `${changing.length} roofs are`;
+    return reply(
+      `${which} now ${ROOF_STYLE_TEXT[style]}. Its length and span are unchanged; its height is ${fmt(ROOF_RISE[style])} m to suit the shape. One undo reverses it.`,
+      "success",
+      (["flat", "mono-pitch", "gable"] as const).filter((other) => other !== style).map((other) => ({ label: `${other.charAt(0).toUpperCase()}${other.slice(1)} roof`, say: `make the roof ${other}` })),
+      { focusIds: changing.map((roof) => roof.id) }
+    );
+  }
+
+  // --- the workspace's view settings (never the model) ---
+
+  private setGridSpacing(spacing: number): ArchitectReply {
+    const workspace = this.options.workspace;
+    if (!workspace) return reply("The grid can't be changed from here.", "info");
+    const problem = workspace.setGridSpacing(spacing);
+    if (problem) return reply(`${problem} The grid is still ${formatSpacing(workspace.get().gridSpacing)}. Try 0.25 m, 0.5 m or 1 m.`, "error", [0.25, 0.5, 1].map((value) => ({ label: formatSpacing(value), say: `set the grid spacing to ${value} m` })));
+    const state = workspace.get();
+    return reply(
+      `Grid spacing: ${formatSpacing(state.gridSpacing)}. That's a view setting - nothing in the model moved or changed size. Snapping is ${state.snapping ? `on, every ${formatSpacing(state.snapStep)}` : "off"}.`,
+      "success",
+      state.snapStep === state.gridSpacing ? [] : [{ label: `Snap every ${formatSpacing(state.gridSpacing)} too`, say: `snap to ${state.gridSpacing} m` }]
+    );
+  }
+
+  private setSnapping(on: boolean | undefined, step: number | undefined): ArchitectReply {
+    const workspace = this.options.workspace;
+    if (!workspace) return reply("Snapping can't be changed from here.", "info");
+    if (step !== undefined) {
+      const problem = workspace.setSnapStep(step);
+      if (problem) return reply(`${problem} Snapping is still every ${formatSpacing(workspace.get().snapStep)}.`, "error");
+    }
+    if (on !== undefined) workspace.setSnapping(on);
+    const state = workspace.get();
+    return state.snapping
+      ? reply(`Snapping is on: dragged objects snap every ${formatSpacing(state.snapStep)}, and to wall ends, corners and edges. (A view setting - nothing in the model changed.)`, "success", [{ label: "Turn snapping off", say: "turn snapping off" }])
+      : reply("Snapping is off: dragged objects move freely. (A view setting - nothing in the model changed.)", "success", [{ label: "Turn snapping on", say: "turn snapping on" }]);
+  }
+
   /**
    * "Make that room 4.5 metres wide": the room being talked about - the one
    * just built, or the selected room, or the only room there is. Two
@@ -1697,7 +1903,7 @@ export class ArchitectSession {
    * stays put; a change that would break such a wall is explained and
    * nothing is changed.
    */
-  private adjustRoom(roomId: string, text: string): ArchitectReply {
+  private adjustRoom(roomId: string, text: string, explicit?: readonly Adjustment[]): ArchitectReply {
     const snapshot = this.options.snapshot();
     const parts = roomPartsOf(snapshot, roomId);
     if (!parts) {
@@ -1708,7 +1914,7 @@ export class ArchitectSession {
     let center = { ...parts.center };
     const said: string[] = [];
     let materialChange: string | null = null;
-    for (const adjustment of readAdjustments(text)) {
+    for (const adjustment of explicit ?? readAdjustments(text)) {
       if (adjustment.kind === "ambiguous-size") {
         const value = `${Number(adjustment.value.toFixed(3))} m`;
         return reply(`Should the ${name}'s length (east–west), width (north–south) or ceiling height be ${value}?`, "question", [
@@ -1728,6 +1934,9 @@ export class ArchitectSession {
       } else if (adjustment.kind === "move") {
         center = { x: Math.round((center.x + adjustment.dx) * 1000) / 1000, z: Math.round((center.z + adjustment.dz) * 1000) / 1000 };
         said.push(`moved ${adjustment.distance} m ${adjustment.direction}`);
+      } else if (adjustment.kind === "move-to") {
+        center = { x: Math.round(adjustment.x * 1000) / 1000, z: Math.round(adjustment.z * 1000) / 1000 };
+        said.push(`moved to X ${center.x}, Y ${center.z}`);
       } else if (adjustment.kind === "material") {
         if (Object.keys(parts.own).length === 0) return reply(`The ${name} has no walls of its own to change. Nothing was changed.`, "error");
         said.push(`its walls → ${wallMaterial(adjustment.material)?.label.toLowerCase() ?? adjustment.material}`);
@@ -1893,7 +2102,7 @@ export class ArchitectSession {
       return this.buildWall(draft);
     }
     // Another request altogether: let it through (this wall is dropped).
-    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "pipe-run", "next"].includes(u.kind)) {
+    if (["undo", "help", "reset", "status", "house", "site", "stage", "all", "show", "show-roof", "refurnish", "move-opening", "single-opening", "build-wall", "pipe-run", "grid", "snapping", "exterior", "roof-style", "next"].includes(u.kind)) {
       return null;
     }
     const stated = readWallDraft(text);

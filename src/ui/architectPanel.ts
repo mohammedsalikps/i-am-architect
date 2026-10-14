@@ -183,6 +183,8 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     stepper.querySelectorAll("li").forEach((item, index) => {
       item.className = `copilot__step copilot__step--${statuses[index]}`;
     });
+    // The step tracker only while a turn is under way; at rest, the one state line says it all.
+    stepper.hidden = copilot.phase === "idle" || copilot.phase === "applied" || copilot.phase === "error";
     stateLine.textContent = copilot.detail;
     stateLine.className = `copilot__state copilot__state--${copilot.phase}`;
     transcriptLine.hidden = copilot.transcript.length === 0;

@@ -15,6 +15,8 @@ export interface MeasureToolOptions {
   snapObjects(): readonly SnapObject[];
   /** Whether the viewport's Snap toggle is on. */
   snapping(): boolean;
+  /** The workspace's snap step, metres - the grid a point snaps to when no object is near (0.1 m when omitted). */
+  snapStep?(): number;
   /** The tool's one-line readout changed (or null: the tool was put away). */
   onReadout(text: string | null): void;
 }
@@ -57,7 +59,7 @@ export function createMeasureTool(options: MeasureToolOptions): MeasureTool {
   let end: MeasurePoint | null = null;
   let hover: MeasurePoint | null = null;
 
-  const snap = (raw: { x: number; z: number }): MeasurePoint => snapMeasurePoint(raw, options.snapObjects(), options.snapping());
+  const snap = (raw: { x: number; z: number }): MeasurePoint => snapMeasurePoint(raw, options.snapObjects(), options.snapping(), options.snapStep?.());
 
   function groundPointFor(event: PointerEvent): THREE.Vector3 | null {
     const rect = options.canvas.getBoundingClientRect();
@@ -79,7 +81,7 @@ export function createMeasureTool(options: MeasureToolOptions): MeasureTool {
     if (!options.snapping()) return "Measure: click the first point (Snap is off - points aren't snapped).";
     return hover
       ? `Measure: click the first point - here it snaps to ${describeSnap(hover)}.`
-      : "Measure: click the first point - it snaps to object ends, corners and centres, or the 0.1 m grid.";
+      : `Measure: click the first point - it snaps to object ends, corners and centres, or the ${Number((options.snapStep?.() ?? 0.1).toFixed(3))} m grid.`;
   }
 
   function marker(point: MeasurePoint, radius: number): THREE.Object3D {

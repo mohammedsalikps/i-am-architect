@@ -12,6 +12,8 @@ import { readWallMaterial } from "./wallBuilder.ts";
 
 export type Adjustment =
   | { kind: "move"; dx: number; dz: number; distance: number; direction: string }
+  /** To an absolute plan point - "to X 10, Y 8": world x 10, z 8 (the plan's Y is the world Z axis). */
+  | { kind: "move-to"; x: number; z: number }
   /** `change`: "1 m longer" (+1) or "1 m shorter" (-1) - a change by `value`, not a new size of `value`. */
   | { kind: "resize"; dimension: "length" | "width" | "height" | "thickness"; value: number; change?: 1 | -1 }
   | { kind: "material"; material: string }
@@ -82,12 +84,33 @@ export function isAdjustment(text: string): boolean {
   return readAdjustments(text).length > 0;
 }
 
+/**
+ * "to X 10, Y 8", "to 10, 8", "to x = 10, z = 8": an absolute plan point.
+ * X is east; the plan's second coordinate (said Y or Z) is the world Z axis.
+ * Never a distance: "to 3 m east" is not a point.
+ */
+const MOVE_TO = new RegExp(
+  String.raw`\bto\s+(?:the\s+)?(?:(?:point|position|coordinates?)\s+)?\(?\s*(?:x\s*[=:]?\s*)?(-?\d+(?:\.\d+)?)\s*(?:,\s*|\s+)(?:(?:y|z)\s*[=:]?\s*)?(-?\d+(?:\.\d+)?)\s*\)?(?!\s*(?:m|mm|cm|met(?:er|re)s?|centimet(?:er|re)s?|millimet(?:er|re)s?)\b)`,
+  "i"
+);
+
+/** The absolute plan point a move names, or null. */
+export function readMoveTo(text: string): { x: number; z: number } | null {
+  const match = MOVE_TO.exec(text);
+  return match ? { x: Number(match[1]), z: Number(match[2]) } : null;
+}
+
 /** What the words ask for - possibly several ("make it 4 m long and 3 m high"). Empty when nothing is recognized. */
 export function readAdjustments(text: string): Adjustment[] {
   const adjustments: Adjustment[] = [];
   const found = distances(text);
 
   if (MOVE_VERB.test(text)) {
+    const to = readMoveTo(text);
+    if (to) {
+      adjustments.push({ kind: "move-to", x: to.x, z: to.z });
+      return adjustments;
+    }
     const direction = DIRECTIONS.find(({ pattern }) => pattern.test(text));
     if (direction && found.length > 0) {
       const distance = found[0].value;

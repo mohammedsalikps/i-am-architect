@@ -10,7 +10,8 @@ import type { SnapObject, SnapPointKind } from "../snapping/snapping";
  *
  * A click snaps the same way a dragged object does (snapping.ts): onto an
  * object's endpoint, corner or centre within SNAP_TOLERANCE, otherwise
- * onto the 0.1 m grid - or, with Snap off, stays exactly where clicked.
+ * onto the snap-step grid (0.1 m unless the workspace changed it) - or,
+ * with Snap off, stays exactly where clicked.
  * Distances are horizontal (plan) distances only; heights aren't
  * measured.
  */
@@ -35,7 +36,7 @@ export interface Measurement {
 }
 
 /** Where a measuring click at `raw` lands among `objects`. */
-export function snapMeasurePoint(raw: { x: number; z: number }, objects: readonly SnapObject[], snapping: boolean): MeasurePoint {
+export function snapMeasurePoint(raw: { x: number; z: number }, objects: readonly SnapObject[], snapping: boolean, step?: number): MeasurePoint {
   if (!snapping) {
     return { x: raw.x, z: raw.z, snap: "free" };
   }
@@ -43,7 +44,8 @@ export function snapMeasurePoint(raw: { x: number; z: number }, objects: readonl
   if (target) {
     return { x: target.x, z: target.z, snap: target.kind, objectId: target.objectId };
   }
-  return { x: toGrid(raw.x), z: toGrid(raw.z), snap: "grid" };
+  // The workspace's snap step (0.1 m unless it was changed).
+  return { x: toGrid(raw.x, step), z: toGrid(raw.z, step), snap: "grid" };
 }
 
 export function measureBetween(a: { x: number; z: number }, b: { x: number; z: number }): Measurement {

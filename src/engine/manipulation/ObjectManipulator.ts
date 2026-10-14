@@ -66,6 +66,8 @@ export interface ObjectManipulatorOptions {
   readObject: (id: string) => ManipulatedObject | undefined;
   /** Optional snapping - see ManipulationSnapper. */
   snapper?: ManipulationSnapper;
+  /** The increment a drag moves in, metres (the workspace's snap step); MOVE_STEP when not given. */
+  moveStep?: () => number;
 }
 
 interface ActiveGesture {
@@ -115,6 +117,7 @@ export class ObjectManipulator {
   private readonly history: ManipulationHistory;
   private readonly readObject: ObjectManipulatorOptions["readObject"];
   private readonly snapper: ManipulationSnapper | undefined;
+  private readonly moveStep: () => number;
   private active: ActiveGesture | null = null;
 
   constructor(options: ObjectManipulatorOptions) {
@@ -122,6 +125,7 @@ export class ObjectManipulator {
     this.history = options.history;
     this.readObject = options.readObject;
     this.snapper = options.snapper;
+    this.moveStep = options.moveStep ?? (() => MOVE_STEP);
   }
 
   /**
@@ -232,7 +236,7 @@ export class ObjectManipulator {
     const { start, grab, gesture } = active;
     switch (gesture.kind) {
       case "move": {
-        const moved = computeMove(start.position, grab, point);
+        const moved = computeMove(start.position, grab, point, this.moveStep());
         return { changes: { position: this.snapper ? this.snapper.move(active.objectId, moved) : moved }, snapTarget: null };
       }
       case "resize": {
@@ -249,9 +253,9 @@ export class ObjectManipulator {
       case "endpoint": {
         const from = endpointsOf(start)[gesture.endpoint];
         let target: Point3 = {
-          x: roundValue(from.x + snapToStep(point.x - grab.x, MOVE_STEP)),
+          x: roundValue(from.x + snapToStep(point.x - grab.x, this.moveStep())),
           y: from.y,
-          z: roundValue(from.z + snapToStep(point.z - grab.z, MOVE_STEP))
+          z: roundValue(from.z + snapToStep(point.z - grab.z, this.moveStep()))
         };
         let snapTarget: SnapTarget | null = null;
         if (this.snapper) {

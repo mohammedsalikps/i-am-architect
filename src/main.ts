@@ -54,6 +54,12 @@ import { createSiteOverlay } from "./scene/siteOverlay";
 import { createMeasureTool, MEASURE_TOOL_ID, type MeasureTool } from "./scene/measureTool";
 import { createViewportTools } from "./ui/viewportTools";
 import { createThemeStore } from "./ui/theme";
+import { WorkspaceSettings } from "./engine/workspace/workspaceSettings";
+import { scaleBarFor } from "./engine/workspace/scaleBar";
+import { createWorkspacePanel } from "./ui/workspacePanel";
+import { createScaleBarOverlay } from "./ui/scaleBar";
+import { createAxisGizmo } from "./ui/axisGizmo";
+import { SCENE_PALETTES } from "./scene/sceneTheme";
 
 const appRoot = document.getElementById("app");
 
@@ -199,13 +205,21 @@ async function submitArchitectFallback(instruction: string, options: AIRunOption
  * shared commandExecutor and history as everything else, so each build
  * stage is one ordinary undo step.
  */
+// The workspace's view settings - grid spacing, snapping and its step, the
+// axes and the dimension labels - remembered per browser, never part of
+// the model or its undo history (engine/workspace/workspaceSettings.ts).
+// The Grid & plot popover, the status bar and the conversation ("set the
+// grid spacing to half a metre") all change this one object.
+const workspace = new WorkspaceSettings(sessionStore());
+
 const architect = new ArchitectSession({
   commandExecutor,
   history,
   snapshot: () => buildAIProjectSnapshot(project),
   elementParams: (id) => elementStore.get(id)?.params,
   undo: () => history.undo(),
-  fallback: submitArchitectFallback
+  fallback: submitArchitectFallback,
+  workspace
 });
 
 /**
@@ -712,6 +726,20 @@ let assetPlacementPreview: AssetPlacementPreview | null = null;
 
 // Whether drags snap - a UI preference (the viewport's Snap toggle), not part of the model.
 const snapSettings = new SnapSettings();
+// SnapSettings is what the scene's drags read; the workspace is where
+// snapping is chosen and remembered. Kept in step both ways - the Snap
+// button flips SnapSettings directly - and neither echoes an unchanged value.
+workspace.subscribe((state) => {
+  snapSettings.setStep(state.snapStep);
+  snapSettings.setEnabled(state.snapping);
+});
+snapSettings.subscribe((enabled) => workspace.setSnapping(enabled));
+
+// Grid & plot (by the Snap button) and the scale bar over the viewport.
+const workspacePanel = createWorkspacePanel({ settings: workspace, onSetPlot: (length, width) => architect.setPlot(length, width) });
+const scaleBar = createScaleBarOverlay();
+// The corner orientation gizmo: names X/Y/Z where they never sit on the building.
+const axisGizmo = createAxisGizmo(SCENE_PALETTES.light); // the theme subscription below sets the current theme at once
 
 // Which objects are hidden right now - a viewport/session concern, never
 // part of the saved project document (see VisibilityStore's own docs).
@@ -773,7 +801,12 @@ const shell = createAppShell({
   viewportTools: viewportTools.elements,
   onAddAsset: addAsset,
   onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 },
-  architect: architectPanel
+  architect: architectPanel,
+  workspace,
+  workspaceControl: workspacePanel.element,
+  viewportOverlays: [scaleBar.element, axisGizmo.element],
+  // A room's inspector rows move and resize it with its walls, with the conversation's own checks.
+  onRoomEdit: (roomId, edit) => architect.editRoom(roomId, edit)
 });
 
 appRoot.append(shell.root);
@@ -797,6 +830,11 @@ sceneManager.current = new SceneManager(
   visibilityStore
 );
 sceneManager.current.start();
+// Grid spacing, axes and dimension labels follow the workspace settings;
+// the scale bar follows the zoom; the popover says what the labels show.
+workspace.subscribe((state) => sceneManager.current?.setWorkspace(state));
+sceneManager.current.onViewChange((metresPerPixel) => scaleBar.update(scaleBarFor(metresPerPixel)));
+sceneManager.current.onDimensionSummary((summary) => workspacePanel.setDimensionSummary(summary));
 // The viewport follows the theme (backdrop, fog, ground, grid).
 themeStore.subscribe((theme) => sceneManager.current?.setTheme(theme));
 // The floating AI Architect copilot covers the viewport's left side: frame
@@ -838,6 +876,7 @@ measureTool = createMeasureTool({
   placementController: sceneManager.current.placementController,
   snapObjects: () => buildAIProjectSnapshot(project).objects,
   snapping: () => snapSettings.isEnabled(),
+  snapStep: () => snapSettings.getStep(),
   onReadout: (text) => {
     if (text) shell.setPlacementStatus({ label: "Measure", text, onCancel: cancelPlacement });
   }
@@ -889,13 +928,18 @@ createElementPlacementHud({
 // model changes - an undo, a redo, or a manual edit can un-build a stage,
 // and the progress strip and marks should say so. Coalesced to one
 // refresh per frame: a build stage changes dozens of objects at once.
-const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene);
+const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene, SCENE_PALETTES[themeStore.get()]);
+themeStore.subscribe((theme) => siteOverlay.setPalette(SCENE_PALETTES[theme]));
+sceneManager.current.onFrame((camera, viewport) => siteOverlay.fitLabels(camera, viewport));
+sceneManager.current.onFrame((camera) => axisGizmo.update(camera));
+themeStore.subscribe((theme) => axisGizmo.setPalette(SCENE_PALETTES[theme]));
 // A new or corrected preview is framed once, so the footprint and its
 // dimension labels can actually be read; the camera is left alone while
 // the same preview stays up, so the user can orbit around it.
 let framedPreview = "";
 architect.subscribe((state) => {
   siteOverlay.update(state);
+  workspacePanel.setPlot(state.site ? { length: state.site.length, width: state.site.width } : null);
   const preview = state.preview;
   const key = preview ? JSON.stringify([preview.label, preview.center, preview.sizeX, preview.sizeZ, preview.height]) : "";
   if (preview && key !== framedPreview) {

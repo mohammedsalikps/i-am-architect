@@ -1,13 +1,18 @@
 import * as THREE from "three";
 import type { ArchitectViewState } from "../engine/architect/ArchitectSession";
+import { plotEdgeText } from "../engine/workspace/dimensions";
+import { fitLabels, labelSprite, type ViewportSize } from "./labelSprite";
+import { SCENE_PALETTES, type ScenePalette } from "./sceneTheme";
 
 /**
  * The architect's planning marks in the viewport - never construction
  * objects, never saved, never selectable (SelectionRaycaster only tests
  * the construction layers' own meshes):
  *
- * - the site boundary, as a gold outline with corner ticks (the site
- *   itself is a real landscape element, drawn by the element layer);
+ * - the site (plot) boundary, as a gold outline with corner pegs and
+ *   its edge lengths labelled - the plot is separate from the workspace
+ *   grid, which extends well past it (the site itself is a real landscape
+ *   element, drawn by the element layer);
  * - the chosen location, as a pin;
  * - the planned house footprint, as a dashed outline, until construction
  *   starts and the real slab takes its place;
@@ -18,9 +23,12 @@ import type { ArchitectViewState } from "../engine/architect/ArchitectSession";
  */
 export interface SiteOverlay {
   update(state: ArchitectViewState): void;
+  /** The workspace theme's plot and label colours; redraws the current marks. */
+  setPalette(palette: ScenePalette): void;
+  /** Keeps the plot's edge labels readable at this frame's zoom (see fitLabels). */
+  fitLabels(camera: THREE.PerspectiveCamera, viewport: ViewportSize): void;
 }
 
-const SITE_COLOR = 0xc9a769;
 const MARKER_COLOR = 0x4fa8ff;
 const PLAN_COLOR = 0x8fc1ff;
 /** Just above the site's own surface (its top is at y = 0), so the marks never z-fight with it. */
@@ -61,21 +69,31 @@ export function overlayObject<T extends THREE.Object3D>(object: T): T {
   return object;
 }
 
-function buildSite(site: NonNullable<ArchitectViewState["site"]>): THREE.Object3D {
+function buildSite(site: NonNullable<ArchitectViewState["site"]>, palette: ScenePalette): THREE.Object3D {
   const group = new THREE.Group();
   const outline = new THREE.Line(
     new THREE.BufferGeometry().setFromPoints(rectanglePoints(site.center, site.length, site.width)),
-    new THREE.LineBasicMaterial({ color: SITE_COLOR, transparent: true, opacity: 0.9, depthTest: false })
+    // Unfogged: the boundary must read even with the whole plot in view.
+    new THREE.LineBasicMaterial({ color: palette.plot, transparent: true, opacity: 0.9, depthTest: false, fog: false })
   );
   group.add(overlayObject(outline));
   // Corner pegs - small posts so the boundary reads in perspective, not only from above.
   const pegGeometry = new THREE.CylinderGeometry(0.06, 0.06, 0.6, 8);
-  const pegMaterial = new THREE.MeshStandardMaterial({ color: SITE_COLOR, roughness: 0.6 });
+  const pegMaterial = new THREE.MeshStandardMaterial({ color: palette.plot, roughness: 0.6, fog: false });
   for (const point of rectanglePoints(site.center, site.length, site.width).slice(0, 4)) {
     const peg = new THREE.Mesh(pegGeometry, pegMaterial);
     peg.position.set(point.x, 0.3, point.z);
     group.add(overlayObject(peg));
   }
+  // Edge lengths: the length (X, east-west) outside the south edge, the width (Z, north-south) outside the east edge.
+  const accent = `#${palette.plot.toString(16).padStart(6, "0")}`;
+  const along = labelSprite(plotEdgeText(site.length), palette, { height: 0.55, accent, minPixels: 15 });
+  along.position.set(site.center.x, 0.35, site.center.z + site.width / 2 + 1);
+  const across = labelSprite(plotEdgeText(site.width), palette, { height: 0.55, accent, minPixels: 15 });
+  across.position.set(site.center.x + site.length / 2 + 1.4, 0.35, site.center.z);
+  const name = labelSprite(`Plot ${Number(site.length.toFixed(2))} × ${Number(site.width.toFixed(2))} m`, palette, { height: 0.5, accent, minPixels: 15 });
+  name.position.set(site.center.x - site.length / 2 + 2.2, 0.35, site.center.z - site.width / 2 - 1);
+  group.add(overlayObject(along), overlayObject(across), overlayObject(name));
   return group;
 }
 
@@ -179,16 +197,26 @@ function buildPreview(preview: NonNullable<ArchitectViewState["preview"]>): THRE
   return group;
 }
 
-export function createSiteOverlay(scene: THREE.Scene): SiteOverlay {
+export function createSiteOverlay(scene: THREE.Scene, initialPalette: ScenePalette = SCENE_PALETTES.light): SiteOverlay {
   const root = new THREE.Group();
   root.name = "architect-site-overlay";
   scene.add(root);
+  let palette = initialPalette;
+  let last: ArchitectViewState | null = null;
 
-  return {
+  const overlay: SiteOverlay = {
+    fitLabels(camera, viewport) {
+      fitLabels(root, camera, viewport);
+    },
+    setPalette(next) {
+      palette = next;
+      if (last) overlay.update(last);
+    },
     update(state) {
+      last = state;
       disposeChildren(root);
       if (state.site) {
-        root.add(buildSite(state.site));
+        root.add(buildSite(state.site, palette));
       }
       const building = state.plan?.started ?? false;
       if (state.location && !building) {
@@ -202,4 +230,5 @@ export function createSiteOverlay(scene: THREE.Scene): SiteOverlay {
       }
     }
   };
+  return overlay;
 }

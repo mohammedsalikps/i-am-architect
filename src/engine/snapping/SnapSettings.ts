@@ -7,10 +7,27 @@ export type SnapSettingsListener = (enabled: boolean) => void;
  */
 export class SnapSettings {
   private enabled = true;
+  /** The increment moves snap to, metres (workspace settings; 0.1 m by default). */
+  private step = 0.1;
   private readonly listeners = new Set<SnapSettingsListener>();
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  getStep(): number {
+    return this.step;
+  }
+
+  /** Listeners are told (with the current on/off) so a readout can show the new step. */
+  setStep(step: number): void {
+    if (!(step > 0) || step === this.step) {
+      return;
+    }
+    this.step = step;
+    for (const listener of this.listeners) {
+      listener(this.enabled);
+    }
   }
 
   setEnabled(enabled: boolean): void {

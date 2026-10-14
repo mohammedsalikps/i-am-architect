@@ -8,6 +8,15 @@ import { addLights } from "./lights";
 import { addGround } from "./ground";
 import type { GroundHandle } from "./ground";
 import { SCENE_PALETTES } from "./sceneTheme";
+import { createCoordinateOverlay, type CoordinateOverlay } from "./coordinateOverlay";
+import { createDimensionLayer, type DimensionLayer } from "./dimensionLayer";
+import type { ViewportSize } from "./labelSprite";
+
+/** The fog's nearest start and end, metres - pushed further out as the camera backs away (see start()). */
+const FOG_NEAR = 30;
+const FOG_FAR = 80;
+import { metresPerPixelAt } from "../engine/workspace/scaleBar";
+import type { WorkspaceState } from "../engine/workspace/workspaceSettings";
 import type { Theme } from "../ui/theme";
 import { createHorizonBackground, HORIZON_FOG_COLOR } from "./environment";
 import { WallLayer } from "./wall/WallLayer";
@@ -96,6 +105,12 @@ export class SceneManager {
   private readonly highlightedMeshes = new Map<THREE.Mesh, THREE.Color>();
   private readonly ground: GroundHandle;
   private theme: Theme = "light";
+  /** The X/Y/Z axes and origin marker, and the room/wall dimension labels - view guides, never model objects. */
+  private readonly axes: CoordinateOverlay;
+  private readonly dimensions: DimensionLayer;
+  private readonly dimensionListeners = new Set<(summary: string) => void>();
+  private readonly viewListeners = new Set<(metresPerPixel: number) => void>();
+  private readonly frameListeners = new Set<(camera: THREE.PerspectiveCamera, viewport: ViewportSize) => void>();
 
   constructor(
     container: HTMLElement,
@@ -126,7 +141,7 @@ export class SceneManager {
     // matching fog so distant geometry softens into that same tone
     // instead of clipping hard at the camera's far plane.
     this.scene.background = createHorizonBackground();
-    this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, 30, 80);
+    this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, FOG_NEAR, FOG_FAR);
 
     this.camera = new THREE.PerspectiveCamera(
       45,
@@ -225,9 +240,16 @@ export class SceneManager {
     // viewport" detail. Comfortably above the tightest interior angle
     // minDistance already allows.
     this.controls.maxPolarAngle = Math.PI * 0.49;
+    // The scale bar follows every orbit, pan and zoom.
+    this.controls.addEventListener("change", this.notifyView);
 
     addLights(this.scene);
     this.ground = addGround(this.scene);
+    // The coordinate system, drawn - the same X (east) / Y (up) / Z (south) the inspector, record book and conversation use.
+    this.axes = createCoordinateOverlay(this.scene, SCENE_PALETTES[this.theme]);
+    this.dimensions = createDimensionLayer(this.scene, { wallStore, elementStore, visibilityStore }, SCENE_PALETTES[this.theme], (summary) => {
+      for (const listener of this.dimensionListeners) listener(summary);
+    });
 
     // Not stored on `this`: every *Layer stays alive via the
     // subscriptions it registers with its store/selectionStore/
@@ -323,7 +345,9 @@ export class SceneManager {
         history,
         readObject,
         // Endpoints, corners, centers, alignment, the grid, wall faces - see engine/snapping/.
-        snapper: createStoreSnapper(stores, snapSettings)
+        snapper: createStoreSnapper(stores, snapSettings),
+        // Drags move in the workspace's snap step while snapping is on; finely (1 cm) while it's off.
+        moveStep: () => (snapSettings.isEnabled() ? snapSettings.getStep() : 0.01)
       })
     });
 
@@ -398,6 +422,7 @@ export class SceneManager {
     // re-applied every time, not just at construction.
     this.composer?.setSize(width, height);
     this.resizeGtaoPass(width, height);
+    this.notifyView();
   };
 
   /**
@@ -530,7 +555,46 @@ export class SceneManager {
     if (previous instanceof THREE.Texture) previous.dispose();
     if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.setHex(palette.fog);
     this.ground.setPalette(palette);
+    this.axes.setPalette(palette);
+    this.dimensions.setPalette(palette);
   }
+
+  /** The workspace's view settings (engine/workspace/workspaceSettings.ts): grid spacing, axes, dimension labels. Snapping goes through SnapSettings. */
+  setWorkspace(state: WorkspaceState): void {
+    this.ground.setSpacing(state.gridSpacing);
+    this.axes.setVisible(state.showAxes);
+    this.dimensions.setVisible(state.showDimensions);
+  }
+
+  /** What the dimension labels show, in words ("Dimensions shown: 1 room, 4 walls.") - now and on every change. Returns an unsubscribe. */
+  onDimensionSummary(listener: (summary: string) => void): () => void {
+    this.dimensionListeners.add(listener);
+    listener(this.dimensions.summary());
+    return () => this.dimensionListeners.delete(listener);
+  }
+
+  /** Called every frame before it is drawn, with the camera and the viewport's size in pixels - for overlays that size their labels to the zoom (the plot's). Returns an unsubscribe. */
+  onFrame(listener: (camera: THREE.PerspectiveCamera, viewport: ViewportSize) => void): () => void {
+    this.frameListeners.add(listener);
+    return () => this.frameListeners.delete(listener);
+  }
+
+  /** Metres per screen pixel at the camera's look-at point - now and whenever the view moves, zooms or resizes. For the scale bar. */
+  onViewChange(listener: (metresPerPixel: number) => void): () => void {
+    this.viewListeners.add(listener);
+    listener(this.metresPerPixel());
+    return () => this.viewListeners.delete(listener);
+  }
+
+  private metresPerPixel(): number {
+    return metresPerPixelAt(this.camera.position.distanceTo(this.controls.target), this.camera.fov, this.container.clientHeight);
+  }
+
+  private readonly notifyView = (): void => {
+    if (this.viewListeners.size === 0) return;
+    const value = this.metresPerPixel();
+    for (const listener of this.viewListeners) listener(value);
+  };
 
   /** The viewport's current theme. */
   getTheme(): Theme {
@@ -605,6 +669,19 @@ export class SceneManager {
     const animate = (): void => {
       requestAnimationFrame(animate);
       this.controls.update(); // required when damping is enabled
+      // The fog starts beyond whatever is being looked at - a whole plot framed
+      // from 60 m away stays crisp - while the far ground still fades out.
+      if (this.scene.fog instanceof THREE.Fog) {
+        const distance = this.camera.position.distanceTo(this.controls.target);
+        this.scene.fog.near = Math.max(FOG_NEAR, distance * 1.6);
+        this.scene.fog.far = Math.max(FOG_FAR, distance * 4.5);
+      }
+      // Labels keep a readable size at any zoom, and don't pile up (labelSprite.ts fitLabels).
+      this.camera.updateMatrixWorld();
+      const viewport = { width: this.container.clientWidth, height: this.container.clientHeight };
+      this.axes.update(this.camera, viewport);
+      this.dimensions.update(this.camera, viewport);
+      for (const listener of this.frameListeners) listener(this.camera, viewport);
       if (this.composer) {
         try {
           this.composer.render();

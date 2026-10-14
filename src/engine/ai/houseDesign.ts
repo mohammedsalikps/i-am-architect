@@ -11,6 +11,7 @@ import {
   findHouseCenter
 } from "./housePlan.ts";
 import type { HouseFootprint, PlanBox } from "./housePlan.ts";
+import { ROOF_FINISH, ROOF_RISE } from "../elements/roofStyles.ts";
 import type { HouseDesignRequest } from "./houseIntent.ts";
 import type {
   AddDoorCommand,
@@ -482,14 +483,23 @@ export function roomsStageCommands(layout: HouseLayout): AddElementCommand[] {
  * baseY in the "roof" catalog entry (elements/catalog.ts) is calibrated to
  * sit exactly on top of this WALL_HEIGHT + SLAB_THICKNESS shell already,
  * so omitting position.y lands it correctly without this file needing to
- * know that number itself.
+ * know that number itself. Contemporary by default: a flat roof with a
+ * parapet in dark metal (elements/roofStyles.ts) - "make the roof gable"
+ * changes its shape later without touching its size.
  */
 export function roofStageCommands(layout: HouseLayout): AddElementCommand[] {
   const eave = 0.6;
   return [
     {
       type: "element.add",
-      element: { kind: "roof", position: { x: layout.center.x, z: layout.center.z }, dimensions: { length: layout.footprint.length + eave, width: layout.footprint.width + eave } }
+      element: {
+        kind: "roof",
+        position: { x: layout.center.x, z: layout.center.z },
+        dimensions: { length: layout.footprint.length + eave, width: layout.footprint.width + eave, height: ROOF_RISE.flat },
+        params: { style: "flat" },
+        material: ROOF_FINISH.flat.material,
+        color: ROOF_FINISH.flat.color
+      }
     }
   ];
 }

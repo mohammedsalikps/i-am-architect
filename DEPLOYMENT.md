@@ -412,6 +412,15 @@ included.
 8. Deployed smoke tests - section 3, step 9, with
    `DEPLOYED_BACKEND_URL=https://<service>.onrender.com`.
 
+**Release order: backend first.** The backend validates every saved
+project with the same engine code as the browser
+(`src/engine/project/projectDocument.ts`). When a release adds a field
+to the document - roofs gained a `style` parameter (flat / mono-pitch /
+gable) - an older backend refuses projects that use it. Deploy the
+backend (Render) before, or together with, the frontend (Vercel). The
+reverse is safe: a newer backend reads older documents (a roof saved
+without a style opens as a gable).
+
 **Free instances** sleep after 15 minutes without traffic; the first
 request after that waits while the service starts again (up to about a
 minute). The app's own requests time out sooner (15-30 s), so that first

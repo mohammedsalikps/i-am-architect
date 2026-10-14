@@ -216,6 +216,23 @@ async function run(): Promise<void> {
     assertSameJson(document.assemblies[0].objectIds, [sample.wall, sample.door, sample.window], "assembly members, in order");
   });
 
+  await check("a roof saved before roofs had a style opens exactly as it was - a gable - and a styled roof round-trips", () => {
+    const context = createProjectContext();
+    execute(context, { type: "element.add", element: { kind: "roof", position: { x: 0, z: 0 }, dimensions: { length: 10, width: 8, height: 0.5 }, params: { style: "flat" } } });
+    const document = JSON.parse(JSON.stringify(serializeProject(context))) as { objects: { kind?: string; params?: Record<string, unknown> }[] };
+    const styled = parseProjectDocument(document);
+    assertTrue(styled.ok, `a styled roof parses: ${styled.ok ? "" : styled.error}`);
+    const roof = document.objects.find((object) => object.kind === "roof")!;
+    assertEqual(roof.params?.style, "flat", "the style is saved");
+    // The same document as an older version of the app wrote it: no style at all.
+    delete roof.params!.style;
+    const legacy = createProjectContext();
+    const loaded = loadProject(legacy, document);
+    assertTrue(loaded.ok, `a roof without a style still opens: ${loaded.ok ? "" : loaded.error}`);
+    const reopened = legacy.elementStore.getAll().find((element) => element.kind === "roof")!;
+    assertEqual(`${reopened.params.style} ${reopened.dimensions.length}x${reopened.dimensions.width}`, "gable 10x8", "as a gable roof, its size untouched");
+  });
+
   await check("the document is JSON-safe and deserializes back to itself", () => {
     const context = createProjectContext();
     buildSampleProject(context);
