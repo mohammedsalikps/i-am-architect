@@ -206,6 +206,25 @@ async function run(): Promise<void> {
     });
   });
 
+  await check("GET /health names the deployed commit in X-Release - a hex hash only, never anything else", async () => {
+    const provider = makeFakeProvider(() => ({ commands: [] }));
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN, release: "A6BE745C3FE12F934893666E9465F79C58A923D1" }, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/health`);
+      assertEqual(res.headers.get("X-Release"), "a6be745c3fe1", "the commit, 12 characters, lower case");
+      assertDeepEqual(await res.json(), { status: "ok" }, "the body is unchanged");
+    });
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/health`);
+      assertEqual(res.headers.get("X-Release"), null, "no release known: no header");
+      await res.json();
+    });
+    await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN, release: "main; secret=1" }, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/health`);
+      assertEqual(res.headers.get("X-Release"), null, "anything but a commit hash is never echoed");
+      await res.json();
+    });
+  });
+
   await check("OPTIONS preflight returns 204 with the configured CORS origin", async () => {
     const provider = makeFakeProvider(() => ({ commands: [] }));
     await withServer({ provider, frontendOrigin: FRONTEND_ORIGIN }, async (baseUrl) => {

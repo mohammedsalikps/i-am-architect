@@ -340,7 +340,16 @@ function run(): void {
 
   const vercelConfig = JSON.parse(readFileSync(fileURLToPath(new URL("../../vercel.json", import.meta.url)), "utf8")) as {
     headers?: { source: string; headers: { key: string; value: string }[] }[];
+    ignoreCommand?: string;
   };
+
+  check("a [backend-first] release skips only the frontend build, and the skip fails open", () => {
+    assertEqual(vercelConfig.ignoreCommand, "node scripts/vercel-ignore-build.mjs", "Vercel's ignored-build step runs the release script");
+    const script = readFileSync(fileURLToPath(new URL("../../scripts/vercel-ignore-build.mjs", import.meta.url)), "utf8");
+    assertTrue(/const MARKER = "\[backend-first\]";/.test(script), "it looks for the [backend-first] marker");
+    assertTrue(/if \(commitMessage\(\)\.includes\(MARKER\)\) \{[\s\S]*?process\.exit\(0\);[\s\S]*?\}\s*console\.log\("Building the frontend\."\);\s*process\.exit\(1\);/.test(script), "skips (exit 0) only with the marker; otherwise builds (exit 1)");
+    assertTrue(/catch \{\s*return "";\s*\}/.test(script), "no commit message to read: it builds");
+  });
   const permissionsPolicies = (vercelConfig.headers ?? [])
     .filter((entry) => entry.source === "/(.*)")
     .flatMap((entry) => entry.headers)

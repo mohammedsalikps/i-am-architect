@@ -224,7 +224,10 @@ replaced by server-derived geometry.
 
 ### `GET /health` and `OPTIONS *`
 
-`/health` returns `200 { "status": "ok" }`. `OPTIONS` is the CORS
+`/health` returns `200 { "status": "ok" }` - on Render with an
+`X-Release` header naming the deployed commit (12 characters of
+`RENDER_GIT_COMMIT`; nothing else about the server), so a release can be
+verified from outside (DEPLOYMENT.md "Release order"). `OPTIONS` is the CORS
 preflight - `204`; it allows `GET, POST, PUT, DELETE` and the
 `Content-Type` and `Authorization` headers.
 

@@ -52,10 +52,13 @@ async function run(): Promise<number> {
   const { check, note, finish } = createChecker();
   console.log(`Deployed smoke test\n  backend:  ${backend}\n  frontend: ${frontend}\n`);
 
-  await check("the backend is served over HTTPS, and /health answers with no internal detail", async () => {
+  await check("the backend is served over HTTPS, and /health answers with no internal detail beyond the deployed commit", async () => {
     const health = await fetch(`${backend}/health`);
     assertEqual(health.status, 200, "status");
     assertSameJson(await health.json(), { status: "ok" }, "only { status: 'ok' } - no configuration, versions or database details");
+    // The one exception: the public commit it runs, so a release can be verified (DEPLOYMENT.md "Release order").
+    const release = health.headers.get("X-Release");
+    assertTrue(release === null || /^[0-9a-f]{12}$/.test(release), `X-Release, when present, is only a 12-character commit hash (got ${JSON.stringify(release)})`);
     const plain = backend.replace(/^https:/, "http:");
     try {
       const response = await fetch(`${plain}/health`, { redirect: "manual" });

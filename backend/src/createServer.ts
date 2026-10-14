@@ -55,6 +55,15 @@ import type { ProjectStore } from "./projects/ProjectStore.ts";
 
 export interface CreateServerOptions {
   /**
+   * The source commit this server was built from (Render's
+   * RENDER_GIT_COMMIT), sent on GET /health as an `X-Release` header so a
+   * release can be confirmed from outside - "is the backend running the
+   * commit I just merged?" - before its frontend goes out. Only a hex
+   * commit hash of the public repository is ever echoed (12 characters);
+   * anything else is ignored. Never configuration or dependency detail.
+   */
+  release?: string;
+  /**
    * Anything implementing the existing `AIProvider` interface - real
    * usage passes a real `OpenAIProvider` constructed in server.ts
    * (with the real API key and a real `fetch`, both server-side only);
@@ -188,10 +197,15 @@ function setCommonHeaders(req: IncomingMessage, res: ServerResponse, allowOrigin
   }
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
   const payload = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", ...headers });
   res.end(payload);
+}
+
+/** `release` as sent in X-Release: a hex commit hash, shortened to 12 characters - or nothing at all. */
+function releaseHeader(release: string | undefined): Record<string, string> {
+  return release && /^[0-9a-f]{7,40}$/i.test(release) ? { "X-Release": release.slice(0, 12).toLowerCase() } : {};
 }
 
 function sendNoContent(res: ServerResponse): void {
@@ -639,8 +653,9 @@ async function handleRequest(
   }
 
   if (method === "GET" && path === "/health") {
-    // A liveness check: no dependency, configuration or version detail.
-    sendJson(res, 200, { status: "ok" });
+    // A liveness check: no dependency or configuration detail. Only the public
+    // commit it was built from, when known, as an X-Release header (see `release`).
+    sendJson(res, 200, { status: "ok" }, releaseHeader(options.release));
     return;
   }
 
