@@ -236,8 +236,8 @@ npm install
 npm run verify
 ```
 
-Three suites, all deterministic, all credential-free, none reaching past
-loopback:
+Three suites, all credential-free, none reaching past loopback, and
+deterministic except for the known issue below:
 
 - `verify.ts` - routing, request validation, the AI proxy (a stub
   provider, or a real `OpenAIProvider` with a mocked transport), and the
@@ -255,6 +255,19 @@ loopback:
   redo, and saved again (runs with `--experimental-transform-types`).
 
 No test in `npm run verify` talks to a real Supabase project.
+
+**Known issue (pre-existing, not fixed yet): `verify.ts` can stop early
+and still exit 0.** Some runs end after 8 of its 30 checks, without the
+`N passed, M failed.` line, and the exit code is still 0. The 9th check
+("a body over the size cap returns 413") sends a 1.1 MB body. The server
+stops reading at the 1 MB cap (`readJsonBody` in `src/createServer.ts`)
+while the client is still uploading. The client's request then never
+settles, nothing else keeps Node running, and the process ends with the
+suite unfinished. Measured on 2026-10-14 (Windows 11, Node 24.19.0): 7 of
+12 runs of `node verify.ts` completed 30/30, and 5 of 12 ended after 8.
+`auth.verify.ts` and `persistence.verify.ts` are not affected. Until it is
+fixed, count a `verify.ts` run only if it prints `30 passed, 0 failed.` -
+an exit code of 0 alone does not show that the checks ran.
 
 ### Real infrastructure tests (opt-in)
 
