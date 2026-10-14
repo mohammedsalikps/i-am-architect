@@ -147,3 +147,30 @@ export function createInputGate(duplicateWindowMs = 2500): InputGate {
     }
   };
 }
+
+/** What the companion is doing right now - one word, always visible in its header. */
+export type CompanionState = "ready" | "listening" | "thinking" | "waiting" | "speaking" | "applied" | "stopped";
+
+export const COMPANION_STATE_LABEL: Readonly<Record<CompanionState, string>> = {
+  ready: "Ready",
+  listening: "Listening",
+  thinking: "Thinking",
+  waiting: "Waiting",
+  speaking: "Speaking",
+  applied: "Applied",
+  stopped: "Stopped"
+};
+
+/**
+ * The header's state from what is happening, most urgent first. A turn that
+ * is waiting on the sign-in dialog (a signed-out request that needs the AI
+ * model) is "waiting" - for the person, not on the model - never "thinking".
+ */
+export function companionStateOf(now: { speaking: boolean; listening: boolean; busy: boolean; waitingForSignIn: boolean; stopped: boolean; applied: boolean }): CompanionState {
+  if (now.speaking) return "speaking";
+  if (now.listening && !now.busy) return "listening";
+  if (now.busy) return now.waitingForSignIn ? "waiting" : "thinking";
+  if (now.stopped) return "stopped";
+  if (now.applied) return "applied";
+  return "ready";
+}
