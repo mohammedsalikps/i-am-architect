@@ -59,6 +59,8 @@ import { scaleBarFor } from "./engine/workspace/scaleBar";
 import { createWorkspacePanel } from "./ui/workspacePanel";
 import { createScaleBarOverlay } from "./ui/scaleBar";
 import { createAxisGizmo } from "./ui/axisGizmo";
+import { InteriorExploreSession } from "./engine/interior/interiorExplore";
+import { createInteriorExplore } from "./ui/interiorNavigator";
 import { SCENE_PALETTES } from "./scene/sceneTheme";
 
 const appRoot = document.getElementById("app");
@@ -753,6 +755,32 @@ const axisGizmo = createAxisGizmo(SCENE_PALETTES.light); // the theme subscripti
 // SceneManager's layers share exactly one instance.
 const visibilityStore = new VisibilityStore();
 
+// Interior Explore: walking through the project's rooms at eye height - a
+// view only. It hides roofs through the same VisibilityStore as the eye
+// buttons and restores every visibility, the selection and the exterior
+// camera on leaving; the model, its document and undo history are untouched.
+const interiorExplore = createInteriorExplore({
+  session: new InteriorExploreSession({
+    elements: () => elementStore.getAll(),
+    slabs: () => slabStore.getAll(),
+    objects: () => buildAIProjectSnapshot(project).objects,
+    visibility: visibilityStore,
+    selection: selectionStore
+  }),
+  showRoom: (room, view, handlers) => sceneManager.current?.enterInterior(room, view, handlers),
+  exitScene: () => sceneManager.current?.exitInterior(),
+  onEnter: () => {
+    sceneManager.current?.placementController.disarm(); // a click inside is looking, never placing
+    siteOverlay.setVisible(false); // the plot's marks draw over walls
+    shell.viewportContainer.parentElement?.classList.add("viewport-area--interior");
+  },
+  onExit: () => {
+    siteOverlay.setVisible(true);
+    shell.viewportContainer.parentElement?.classList.remove("viewport-area--interior");
+  },
+  subscribeModel: (listener) => elementStore.subscribe(listener)
+});
+
 // Select / Measure / Annotate in the viewport's tool row. The Measure tool
 // needs the real scene, so it is built after SceneManager (below).
 let measureTool: MeasureTool | null = null;
@@ -771,9 +799,17 @@ const shell = createAppShell({
   auth,
   onSignIn: () => void authDialog.open(),
   onSignOut: () => void signOut(),
-  onViewChange: (preset) => sceneManager.current?.setView(preset),
-  onFitToScene: () => sceneManager.current?.fitToScene(),
+  // A view preset, Fit or Focus leaves Interior Explore first - the exterior view back, then the move.
+  onViewChange: (preset) => {
+    interiorExplore.exit();
+    sceneManager.current?.setView(preset);
+  },
+  onFitToScene: () => {
+    interiorExplore.exit();
+    sceneManager.current?.fitToScene();
+  },
   onFocusSelected: () => {
+    interiorExplore.exit();
     const selectedId = selectionStore.get();
     if (selectedId) {
       sceneManager.current?.focusOn([selectedId]);
@@ -785,7 +821,10 @@ const shell = createAppShell({
   ribbonActions,
   onDuplicateSelected: duplicateSelected,
   onDeleteSelected: deleteSelected,
-  onNewProject: () => void newProject(),
+  onNewProject: () => {
+    interiorExplore.exit();
+    void newProject();
+  },
   onOpenProject: () => projectChooser.open(),
   onSaveProject: () => void saveProject(),
   onUndo: () => history.undo(),
@@ -810,7 +849,7 @@ const shell = createAppShell({
   architect: architectPanel,
   workspace,
   workspaceControl: workspacePanel.element,
-  viewportOverlays: [scaleBar.element, axisGizmo.element],
+  viewportOverlays: [scaleBar.element, axisGizmo.element, interiorExplore.element],
   // A room's inspector rows move and resize it with its walls, with the conversation's own checks.
   onRoomEdit: (roomId, edit) => architect.editRoom(roomId, edit)
 });
@@ -867,6 +906,7 @@ sceneManager.current.fitToScene();
 // the result, not leave the camera wherever it happened to be.
 persistence.subscribe((state) => {
   if (state.status === "opened") {
+    interiorExplore.exit(); // another project's rooms - leave the old one's interior first
     sceneManager.current?.fitToScene();
   }
 });

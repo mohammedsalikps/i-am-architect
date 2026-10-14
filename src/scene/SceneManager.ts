@@ -12,6 +12,9 @@ import { createCoordinateOverlay, type CoordinateOverlay } from "./coordinateOve
 import { createDimensionLayer, type DimensionLayer } from "./dimensionLayer";
 import type { ViewportSize } from "./labelSprite";
 
+/** Interior Explore's lens, degrees (vertical) - wide enough to take in a room from one corner. */
+const INTERIOR_FOV = 70;
+
 /** The fog's nearest start and end, metres - pushed further out as the camera backs away (see start()). */
 const FOG_NEAR = 30;
 const FOG_FAR = 80;
@@ -49,6 +52,9 @@ import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
 import type { AssetStore } from "../engine/assets/AssetStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+import { InteriorCamera } from "./interior/InteriorCamera";
+import type { InteriorCameraHandlers } from "./interior/InteriorCamera";
+import type { InteriorRoom, InteriorViewpoint } from "../engine/interior/interiorExplore";
 
 /** The smallest area "Fit House" frames, in metres - about a small plot (the fit itself is exact, so this is the visible area, not a fudge). */
 const MIN_FIT_EXTENT = { x: 11, y: 3, z: 11 };
@@ -109,6 +115,14 @@ export class SceneManager {
   private readonly axes: CoordinateOverlay;
   private readonly dimensions: DimensionLayer;
   private readonly dimensionListeners = new Set<(summary: string) => void>();
+  /** Picking and dragging - paused while Interior Explore walks the camera. */
+  private readonly selectionRaycaster: SelectionRaycaster;
+  private readonly manipulation: ManipulationController;
+  /** Interior Explore, while it is on: its camera, and the exterior view to return to. */
+  private interior: { camera: InteriorCamera; saved: { position: THREE.Vector3; target: THREE.Vector3; fov: number } } | null = null;
+  /** The workspace's view settings, re-applied when Interior Explore ends. */
+  private workspaceState: WorkspaceState | null = null;
+  private lastFrame = 0;
   private readonly viewListeners = new Set<(metresPerPixel: number) => void>();
   private readonly frameListeners = new Set<(camera: THREE.PerspectiveCamera, viewport: ViewportSize) => void>();
 
@@ -282,6 +296,7 @@ export class SceneManager {
     // click handler - see SelectionRaycaster.ts for why independent
     // per-layer raycasters would race each other.
     const selectionRaycaster = new SelectionRaycaster(this.camera, this.renderer.domElement, selectionStore);
+    this.selectionRaycaster = selectionRaycaster;
     selectionRaycaster.registerLayer(() => wallLayer.getMeshes());
     selectionRaycaster.registerLayer(() => pillarLayer.getMeshes());
     selectionRaycaster.registerLayer(() => beamLayer.getMeshes());
@@ -319,7 +334,7 @@ export class SceneManager {
     readout.hidden = true;
     container.appendChild(readout);
 
-    new ManipulationController({
+    this.manipulation = new ManipulationController({
       container,
       canvas: this.renderer.domElement,
       camera: this.camera,
@@ -461,6 +476,7 @@ export class SceneManager {
 
   /** Moves the camera to a named preset view, keeping the origin as the look-at target. */
   setView(preset: ViewPreset): void {
+    if (this.interior) return; // Interior Explore holds the camera in its room; leave it first
     const [x, y, z] = VIEW_CAMERA_POSITIONS[preset];
     this.camera.position.set(x, y, z);
     this.controls.target.set(0, 0, 0);
@@ -477,6 +493,7 @@ export class SceneManager {
    * somewhere arbitrary.
    */
   fitToScene(): void {
+    if (this.interior) return; // Interior Explore holds the camera in its room; leave it first
     const box = this.boundingBoxOf(null);
     // At least a typical plot's extent, so one wall or a first room is seen in context, not filling the screen.
     this.applyFit(box ? withMinimumExtent(box, MIN_FIT_EXTENT) : null);
@@ -488,6 +505,7 @@ export class SceneManager {
    * given ids currently has a visible mesh.
    */
   focusOn(objectIds: readonly string[]): void {
+    if (this.interior) return; // Interior Explore holds the camera in its room; leave it first
     if (objectIds.length === 0) {
       return;
     }
@@ -502,6 +520,7 @@ export class SceneManager {
    * metres around it so its neighbours stay in view. Camera only.
    */
   focusOnRegion(region: { center: { x: number; z: number }; sizeX: number; sizeZ: number; height: number }, margin = 2, minimum: { x: number; y: number; z: number } = MIN_FOCUS_EXTENT): void {
+    if (this.interior) return; // Interior Explore holds the camera in its room; leave it first
     const { center, sizeX, sizeZ, height } = region;
     const framed = new THREE.Box3(
       new THREE.Vector3(center.x - sizeX / 2 - margin, 0, center.z - sizeZ / 2 - margin),
@@ -515,6 +534,7 @@ export class SceneManager {
    * centimetres across and invisible at house scale. Camera only.
    */
   focusOnPoint(point: { x: number; y: number; z: number }, extent = 0.25): void {
+    if (this.interior) return; // Interior Explore holds the camera in its room; leave it first
     const half = extent / 2;
     // No ground clamp: a joint can be below ground (an under-slab drain), and the box must stay around it.
     const box = new THREE.Box3(new THREE.Vector3(point.x - half, point.y - half, point.z - half), new THREE.Vector3(point.x + half, point.y + half, point.z + half));
@@ -561,9 +581,63 @@ export class SceneManager {
 
   /** The workspace's view settings (engine/workspace/workspaceSettings.ts): grid spacing, axes, dimension labels. Snapping goes through SnapSettings. */
   setWorkspace(state: WorkspaceState): void {
+    this.workspaceState = state;
     this.ground.setSpacing(state.gridSpacing);
-    this.axes.setVisible(state.showAxes);
-    this.dimensions.setVisible(state.showDimensions);
+    // Inside a room the axes and labels would only clutter the view (and draw through walls).
+    this.axes.setVisible(state.showAxes && !this.interior);
+    this.dimensions.setVisible(state.showDimensions && !this.interior);
+  }
+
+  /**
+   * Interior Explore: the camera stands in `room` at `view` (a person's eye
+   * height) - on the first call the exterior view is remembered, OrbitControls,
+   * picking and dragging pause, the axes and labels hide and the lens widens.
+   * Later calls move to another room (or back to a room's starting view). A
+   * view only: nothing here touches the model.
+   */
+  enterInterior(room: InteriorRoom, view: InteriorViewpoint, handlers: InteriorCameraHandlers): void {
+    if (this.interior) {
+      this.interior.camera.setRoom(room, view);
+      return;
+    }
+    const saved = { position: this.camera.position.clone(), target: this.controls.target.clone(), fov: this.camera.fov };
+    this.controls.enabled = false;
+    this.selectionRaycaster.setEnabled(false);
+    this.manipulation.setEnabled(false);
+    this.axes.setVisible(false);
+    this.dimensions.setVisible(false);
+    this.camera.fov = INTERIOR_FOV;
+    this.camera.updateProjectionMatrix();
+    this.interior = { camera: new InteriorCamera(this.camera, this.renderer.domElement, room, view, handlers), saved };
+  }
+
+  /** Whether Interior Explore is on. */
+  isInteriorActive(): boolean {
+    return this.interior !== null;
+  }
+
+  /** Back to the exterior view exactly as it was, with orbiting, picking, dragging, axes and labels restored. */
+  exitInterior(): void {
+    if (!this.interior) return;
+    const { camera, saved } = this.interior;
+    camera.dispose();
+    this.interior = null;
+    this.camera.fov = saved.fov;
+    this.camera.updateProjectionMatrix();
+    this.camera.position.copy(saved.position);
+    this.controls.target.copy(saved.target);
+    this.camera.lookAt(saved.target);
+    this.controls.enabled = true;
+    this.controls.update();
+    this.selectionRaycaster.setEnabled(true);
+    this.manipulation.setEnabled(true);
+    if (this.workspaceState) {
+      this.setWorkspace(this.workspaceState);
+    } else {
+      this.axes.setVisible(true);
+      this.dimensions.setVisible(true);
+    }
+    this.notifyView();
   }
 
   /** What the dimension labels show, in words ("Dimensions shown: 1 room, 4 walls.") - now and on every change. Returns an unsubscribe. */
@@ -668,7 +742,12 @@ export class SceneManager {
   start(): void {
     const animate = (): void => {
       requestAnimationFrame(animate);
-      this.controls.update(); // required when damping is enabled
+      const now = performance.now();
+      const seconds = this.lastFrame ? (now - this.lastFrame) / 1000 : 0;
+      this.lastFrame = now;
+      // Interior Explore walks the camera itself; otherwise OrbitControls (required every frame when damping is enabled).
+      if (this.interior) this.interior.camera.update(seconds);
+      else this.controls.update();
       // The fog starts beyond whatever is being looked at - a whole plot framed
       // from 60 m away stays crisp - while the far ground still fades out.
       if (this.scene.fog instanceof THREE.Fog) {

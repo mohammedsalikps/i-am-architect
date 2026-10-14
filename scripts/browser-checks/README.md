@@ -33,6 +33,7 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
    node scripts/browser-checks/plumbing.mjs
    node scripts/browser-checks/workspace.mjs
    node scripts/browser-checks/coordinates.mjs
+   node scripts/browser-checks/interior.mjs
    ```
 
    `production-csp.mjs` runs against the **production build** instead, served by `vite preview` - the only place the Content-Security-Policy is enforced (the dev server has none):
@@ -78,6 +79,8 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - the dimension labels in the rendered pixels in the light and dark themes, with the summary unchanged and the model untouched by the switch
 - the popover's 30 × 40 m preset and a refused 2 m plot, the kitchen untouched
 - save, reload (workspace settings kept: Snap Off, Grid 0.5 m) and reopen: the record book identical, the labels back, and the reopened kitchen moving to X 12, Y 8 with its walls
+
+**`interior.mjs`** (local stack, like `coordinates.mjs`) checks Interior Explore against a real generated house: an empty project shows its "no rooms" message and changes nothing; entering lists the house's six rooms, hides the roof and sets the selection aside; the eye stands 1.6 m above the floor inside the chosen room (read from the navigator's readout); W typed into the companion never walks; walking (W, held) and dragging move and turn it but never out of the room, and a click picks nothing; Fit room goes back to the room's starting view; moving to another room keeps the roof hidden; Escape restores the exterior view pixel for pixel, the roof and the selection; the record book is unchanged throughout; top-bar Undo and Redo still work; at 1024-1920 px (seven widths) the button and the open navigator cover neither the view controls nor the companion.
 
 **`production-csp.mjs`** loads the production build (`APP`, default `http://localhost:5175/`) with its Content-Security-Policy in force, builds a furnished 3-bedroom house by conversation (no backend needed), and fails on any CSP violation or blocked fetch in the console - the furniture's glTF models are inlined as `data:` URLs, which a too-strict `connect-src` silently refused on the hosted site.
 

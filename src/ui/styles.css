@@ -1123,6 +1123,131 @@ button {
   color: var(--color-success);
 }
 
+/* Interior Explore (ui/interiorNavigator.ts): its button just under the view
+   controls, top-right, and the room navigator below it. An overlay of its own:
+   a button in the preset row would widen it under the companion at 1440 px,
+   and a row inside .viewport-area__controls would reach the companion where it
+   sits below the controls (max-width: 1420px). Its left edge stops short of
+   the companion (12px in, 354px wide outside 1420px, 338px up to it, 292px up
+   to 1100px), so on a narrow viewport the navigator narrows instead of
+   covering it. */
+.interior-explore-dock {
+  position: absolute;
+  top: 84px;
+  right: 12px;
+  bottom: 12px;
+  left: calc(12px + 354px + 10px);
+  /* Under the controls' Grid & plot popover (z-index 1), over the scene. */
+  z-index: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  /* The empty part of the column never blocks the scene. */
+  pointer-events: none;
+}
+
+.interior-explore-dock > * {
+  pointer-events: auto;
+}
+
+.interior-explore {
+  box-sizing: border-box;
+  width: 276px;
+  max-width: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(8px);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.interior-explore[hidden] {
+  display: none;
+}
+
+.interior-explore__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-strong);
+}
+
+.interior-explore__rooms {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.interior-explore__room {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.interior-explore__room:hover {
+  background: var(--color-surface-raised);
+}
+
+.interior-explore__room.is-active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: var(--font-weight-strong);
+}
+
+.interior-explore__room-size {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.interior-explore__readout,
+.interior-explore__hint,
+.interior-explore__message {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.interior-explore__readout {
+  font-variant-numeric: tabular-nums;
+}
+
+.interior-explore__message:empty,
+.interior-explore__readout:empty {
+  display: none;
+}
+
+.interior-explore__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* Inside a room the orientation gizmo and the scale bar (true only at the orbit target) step aside for the navigator. */
+.viewport-area--interior .axis-gizmo,
+.viewport-area--interior .scale-bar {
+  display: none;
+}
+
 /* The orientation gizmo (ui/axisGizmo.ts): X/Y/Z as the camera sees them, bottom-right above the scale bar. */
 .axis-gizmo {
   position: absolute;
@@ -3639,6 +3764,10 @@ button {
     transform: none;
     align-items: flex-end;
   }
+
+  .interior-explore-dock {
+    left: calc(12px + 338px + 10px);
+  }
 }
 
 @media (max-width: 1100px) {
@@ -3663,6 +3792,11 @@ button {
   .architect {
     top: 112px;
     max-height: calc(100% - 124px);
+  }
+
+  .interior-explore-dock {
+    top: 112px;
+    left: calc(12px + 292px + 10px);
   }
 }
 

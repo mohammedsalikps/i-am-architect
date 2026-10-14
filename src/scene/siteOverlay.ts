@@ -27,6 +27,8 @@ export interface SiteOverlay {
   setPalette(palette: ScenePalette): void;
   /** Keeps the plot's edge labels readable at this frame's zoom (see fitLabels). */
   fitLabels(camera: THREE.PerspectiveCamera, viewport: ViewportSize): void;
+  /** Hides the marks (they draw over walls) - Interior Explore, from inside a room. */
+  setVisible(visible: boolean): void;
 }
 
 const MARKER_COLOR = 0x4fa8ff;
@@ -205,6 +207,9 @@ export function createSiteOverlay(scene: THREE.Scene, initialPalette: ScenePalet
   let last: ArchitectViewState | null = null;
 
   const overlay: SiteOverlay = {
+    setVisible(visible) {
+      root.visible = visible;
+    },
     fitLabels(camera, viewport) {
       fitLabels(root, camera, viewport);
     },

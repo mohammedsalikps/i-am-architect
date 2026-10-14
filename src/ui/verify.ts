@@ -385,6 +385,22 @@ function run(): void {
   );
   const sourceOf = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
 
+  check("Interior Explore is a view only: its modules never reach the model's commands or stores, and every way out restores the exterior", () => {
+    const strip = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    for (const path of ["../engine/interior/interiorExplore.ts", "../scene/interior/InteriorCamera.ts", "./interiorNavigator.ts"]) {
+      const code = strip(sourceOf(path));
+      assertTrue(!/commandExecutor|\.execute\(|history\.|Store\.(add|update|remove|delete)\(/.test(code), `${path} never edits the model`);
+    }
+    assertTrue(/viewportOverlays: \[[^\]]*interiorExplore\.element\]/.test(mainSource), "the Interior Explore button and its room navigator: one overlay over the viewport");
+    assertTrue(!/interior/i.test(sourceOf("./layout.ts")), "not a button in the view-preset row - that row keeps its width beside the companion");
+    for (const exit of ["onViewChange: \\(preset\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onFitToScene: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onFocusSelected: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onNewProject: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "state\\.status === \"opened\"\\) \\{\\s*interiorExplore\\.exit\\(\\);"]) {
+      assertTrue(new RegExp(exit).test(mainSource), `leaves Interior Explore first: ${exit.split(":")[0].replace(/\\/g, "")}`);
+    }
+    const scene = sourceOf("../scene/SceneManager.ts");
+    assertTrue((scene.match(/if \(this\.interior\) return; \/\/ Interior Explore holds the camera/g) ?? []).length === 5, "setView, fitToScene and the three focus moves leave the camera in its room");
+    assertTrue(/this\.selectionRaycaster\.setEnabled\(false\);\s*this\.manipulation\.setEnabled\(false\);/.test(scene) && /this\.selectionRaycaster\.setEnabled\(true\);\s*this\.manipulation\.setEnabled\(true\);/.test(scene), "picking and dragging pause inside and resume on leaving");
+  });
+
   check("the deployed site lets its own pages use the microphone - microphone=() would block the Architect's voice input", () => {
     assertEqual(permissionsPolicies.length, 1, "exactly one Permissions-Policy header, applied to every path");
     assertEqual(policy.get("microphone"), "(self)", "microphone=(self): this origin only, never embedded or third-party frames");
