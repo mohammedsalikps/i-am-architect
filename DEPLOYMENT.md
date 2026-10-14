@@ -451,6 +451,12 @@ request after that waits while the service starts again (up to about a
 minute). The app's own requests time out sooner (15-30 s), so that first
 request can fail - retry, or use a paid instance for demos.
 
+## Release log
+
+| Date | Backend (Render) | Frontend (Vercel) | Notes |
+|---|---|---|---|
+| 2026-10-14 | `a3b7643` - merge of `feature/pro-workspace`, `[backend-first]`; `GET /health` answered `X-Release: a3b7643ba9bc` before the frontend went out | the commit that added this entry | Architect MVP: pro workspace, plumbing, light/dark theme, interruptible companion, coordinates/grid/dimensions, modern house generation. Saved projects gain a roof `style` (older backends refuse it). |
+
 ## Reference
 
 ### Backend environment (Render or Fly.io)
