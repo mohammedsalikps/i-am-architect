@@ -3,7 +3,7 @@ import { createVoiceInput } from "./voiceInput";
 import type { VoiceState } from "./voiceInput";
 import { createHandsFree, createSpeechOutput, matchSpokenChoice, spokenNumbers } from "./handsFree";
 import type { HandsFreeStatus } from "./handsFree";
-import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState";
+import { COMPANION_STATE_LABEL, COPILOT_STEPS, INITIAL_COPILOT_STATE, companionStateOf, createInputGate, nextCopilotState, stepStatuses } from "./copilotState";
 import type { CopilotEvent, CopilotState } from "./copilotState";
 import { createLevelMeter } from "./levelMeter";
 import { createTurnController } from "./turnController";
@@ -48,23 +48,14 @@ export interface ArchitectPanelOptions {
 export interface ArchitectPanel {
   element: HTMLElement;
   focusInput(): void;
+  /** A turn is waiting on the sign-in dialog (main.ts's AI fallback): the header says "Waiting", not "Thinking". */
+  setWaitingForSignIn(waiting: boolean): void;
 }
 
 /** Picked points are kept to 0.1 m (see ArchitectSession.pickedLocation) - shown the same way. */
 function fmt(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
-
-/** What the companion is doing right now - one word, always visible in the header. */
-type CompanionState = "ready" | "listening" | "thinking" | "speaking" | "applied" | "stopped";
-const STATE_LABEL: Readonly<Record<CompanionState, string>> = {
-  ready: "Ready",
-  listening: "Listening",
-  thinking: "Thinking",
-  speaking: "Speaking",
-  applied: "Applied",
-  stopped: "Stopped"
-};
 
 /** A labelled tool button: an icon and a word, so nobody has to guess what it does. */
 function toolButton(className: string, icon: string, label: string, ariaLabel: string): HTMLButtonElement {
@@ -163,17 +154,13 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   let stopped = false;
   const turns = createTurnController<ArchitectReply>((text, { signal }) => session.handle(text, { signal }));
 
-  const companionState = (): CompanionState => {
-    if (handsFree.speaking) return "speaking";
-    if (voice.listening && !turns.busy) return "listening";
-    if (turns.busy) return "thinking";
-    if (stopped) return "stopped";
-    if (copilot.phase === "applied") return "applied";
-    return "ready";
-  };
+  let waitingForSignIn = false;
+  const companionState = () =>
+    companionStateOf({ speaking: handsFree.speaking, listening: voice.listening, busy: turns.busy, waitingForSignIn, stopped, applied: copilot.phase === "applied" });
   const renderState = (): void => {
     const state = companionState();
-    stateChip.textContent = STATE_LABEL[state];
+    stateChip.textContent = COMPANION_STATE_LABEL[state];
+    stateChip.title = state === "waiting" ? "Waiting for you to sign in - or to continue without an account" : "What the architect is doing";
     stateChip.className = `architect__state architect__state--${state}`;
     element.classList.toggle("architect--busy", turns.busy);
   };
@@ -541,6 +528,10 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
       element.classList.remove("architect--collapsed");
       collapseButton.textContent = "–";
       input.focus();
+    },
+    setWaitingForSignIn: (waiting) => {
+      waitingForSignIn = waiting;
+      renderState();
     }
   };
 }

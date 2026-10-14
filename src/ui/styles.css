@@ -2938,6 +2938,13 @@ button {
   border-color: var(--color-success);
 }
 
+/* Waiting for the person (the sign-in dialog), not for the model. */
+.architect__state--waiting {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  border-style: dashed;
+}
+
 .architect__state--stopped {
   color: var(--color-text);
   border-color: var(--color-text-muted);

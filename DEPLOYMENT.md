@@ -453,9 +453,15 @@ request can fail - retry, or use a paid instance for demos.
 
 ## Release log
 
-| Date | Backend (Render) | Frontend (Vercel) | Notes |
-|---|---|---|---|
-| 2026-10-14 | `a3b7643` - merge of `feature/pro-workspace`, `[backend-first]`; `GET /health` answered `X-Release: a3b7643ba9bc` before the frontend went out | the commit that added this entry | Architect MVP: pro workspace, plumbing, light/dark theme, interruptible companion, coordinates/grid/dimensions, modern house generation. Saved projects gain a roof `style` (older backends refuse it). |
+Newest first. Each release's commit is the one on `master` that both
+services deployed: Vercel's Production deployment of it, and `GET /health`
+answering with its first 12 characters in `X-Release`.
+
+| Date | Release (master) | Backend (Render) | Frontend (Vercel) | Notes |
+|---|---|---|---|---|
+| 2026-10-14 | the merge that added this row | same commit | same commit | The companion's header says "Waiting" (not "Thinking") while a signed-out AI request waits on the sign-in dialog. No document change - both services deploy together. |
+| 2026-10-14 | `c34c174` | `c34c174` (`X-Release: c34c174290d6`) | `c34c174` (Production) | Production CSP fix: `connect-src` allows `data:`, so the inlined glTF furniture models load on the hosted site (they had fallen back to placeholder boxes). |
+| 2026-10-14 | `5cb2c21` | `a3b7643` first - merge of `feature/pro-workspace` with `[backend-first]`; `X-Release: a3b7643ba9bc` confirmed before the frontend went out - then `5cb2c21` | `5cb2c21` (Production) | Architect MVP: pro workspace, plumbing, light/dark theme, interruptible companion, coordinates/grid/dimensions, modern house generation. Saved projects gain a roof `style` (older backends refuse it). |
 
 ## Reference
 

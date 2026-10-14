@@ -194,7 +194,13 @@ function resolvesLocally(instruction: string): boolean {
  */
 async function submitArchitectFallback(instruction: string, options: AIRunOptions): Promise<AIPipelineResult> {
   if (!auth.isSignedIn() && !resolvesLocally(instruction)) {
-    await authDialog.open("Sign in to use the AI assistant for this request.");
+    // The companion says it is waiting for the person, not thinking, while the dialog is up.
+    architectPanel.setWaitingForSignIn(true);
+    try {
+      await authDialog.open("Sign in to use the AI assistant for this request.");
+    } finally {
+      architectPanel.setWaitingForSignIn(false);
+    }
   }
   return aiService.submit(instruction, options);
 }

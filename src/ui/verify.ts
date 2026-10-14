@@ -27,7 +27,7 @@ import { createHandsFree, isEchoOf, matchSpokenChoice, shortSpoken, spokenNumber
 import { DEFAULT_VOICE_SETTINGS, VOICE_SETTINGS_KEY, chooseVoice, readVoiceSettings, saveVoiceSettings } from "./voiceSettings.ts";
 import { createTurnController } from "./turnController.ts";
 import type { HandsFreeStatus } from "./handsFree.ts";
-import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState.ts";
+import { COMPANION_STATE_LABEL, COPILOT_STEPS, INITIAL_COPILOT_STATE, companionStateOf, createInputGate, nextCopilotState, stepStatuses } from "./copilotState.ts";
 import type { CopilotEvent } from "./copilotState.ts";
 import { rmsLevel } from "./levelMeter.ts";
 import { createVoiceInput } from "./voiceInput.ts";
@@ -348,6 +348,20 @@ function run(): void {
     const connect = /`connect-src ('self'[^`]*)`/.exec(viteConfig)?.[1] ?? "";
     assertEqual(connect, "'self' data: ${backendOrigin}", "connect-src: the page itself, its own data: URLs (glTF models and their buffers), and the backend");
     assertTrue(!/\*|https?:(?!\/\/)/.test(connect), "no wildcard or scheme-wide source");
+  });
+
+  check("the companion's header: a request waiting on the sign-in dialog says Waiting, never Thinking - and nothing else changes", () => {
+    const base = { speaking: false, listening: false, busy: false, waitingForSignIn: false, stopped: false, applied: false };
+    const label = (now: Partial<typeof base>) => COMPANION_STATE_LABEL[companionStateOf({ ...base, ...now })];
+    assertEqual(label({ busy: true }), "Thinking", "a turn with the model: Thinking");
+    assertEqual(label({ busy: true, waitingForSignIn: true }), "Waiting", "the same turn while the sign-in dialog waits: Waiting");
+    assertEqual(label({ waitingForSignIn: true }), "Ready", "no turn under way: the flag alone changes nothing");
+    assertEqual(label({ speaking: true, busy: true, waitingForSignIn: true }), "Speaking", "speech still comes first");
+    assertEqual(label({ listening: true }), "Listening", "listening");
+    assertEqual(label({ stopped: true }), "Stopped", "stopped");
+    assertEqual(label({ applied: true }), "Applied", "applied");
+    assertEqual(label({}), "Ready", "ready");
+    assertTrue(/architectPanel\.setWaitingForSignIn\(true\);\s*try \{\s*await authDialog\.open\("Sign in to use the AI assistant for this request\."\);\s*\} finally \{\s*architectPanel\.setWaitingForSignIn\(false\);/.test(mainSource), "main.ts sets it around the sign-in dialog and always clears it");
   });
 
   check("a [backend-first] release skips only the frontend build, and the skip fails open", () => {
