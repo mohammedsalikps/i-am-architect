@@ -10,8 +10,14 @@ const DEFAULT_BACKEND_URL = "http://localhost:8787";
  * holds the signed-in user's session token, so limiting where code can come
  * from and where data can go is the main defence if markup is ever
  * injected. `style-src 'unsafe-inline'` is needed for index.html's inline
- * <style> and the UI's element styles. The dev server is left alone - Vite's
- * HMR needs inline scripts and a websocket.
+ * <style> and the UI's element styles. `connect-src data:` lets the
+ * furniture models load: Vite inlines the small glTF files as data: URLs,
+ * and each carries its geometry as a data: buffer, both read with fetch() -
+ * without it every model failed to load on the hosted site and fell back to
+ * its placeholder box. data: URLs are content already in the page, never a
+ * network destination, so the page still reaches only itself and the
+ * backend. The dev server is left alone - Vite's HMR needs inline scripts
+ * and a websocket.
  */
 function contentSecurityPolicy(backendOrigin: string): Plugin {
   const policy = [
@@ -20,7 +26,7 @@ function contentSecurityPolicy(backendOrigin: string): Plugin {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
-    `connect-src 'self' ${backendOrigin}`,
+    `connect-src 'self' data: ${backendOrigin}`,
     "worker-src 'self' blob:",
     "object-src 'none'",
     "base-uri 'self'",

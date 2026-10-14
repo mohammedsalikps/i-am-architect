@@ -343,6 +343,13 @@ function run(): void {
     ignoreCommand?: string;
   };
 
+  check("the production CSP lets the inlined furniture models load (data:) and names no other network origin than the backend", () => {
+    const viteConfig = readFileSync(fileURLToPath(new URL("../../vite.config.ts", import.meta.url)), "utf8");
+    const connect = /`connect-src ('self'[^`]*)`/.exec(viteConfig)?.[1] ?? "";
+    assertEqual(connect, "'self' data: ${backendOrigin}", "connect-src: the page itself, its own data: URLs (glTF models and their buffers), and the backend");
+    assertTrue(!/\*|https?:(?!\/\/)/.test(connect), "no wildcard or scheme-wide source");
+  });
+
   check("a [backend-first] release skips only the frontend build, and the skip fails open", () => {
     assertEqual(vercelConfig.ignoreCommand, "node scripts/vercel-ignore-build.mjs", "Vercel's ignored-build step runs the release script");
     const script = readFileSync(fileURLToPath(new URL("../../scripts/vercel-ignore-build.mjs", import.meta.url)), "utf8");
