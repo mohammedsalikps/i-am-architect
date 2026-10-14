@@ -476,8 +476,8 @@ function buildManualBuildTab(onAddWall: () => void): HTMLElement {
 }
 
 /**
- * Bottom workspace: tabbed AI Prompt / Manual Build / Construction Method /
- * Measurements / Quotation / Design Review. AI Prompt sends the typed
+ * Bottom workspace: tabbed Measurements / Construction Method / Manual Build /
+ * AI Prompt / Quotation / Design Review - opening on Measurements. AI Prompt sends the typed
  * instruction through `onSubmitAiInstruction` (in the running app,
  * `AIService.submit` - constructed once in main.ts from the shared
  * CommandExecutor and a BackendAIProvider - see main.ts and ai/README.md
@@ -511,21 +511,29 @@ export function createCommandBar(
   /** The project's current real objects, as the AI layer already sees them (buildAIProjectSnapshot) - read fresh each time the Construction Method tab generates, never cached. */
   getConstructionObjects: () => readonly AIContextObject[],
   getProjectId: () => string | null,
-  onHighlightConstructionObjects: HighlightConstructionObjects
+  onHighlightConstructionObjects: HighlightConstructionObjects,
+  /** A close-up of one point (a fitting in the record book). */
+  onFocusPoint?: (point: { x: number; y: number; z: number }) => void
 ): CommandBar {
   // Built up front (not lazily inside the tab strip's own build()) so
-  // its `focusInput()` is available regardless of which tab is active -
-  // AI Prompt is the tab strip's first, non-disabled tab, so it's
-  // already the active one on load; this only matters once the user has
-  // switched away and back.
+  // its `focusInput()` is available whichever tab is active.
   const aiPromptTab = buildAiPromptTab(onSubmitAiInstruction, onFocusCreated, onSelectObject, onUndo, onSaveProject);
   let constructionMethodTab: ReturnType<typeof buildConstructionMethodTab> | null = null;
   let recordBookTab: ReturnType<typeof buildRecordBookTab> | null = null;
 
   const { strip, panel, activate } = createTabStrip(
     [
-      { id: "ai-prompt", label: "AI Prompt", build: () => aiPromptTab.element },
-      { id: "manual-build", label: "Manual Build", build: () => buildManualBuildTab(onAddWall) },
+      // The construction record book first: the bottom panel opens on what was built.
+      // The AI Architect companion over the viewport is the main way to talk to the AI;
+      // AI Prompt (the same backend, one instruction at a time) stays available last.
+      {
+        id: "measurements",
+        label: "Measurements",
+        build: () => {
+          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject, onFocusPoint);
+          return recordBookTab.element;
+        }
+      },
       {
         id: "construction-method",
         label: "Construction Method",
@@ -535,14 +543,8 @@ export function createCommandBar(
         },
         onDeactivate: () => constructionMethodTab?.clearHighlight()
       },
-      {
-        id: "measurements",
-        label: "Measurements",
-        build: () => {
-          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject);
-          return recordBookTab.element;
-        }
-      },
+      { id: "manual-build", label: "Manual Build", build: () => buildManualBuildTab(onAddWall) },
+      { id: "ai-prompt", label: "AI Prompt", build: () => aiPromptTab.element },
       { id: "quotation", label: "Quotation", build: () => comingSoon("Quotation"), disabled: true },
       { id: "design-review", label: "Design Review", build: () => comingSoon("Design review"), disabled: true }
     ],

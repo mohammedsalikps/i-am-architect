@@ -388,6 +388,13 @@ export interface AIRunOptions {
    * (the EAVARA Architect: clarifications, then one undo step per stage).
    */
   housePlan?: "build" | "return";
+  /**
+   * Cancels the run: once aborted (the user pressed Stop, or corrected
+   * themselves while this was still thinking), nothing more is executed -
+   * a provider reply that arrives afterwards is discarded unapplied, and
+   * the result says `cancelled`. Never sent to the provider or backend.
+   */
+  signal?: AbortSignal;
 }
 
 /** One command's outcome after passing through validation and (if valid) CommandExecutor. */
@@ -398,7 +405,7 @@ export interface AICommandOutcome {
 }
 
 /** Where in the pipeline a failure happened - lets a caller distinguish "the provider produced garbage" from "CommandExecutor rejected a well-formed command". "design" is a whole-house/design-intent request (see houseIntent.ts/houseDesign.ts) that AICommandPipeline recognized and resolved deterministically, entirely BEFORE the provider was ever called - its failures (an unsupported footprint, too many rooms, a design the construction engine couldn't build) are its own stage, distinct from "provider" (which only ever means the AI provider itself). "deterministic" is the same idea for one common, unambiguous edit recognized locally (see deterministicIntent.ts) - never a whole house, but the same "resolved before the provider was ever called" shape. */
-export type AIPipelineStage = "input" | "design" | "deterministic" | "provider" | "validation" | "execution";
+export type AIPipelineStage = "input" | "design" | "deterministic" | "provider" | "validation" | "execution" | "cancelled";
 
 export interface AIPipelineError {
   stage: AIPipelineStage;
@@ -437,4 +444,6 @@ export interface AIPipelineResult {
    * the caller builds it. `outcomes` is empty.
    */
   housePlan?: HouseDesignRequest;
+  /** True when the AI provider (the model, via the backend) was actually called for this instruction - false/absent when it was resolved locally (a recognized house, a deterministic edit). */
+  usedProvider?: boolean;
 }

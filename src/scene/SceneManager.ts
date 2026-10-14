@@ -6,6 +6,18 @@ import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
+import type { GroundHandle } from "./ground";
+import { SCENE_PALETTES } from "./sceneTheme";
+import { createCoordinateOverlay, type CoordinateOverlay } from "./coordinateOverlay";
+import { createDimensionLayer, type DimensionLayer } from "./dimensionLayer";
+import type { ViewportSize } from "./labelSprite";
+
+/** The fog's nearest start and end, metres - pushed further out as the camera backs away (see start()). */
+const FOG_NEAR = 30;
+const FOG_FAR = 80;
+import { metresPerPixelAt } from "../engine/workspace/scaleBar";
+import type { WorkspaceState } from "../engine/workspace/workspaceSettings";
+import type { Theme } from "../ui/theme";
 import { createHorizonBackground, HORIZON_FOG_COLOR } from "./environment";
 import { WallLayer } from "./wall/WallLayer";
 import { PillarLayer } from "./pillar/PillarLayer";
@@ -14,6 +26,7 @@ import { SlabLayer } from "./slab/SlabLayer";
 import { DoorLayer } from "./door/DoorLayer";
 import { WindowLayer } from "./window/WindowLayer";
 import { ElementLayer } from "./elements/ElementLayer";
+import { FittingLayer } from "./elements/FittingLayer";
 import { AssetLayer } from "./assets/AssetLayer";
 import { AssetLoader } from "./assets/AssetLoader";
 import { SelectionRaycaster } from "./SelectionRaycaster";
@@ -25,7 +38,7 @@ import { createStoreSnapper } from "../engine/snapping/storeSnapper";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
 import type { VisibilityStore } from "./visibility/VisibilityStore";
 import { PlacementController } from "./placement/PlacementController";
-import { computeArchitecturalFit } from "./camera/fitCamera";
+import { computeArchitecturalFit, withMinimumExtent } from "./camera/fitCamera";
 import type { CommandResult } from "../engine/commands/types";
 import type { WallStore } from "../engine/wall/WallStore";
 import type { PillarStore } from "../engine/pillar/PillarStore";
@@ -36,6 +49,11 @@ import type { WindowStore } from "../engine/window/WindowStore";
 import type { ElementStore } from "../engine/elements/ElementStore";
 import type { AssetStore } from "../engine/assets/AssetStore";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
+
+/** The smallest area "Fit House" frames, in metres - about a small plot (the fit itself is exact, so this is the visible area, not a fudge). */
+const MIN_FIT_EXTENT = { x: 11, y: 3, z: 11 };
+/** The smallest area "Focus" frames - enough to see an element in place. */
+const MIN_FOCUS_EXTENT = { x: 7, y: 2.5, z: 7 };
 
 /** Camera view presets the UI's view-control buttons can request. */
 export type ViewPreset = "perspective" | "top" | "front" | "side";
@@ -85,6 +103,14 @@ export class SceneManager {
    * data, and never written back to any store.
    */
   private readonly highlightedMeshes = new Map<THREE.Mesh, THREE.Color>();
+  private readonly ground: GroundHandle;
+  private theme: Theme = "light";
+  /** The X/Y/Z axes and origin marker, and the room/wall dimension labels - view guides, never model objects. */
+  private readonly axes: CoordinateOverlay;
+  private readonly dimensions: DimensionLayer;
+  private readonly dimensionListeners = new Set<(summary: string) => void>();
+  private readonly viewListeners = new Set<(metresPerPixel: number) => void>();
+  private readonly frameListeners = new Set<(camera: THREE.PerspectiveCamera, viewport: ViewportSize) => void>();
 
   constructor(
     container: HTMLElement,
@@ -115,10 +141,10 @@ export class SceneManager {
     // matching fog so distant geometry softens into that same tone
     // instead of clipping hard at the camera's far plane.
     this.scene.background = createHorizonBackground();
-    this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, 30, 80);
+    this.scene.fog = new THREE.Fog(HORIZON_FOG_COLOR, FOG_NEAR, FOG_FAR);
 
     this.camera = new THREE.PerspectiveCamera(
-      60,
+      45,
       container.clientWidth / container.clientHeight,
       0.1,
       1000
@@ -174,6 +200,18 @@ export class SceneManager {
       // nudged slightly up here for a touch more presence at floor level).
       gtaoPass.blendIntensity = 0.75;
       gtaoPass.updateGtaoMaterial({ radius: 0.3, samples: 16 });
+      // Presentation-only marks (labels, translucent previews) flagged
+      // userData.excludeFromAO stay out of the AO depth/normal pass, as
+      // GTAOPass already does for lines and points - otherwise every label
+      // sprite casts a dark occlusion halo onto the ground behind it.
+      // restoreVisibility() puts back what this hid (it caches first).
+      const hideLinesAndPoints = gtaoPass.overrideVisibility.bind(gtaoPass);
+      gtaoPass.overrideVisibility = () => {
+        hideLinesAndPoints();
+        this.scene.traverse((object) => {
+          if (object.userData.excludeFromAO) object.visible = false;
+        });
+      };
       composer.addPass(gtaoPass);
       composer.addPass(new OutputPass());
 
@@ -192,8 +230,9 @@ export class SceneManager {
     // Close enough to inspect a room from the inside (section 18's
     // "interior view" - no separate first-person system, just letting
     // OrbitControls get close), far enough out that "Fit House" on a
-    // large project never asks for more distance than this allows.
-    this.controls.minDistance = 1.2;
+    // large project never asks for more distance than this allows. 0.3 m
+    // lets a pipe fitting (a few centimetres across) be inspected up close.
+    this.controls.minDistance = 0.3;
     this.controls.maxDistance = 80;
     // Stops just short of the horizon rather than letting the camera dip
     // underneath the ground plane and look up at the building's
@@ -201,9 +240,16 @@ export class SceneManager {
     // viewport" detail. Comfortably above the tightest interior angle
     // minDistance already allows.
     this.controls.maxPolarAngle = Math.PI * 0.49;
+    // The scale bar follows every orbit, pan and zoom.
+    this.controls.addEventListener("change", this.notifyView);
 
     addLights(this.scene);
-    addGround(this.scene);
+    this.ground = addGround(this.scene);
+    // The coordinate system, drawn - the same X (east) / Y (up) / Z (south) the inspector, record book and conversation use.
+    this.axes = createCoordinateOverlay(this.scene, SCENE_PALETTES[this.theme]);
+    this.dimensions = createDimensionLayer(this.scene, { wallStore, elementStore, visibilityStore }, SCENE_PALETTES[this.theme], (summary) => {
+      for (const listener of this.dimensionListeners) listener(summary);
+    });
 
     // Not stored on `this`: every *Layer stays alive via the
     // subscriptions it registers with its store/selectionStore/
@@ -216,6 +262,8 @@ export class SceneManager {
     const doorLayer = new DoorLayer(this.scene, doorStore, selectionStore, visibilityStore);
     const windowLayer = new WindowLayer(this.scene, windowStore, selectionStore, visibilityStore);
     const elementLayer = new ElementLayer(this.scene, elementStore, selectionStore, visibilityStore);
+    // Pipe fittings, worked out from the pipes' connections. A click on one selects the visible pipe whose leg it's on.
+    const fittingLayer = new FittingLayer(this.scene, elementStore, visibilityStore);
     const assetLoader = new AssetLoader();
     const assetLayer = new AssetLayer(this.scene, assetStore, selectionStore, visibilityStore, assetLoader);
     this.getAllMeshes = () => [
@@ -226,6 +274,7 @@ export class SceneManager {
       ...doorLayer.getMeshes(),
       ...windowLayer.getMeshes(),
       ...elementLayer.getMeshes(),
+      ...fittingLayer.getMeshes(),
       ...assetLayer.getMeshes()
     ];
 
@@ -240,6 +289,7 @@ export class SceneManager {
     selectionRaycaster.registerLayer(() => doorLayer.getMeshes());
     selectionRaycaster.registerLayer(() => windowLayer.getMeshes());
     selectionRaycaster.registerLayer(() => elementLayer.getMeshes());
+    selectionRaycaster.registerLayer(() => fittingLayer.getMeshes());
     selectionRaycaster.registerLayer(() => assetLayer.getMeshes());
 
     // Mouse manipulation of the selected object: handles render from the
@@ -295,7 +345,9 @@ export class SceneManager {
         history,
         readObject,
         // Endpoints, corners, centers, alignment, the grid, wall faces - see engine/snapping/.
-        snapper: createStoreSnapper(stores, snapSettings)
+        snapper: createStoreSnapper(stores, snapSettings),
+        // Drags move in the workspace's snap step while snapping is on; finely (1 cm) while it's off.
+        moveStep: () => (snapSettings.isEnabled() ? snapSettings.getStep() : 0.01)
       })
     });
 
@@ -310,12 +362,58 @@ export class SceneManager {
     window.addEventListener("resize", this.handleResize);
   }
 
+  /** Pixels of the viewport's left edge covered by a floating panel (the AI Architect copilot) - see setOverlayInset. */
+  private overlayInset = 0;
+
+  /**
+   * A floating panel covers `px` of the viewport's left edge: shift the
+   * projection so the scene's centre sits in the middle of the UNCOVERED
+   * area (and fits use that area's width) - instead of framing the house
+   * behind the panel. Picking stays exact: the raycaster uses the same
+   * projection. 0 restores the normal, centred projection.
+   */
+  setOverlayInset(px: number): void {
+    const inset = Math.max(0, Math.round(px));
+    if (inset === this.overlayInset) return;
+    this.overlayInset = inset;
+    this.applyProjection();
+  }
+
+  /** The width/height of the part of the viewport no panel covers. */
+  private visibleAspect(): number {
+    const width = this.container.clientWidth;
+    const height = Math.max(1, this.container.clientHeight);
+    const inset = this.effectiveInset(width);
+    return Math.max(1, width - inset) / height;
+  }
+
+  private effectiveInset(width: number): number {
+    // A panel covering most of a narrow viewport isn't worth offsetting for.
+    return this.overlayInset > 0 && this.overlayInset < width * 0.6 ? this.overlayInset : 0;
+  }
+
+  private applyProjection(): void {
+    const width = this.container.clientWidth;
+    const height = Math.max(1, this.container.clientHeight);
+    const inset = this.effectiveInset(width);
+    if (inset > 0) {
+      // A virtual image `inset` px wider than the canvas, centred on the camera
+      // axis; the canvas shows its left `width` px - so the axis lands in the
+      // middle of the uncovered part.
+      this.camera.aspect = (width + inset) / height;
+      this.camera.setViewOffset(width + inset, height, 0, 0, width, height);
+    } else {
+      this.camera.aspect = width / height;
+      this.camera.clearViewOffset();
+    }
+    this.camera.updateProjectionMatrix();
+  }
+
   private readonly handleResize = (): void => {
     const width = this.container.clientWidth;
     const height = this.container.clientHeight;
 
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
+    this.applyProjection();
     this.renderer.setSize(width, height);
     // The composer's own render targets must track the renderer's size
     // exactly like this.renderer.setSize() above - composer.setSize()
@@ -324,6 +422,7 @@ export class SceneManager {
     // re-applied every time, not just at construction.
     this.composer?.setSize(width, height);
     this.resizeGtaoPass(width, height);
+    this.notifyView();
   };
 
   /**
@@ -378,7 +477,9 @@ export class SceneManager {
    * somewhere arbitrary.
    */
   fitToScene(): void {
-    this.applyFit(this.boundingBoxOf(null));
+    const box = this.boundingBoxOf(null);
+    // At least a typical plot's extent, so one wall or a first room is seen in context, not filling the screen.
+    this.applyFit(box ? withMinimumExtent(box, MIN_FIT_EXTENT) : null);
   }
 
   /**
@@ -390,7 +491,34 @@ export class SceneManager {
     if (objectIds.length === 0) {
       return;
     }
-    this.applyFit(this.boundingBoxOf(new Set(objectIds)));
+    const box = this.boundingBoxOf(new Set(objectIds));
+    // A small minimum, so a newly built wall is framed with some of its surroundings rather than filling the screen.
+    this.applyFit(box ? withMinimumExtent(box, MIN_FOCUS_EXTENT) : null);
+  }
+
+  /**
+   * Frames a region that isn't (yet) an object - the architect's preview
+   * of a room or wall before it is built - with a margin of `margin`
+   * metres around it so its neighbours stay in view. Camera only.
+   */
+  focusOnRegion(region: { center: { x: number; z: number }; sizeX: number; sizeZ: number; height: number }, margin = 2, minimum: { x: number; y: number; z: number } = MIN_FOCUS_EXTENT): void {
+    const { center, sizeX, sizeZ, height } = region;
+    const framed = new THREE.Box3(
+      new THREE.Vector3(center.x - sizeX / 2 - margin, 0, center.z - sizeZ / 2 - margin),
+      new THREE.Vector3(center.x + sizeX / 2 + margin, height, center.z + sizeZ / 2 + margin)
+    );
+    this.applyFit(withMinimumExtent(framed, minimum));
+  }
+
+  /**
+   * A close-up of one point - a pipe fitting at its joint, which is a few
+   * centimetres across and invisible at house scale. Camera only.
+   */
+  focusOnPoint(point: { x: number; y: number; z: number }, extent = 0.25): void {
+    const half = extent / 2;
+    // No ground clamp: a joint can be below ground (an under-slab drain), and the box must stay around it.
+    const box = new THREE.Box3(new THREE.Vector3(point.x - half, point.y - half, point.z - half), new THREE.Vector3(point.x + half, point.y + half, point.z + half));
+    this.applyFit(box, this.controls.minDistance);
   }
 
   /**
@@ -414,6 +542,65 @@ export class SceneManager {
    * step normally either way and only reports the unresolved count,
    * rather than throwing (task section 6).
    */
+  /**
+   * The workspace theme's viewport: the backdrop, fog, ground and grid
+   * (scene/sceneTheme.ts). Construction objects keep their own colours.
+   */
+  setTheme(theme: Theme): void {
+    if (theme === this.theme) return;
+    this.theme = theme;
+    const palette = SCENE_PALETTES[theme];
+    const previous = this.scene.background;
+    this.scene.background = createHorizonBackground(palette);
+    if (previous instanceof THREE.Texture) previous.dispose();
+    if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.setHex(palette.fog);
+    this.ground.setPalette(palette);
+    this.axes.setPalette(palette);
+    this.dimensions.setPalette(palette);
+  }
+
+  /** The workspace's view settings (engine/workspace/workspaceSettings.ts): grid spacing, axes, dimension labels. Snapping goes through SnapSettings. */
+  setWorkspace(state: WorkspaceState): void {
+    this.ground.setSpacing(state.gridSpacing);
+    this.axes.setVisible(state.showAxes);
+    this.dimensions.setVisible(state.showDimensions);
+  }
+
+  /** What the dimension labels show, in words ("Dimensions shown: 1 room, 4 walls.") - now and on every change. Returns an unsubscribe. */
+  onDimensionSummary(listener: (summary: string) => void): () => void {
+    this.dimensionListeners.add(listener);
+    listener(this.dimensions.summary());
+    return () => this.dimensionListeners.delete(listener);
+  }
+
+  /** Called every frame before it is drawn, with the camera and the viewport's size in pixels - for overlays that size their labels to the zoom (the plot's). Returns an unsubscribe. */
+  onFrame(listener: (camera: THREE.PerspectiveCamera, viewport: ViewportSize) => void): () => void {
+    this.frameListeners.add(listener);
+    return () => this.frameListeners.delete(listener);
+  }
+
+  /** Metres per screen pixel at the camera's look-at point - now and whenever the view moves, zooms or resizes. For the scale bar. */
+  onViewChange(listener: (metresPerPixel: number) => void): () => void {
+    this.viewListeners.add(listener);
+    listener(this.metresPerPixel());
+    return () => this.viewListeners.delete(listener);
+  }
+
+  private metresPerPixel(): number {
+    return metresPerPixelAt(this.camera.position.distanceTo(this.controls.target), this.camera.fov, this.container.clientHeight);
+  }
+
+  private readonly notifyView = (): void => {
+    if (this.viewListeners.size === 0) return;
+    const value = this.metresPerPixel();
+    for (const listener of this.viewListeners) listener(value);
+  };
+
+  /** The viewport's current theme. */
+  getTheme(): Theme {
+    return this.theme;
+  }
+
   highlightConstructionObjects(objectIds: readonly string[] | null): { resolved: number; unresolved: number } {
     for (const [mesh, color] of this.highlightedMeshes) {
       (mesh.material as THREE.MeshStandardMaterial).color.copy(color);
@@ -466,12 +653,12 @@ export class SceneManager {
   }
 
   /** Keeps the camera's current viewing angle, moving only its distance and look-at target to frame `box`. */
-  private applyFit(box: THREE.Box3 | null): void {
+  private applyFit(box: THREE.Box3 | null, minDistance?: number): void {
     if (!box) {
       return;
     }
     const direction = this.camera.position.clone().sub(this.controls.target);
-    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.camera.aspect });
+    const { position, target } = computeArchitecturalFit(box, direction, { fovDegrees: this.camera.fov, aspect: this.visibleAspect(), ...(minDistance !== undefined ? { minDistance } : {}) });
     this.camera.position.copy(position);
     this.controls.target.copy(target);
     this.camera.lookAt(target);
@@ -482,6 +669,19 @@ export class SceneManager {
     const animate = (): void => {
       requestAnimationFrame(animate);
       this.controls.update(); // required when damping is enabled
+      // The fog starts beyond whatever is being looked at - a whole plot framed
+      // from 60 m away stays crisp - while the far ground still fades out.
+      if (this.scene.fog instanceof THREE.Fog) {
+        const distance = this.camera.position.distanceTo(this.controls.target);
+        this.scene.fog.near = Math.max(FOG_NEAR, distance * 1.6);
+        this.scene.fog.far = Math.max(FOG_FAR, distance * 4.5);
+      }
+      // Labels keep a readable size at any zoom, and don't pile up (labelSprite.ts fitLabels).
+      this.camera.updateMatrixWorld();
+      const viewport = { width: this.container.clientWidth, height: this.container.clientHeight };
+      this.axes.update(this.camera, viewport);
+      this.dimensions.update(this.camera, viewport);
+      for (const listener of this.frameListeners) listener(this.camera, viewport);
       if (this.composer) {
         try {
           this.composer.render();

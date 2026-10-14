@@ -412,6 +412,40 @@ included.
 8. Deployed smoke tests - section 3, step 9, with
    `DEPLOYED_BACKEND_URL=https://<service>.onrender.com`.
 
+**Release order: backend first.** The backend validates every saved
+project with the same engine code as the browser
+(`src/engine/project/projectDocument.ts`). When a release adds a field
+to the document - roofs gained a `style` parameter (flat / mono-pitch /
+gable) - an older backend refuses projects that use it. The reverse is
+safe: a newer backend reads older documents (a roof saved without a style
+opens as a gable). Render and Vercel both deploy every commit on
+`master`, so such a release goes out in two commits:
+
+1. Merge to `master` with **`[backend-first]`** in the merge commit's
+   subject line (its first line - the marker anywhere else is ignored).
+   Render deploys it; Vercel's ignored-build step
+   (`vercel.json` `ignoreCommand` → `scripts/vercel-ignore-build.mjs`)
+   skips the frontend build for that commit.
+2. Wait until the backend runs it: `GET /health` answers with an
+   `X-Release` header - the first 12 characters of the deployed commit
+   (Render's `RENDER_GIT_COMMIT`):
+
+   ```bash
+   curl -sI https://iarchitect-backend-staging.onrender.com/health
+   ```
+
+3. Then push the next commit to `master` (without the marker) - Vercel
+   builds and publishes the frontend.
+
+**Rolling back.** Vercel: promote the previous Production deployment
+(Vercel → the project → Deployments → … → Promote to Production) -
+instant, no rebuild. Render: the service → Events → an earlier deploy →
+Rollback. Roll the frontend back first, then the backend, so an older
+backend never meets a newer frontend. Or `git revert` the merge on
+`master`, which redeploys both. Projects saved in the meantime keep any
+roof `style`, which an older backend refuses - roll back the backend only
+if no such projects need saving.
+
 **Free instances** sleep after 15 minutes without traffic; the first
 request after that waits while the service starts again (up to about a
 minute). The app's own requests time out sooner (15-30 s), so that first

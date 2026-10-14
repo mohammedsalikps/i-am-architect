@@ -62,6 +62,18 @@ color: a painted wall is still the same wall - same id, size, place, and
 assemblies - and one undo unpaints it. The Materials tab applies any
 library material (with its typical color) the same way.
 
+## Roof styles
+
+The roof kind has one parameter, `style` - `flat` (a deck with a parapet),
+`mono-pitch` (one slope across its width) or `gable` (the ridge along its
+length) - drawn by `scene/elements/buildElementMesh.ts` inside the same box,
+so a style never changes a roof's length, span or position. `gable` is the
+catalog default and the **legacy** value: a project saved before the
+parameter existed has no `style`, and `projectDocument.ts` reads the
+parameter's `legacy` value for it instead of refusing the document. The
+heights and finishes each style is given when restyled live in
+`roofStyles.ts`.
+
 ## Adding a kind
 
 1. Add an entry to `ELEMENT_KINDS` in `catalog.ts` (reuse a `shape`, or add
@@ -75,7 +87,15 @@ duplicate → delete → undo → redo → save/reopen lifecycle.
 
 ## Not modeled (yet)
 
-No CSG openings in non-rectangular walls, no fittings or flow between
-pipes, no circuits, no structural, hydraulic, or electrical load
-calculations, no code compliance, and no terrain. Room membership is by
-object center only.
+No CSG openings in non-rectangular walls, no flow between pipes, no
+circuits, no structural, hydraulic, or electrical load calculations, no
+code compliance, and no terrain. Room membership is by object center
+only. Pipes are level runs (no risers or falls yet). Pipe fittings are not
+stored elements: they are worked out from connected water and drain pipe
+ends against the uPVC fittings sheet (engine/plumbing/), drawn by
+scene/elements/FittingLayer.ts and listed in the record book. Only uPVC
+(or PVC, i.e. PVC-U) pipes take the sheet's sizes and fittings; joints
+between other pipe materials (CPVC, copper...) get none, and a uPVC pipe
+joined to one is flagged; a finish such as paint doesn't change a pipe's
+material. Clicking a fitting selects the visible pipe whose leg was clicked.
+Pipe runs by conversation never join hot and cold water pipes.

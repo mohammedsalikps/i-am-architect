@@ -70,8 +70,17 @@ export class AssetLoader {
         this.loader.load(
           resolveAssetUrl(definition.url),
           (gltf) => {
-            const template = gltf.scene;
-            const naturalSize = new THREE.Box3().setFromObject(template).getSize(new THREE.Vector3());
+            // The models are authored standing on y = 0 (scripts/generate-asset-models.mjs),
+            // but an asset's position is the CENTRE of its box, like every other object's
+            // (createAsset.ts, the record book, the inspector). Re-centred here, once, on the
+            // model's own bounds - otherwise every piece of furniture drew half its height too
+            // high (a wardrobe's top poked through a flat roof).
+            const model = gltf.scene;
+            const bounds = new THREE.Box3().setFromObject(model);
+            const naturalSize = bounds.getSize(new THREE.Vector3());
+            model.position.sub(bounds.getCenter(new THREE.Vector3()));
+            const template = new THREE.Group();
+            template.add(model);
             resolve({ template, naturalSize });
           },
           undefined,

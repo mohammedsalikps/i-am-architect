@@ -222,6 +222,18 @@ export class AICommandPipeline {
     availableObjectTypes: readonly ObjectType[] = AI_SUPPORTED_OBJECT_TYPES,
     options: AIRunOptions = {}
   ): Promise<AIPipelineResult> {
+    const trace = { usedProvider: false };
+    const result = await this.runOnce(instruction, snapshot, availableObjectTypes, options, trace);
+    return trace.usedProvider ? { ...result, usedProvider: true } : result;
+  }
+
+  private async runOnce(
+    instruction: string,
+    snapshot: AIProjectSnapshot,
+    availableObjectTypes: readonly ObjectType[],
+    options: AIRunOptions,
+    trace: { usedProvider: boolean }
+  ): Promise<AIPipelineResult> {
     const trimmedInstruction = typeof instruction === "string" ? instruction.trim() : "";
 
     if (trimmedInstruction.length === 0) {
@@ -256,7 +268,10 @@ export class AICommandPipeline {
       return this.runDeterministicIntent(instruction, deterministic, projectContext, availableObjectTypes);
     }
 
+    // Cancelled before the provider was even asked: nothing is sent.
+    if (options.signal?.aborted) return cancelledRun(instruction);
     let response;
+    trace.usedProvider = true;
     try {
       response = await this.provider.interpret({
         instruction: trimmedInstruction,
@@ -264,6 +279,7 @@ export class AICommandPipeline {
         availableObjectTypes
       });
     } catch (error) {
+      if (options.signal?.aborted) return cancelledRun(instruction);
       return {
         success: false,
         instruction,
@@ -271,6 +287,9 @@ export class AICommandPipeline {
         errors: [{ stage: "provider", message: `Provider threw an error: ${String(error)}` }]
       };
     }
+
+    // Cancelled while the provider was thinking (Stop, or a newer correction): its reply is discarded - nothing below runs, so the model is untouched.
+    if (options.signal?.aborted) return cancelledRun(instruction);
 
     if (!response || !Array.isArray(response.commands)) {
       return {
@@ -573,4 +592,9 @@ export class AICommandPipeline {
         : "";
     return { success: true, instruction, outcomes, errors: [], notes: `${summarizeHouseDesign(built.summary)}${placement}`, houseSummary: built.summary };
   }
+}
+
+/** A run cancelled through AIRunOptions.signal: nothing was executed. */
+function cancelledRun(instruction: string): AIPipelineResult {
+  return { success: false, instruction, outcomes: [], errors: [{ stage: "cancelled", message: "Cancelled before anything was changed." }] };
 }

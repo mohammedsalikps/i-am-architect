@@ -5,6 +5,8 @@ import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 import type { AuthController } from "../engine/auth/AuthController";
+import { themeToggleLabel } from "./theme";
+import type { ThemeStore } from "./theme";
 
 export type TopBarOptions = {
   projectMeta: ProjectMetaStore;
@@ -19,6 +21,11 @@ export type TopBarOptions = {
   onUndo: () => void;
   onRedo: () => void;
   history: HistoryManager;
+  /** The search box: each change searches the project (the Project tree shows the matches); Enter picks the first. Without these the box stays disabled. */
+  onSearch?: (query: string) => void;
+  onSearchPick?: () => boolean;
+  /** The light/dark switch, beside the account - see ui/theme.ts. */
+  theme?: ThemeStore;
 };
 
 /**
@@ -156,8 +163,28 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
   // labelled as not live yet.
   const search = el("input", {
     className: "app-header__search",
-    attrs: { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true", title: "Coming soon" }
-  });
+    attrs: options.onSearch
+      ? { type: "search", placeholder: "Search the project - name, id, material or room", "aria-label": "Search the project", autocomplete: "off", spellcheck: "false", title: "Matches show in the Project tree; Enter selects and frames the first" }
+      : { type: "search", placeholder: "Search commands, tools, objects...", disabled: "true", title: "Coming soon" }
+  }) as HTMLInputElement;
+  if (options.onSearch) {
+    const onSearch = options.onSearch;
+    search.addEventListener("input", () => onSearch(search.value));
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        // The tree's own box may have been changed since: pick from what this box shows.
+        onSearch(search.value);
+        options.onSearchPick?.();
+      } else if (event.key === "Escape" && search.value) {
+        // Clearing the search: don't let that Escape also disarm a placement tool or cancel a drag.
+        // An Escape in an empty box goes on to them as usual.
+        event.stopPropagation();
+        search.value = "";
+        onSearch("");
+      }
+    });
+  }
 
   const accountName = el("span", { className: "app-header__account-name" });
   const signInButton = el("button", {
@@ -183,5 +210,22 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     signOutButton.hidden = state.status !== "signed-in";
   });
 
-  return el("header", { className: "app-header" }, [branding, quickAccess, projectArea, search, account]);
+  // One click switches the whole workspace (chrome and viewport) between light and dark; the choice is remembered.
+  const themeIcon = el("span", { className: "app-header__theme-icon", attrs: { "aria-hidden": "true" } });
+  const themeText = el("span", { className: "app-header__theme-text" });
+  const themeButton = el("button", { className: "app-header__theme", attrs: { type: "button", "aria-label": "Dark theme" } }, [themeIcon, themeText]);
+  themeButton.hidden = !options.theme;
+  if (options.theme) {
+    const store = options.theme;
+    themeButton.addEventListener("click", () => store.toggle());
+    store.subscribe((theme) => {
+      const face = themeToggleLabel(theme);
+      themeIcon.textContent = face.icon;
+      themeText.textContent = face.text;
+      themeButton.title = face.title;
+      themeButton.setAttribute("aria-pressed", String(theme === "dark"));
+    });
+  }
+
+  return el("header", { className: "app-header" }, [branding, quickAccess, projectArea, search, themeButton, account]);
 }

@@ -62,7 +62,9 @@ function toSnapObject(record: SnapRecord): SnapObject & { hostId?: string | null
  *   key point, then to the grid. Endpoints already at its joint aren't
  *   targets: they move with it.
  */
-export function createStoreSnapper(stores: SnapSourceStores, settings: { isEnabled(): boolean }): ManipulationSnapper {
+export function createStoreSnapper(stores: SnapSourceStores, settings: { isEnabled(): boolean; getStep?(): number }): ManipulationSnapper {
+  /** The grid moves snap to - the workspace's snap step (0.1 m unless changed). */
+  const step = (): number => settings.getStep?.() ?? 0.1;
   const everything = () =>
     [
       ...stores.wallStore.getAll(),
@@ -110,7 +112,7 @@ export function createStoreSnapper(stores: SnapSourceStores, settings: { isEnabl
       for (const connection of moving.connections ?? []) {
         excluded.add(connection.objectId);
       }
-      return snapMove(moving, candidate, all.filter((object) => !excluded.has(object.id))).position;
+      return snapMove(moving, candidate, all.filter((object) => !excluded.has(object.id)), { grid: step() }).position;
     },
 
     endpoint(objectId, endpoint, candidate) {
@@ -161,7 +163,7 @@ export function createStoreSnapper(stores: SnapSourceStores, settings: { isEnabl
       }
 
       // 3. The grid.
-      return { point: { x: toGrid(candidate.x), y: candidate.y, z: toGrid(candidate.z) }, target: null };
+      return { point: { x: toGrid(candidate.x, step()), y: candidate.y, z: toGrid(candidate.z, step()) }, target: null };
     }
   };
 }

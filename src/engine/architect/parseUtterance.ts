@@ -1,6 +1,10 @@
 // Explicit .ts extensions on value imports let Node run this file directly
 // (engine/architect/verify.ts does). Harmless for Vite.
 import { parseHouseIntent, readHouseRequest } from "../ai/houseIntent.ts";
+import { isAdjustment, readMoveTo } from "./adjust.ts";
+import { isRelocation } from "./roomEdits.ts";
+import { isPipeRun } from "./pipeRun.ts";
+import type { ExteriorStyle, RoofStyle } from "../elements/roofStyles.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
 
@@ -37,6 +41,14 @@ export type Utterance =
   | { kind: "defaults" }
   | { kind: "pick-location" }
   | { kind: "location"; location: LocationRef }
+  /** A workspace view setting, never the model: "set the grid spacing to half a metre". */
+  | { kind: "grid"; spacing: number }
+  /** "Turn snapping off", "snap to 0.25 m". */
+  | { kind: "snapping"; on?: boolean; step?: number }
+  /** "Keep the dimensions but make the exterior modern" - the roof's shape and the walls' finish, never a size. `roof`: a roof style said with it. */
+  | { kind: "exterior"; style: ExteriorStyle; roof?: RoofStyle }
+  /** "Make the roof flat", "change it to a gable roof". */
+  | { kind: "roof-style"; style: RoofStyle }
   | { kind: "site"; dimensions?: HouseFootprint; area?: number; location?: LocationRef }
   | { kind: "house"; request: HouseDesignRequest; location?: LocationRef; unsupported?: string }
   | { kind: "details"; request: HouseDesignRequest; location?: LocationRef }
@@ -49,10 +61,17 @@ export type Utterance =
   | { kind: "show"; text: string }
   | { kind: "show-roof" }
   | { kind: "refurnish"; text: string }
-  | { kind: "move-opening"; text: string; opening: "door" | "window"; distance?: number; direction?: Direction }
+  /** `relocate`: into another wall ("put the door on the other wall"), not along its own. */
+  | { kind: "move-opening"; text: string; opening: "door" | "window"; distance?: number; direction?: Direction; relocate?: true }
   | { kind: "wall-length"; text: string; length?: number }
   /** One new wall, built by conversation (wallBuilder.ts) - "add a 5 m brick wall", "build a wall". */
   | { kind: "build-wall"; text: string }
+  /** A change to one existing element - "move it 2 m east", "make it 3 m high", "use brick instead" (adjust.ts). */
+  /** `room`: the words named a room ("make that room 4.5 m wide") - the target is a room, never another object. */
+  | { kind: "adjust"; text: string; room?: true }
+  /** One new room, built by conversation (roomBuilder.ts) - "create a 4 m by 5 m kitchen, 3 m high". */
+  | { kind: "build-room"; text: string }
+  | { kind: "pipe-run"; text: string }
   | { kind: "unknown" };
 
 const NUMBER = String.raw`(-?\d+(?:\.\d+)?)`;
@@ -206,15 +225,62 @@ const OPENING_REF = /\b(doors?|windows?|entrance)\b|\b(door|window)-\d+\b/i;
 const RESIZE = /\b(?:make|set|change|resize|extend|shorten|lengthen|stretch|cut)\b/i;
 const WALL_BUILD_VERB = /\b(?:build|add|create|construct|put\s+up|place|raise|erect|draw|make|want|need|give\s+me)\b/i;
 const ONE_NEW_WALL = /\b(?:a|an|one|another|new|1)\s+(?:[\w.,×-]+\s+){0,20}?wall\b(?!s)/i;
+const ONE_NEW_ROOM = /\b(?:a|an|one|another|new|1)\s+(?:[\w.,×-]+\s+){0,14}?(?:room|bed\s*room|kitchen|bath\s*room|living\s+room|lounge|dining\s+room|study|office|hall(?:way)?|utility|laundry|garage|store(?:room)?|pantry|toilet|washroom)\b(?!s)/i;
+// Adding something INTO a room ("add a wall to the kitchen", a door, furniture) - but "with brick walls" is part of the room.
+const NOT_ONE_NEW_ROOM = /\b(?:doors?|windows?|furnish\w*|furniture|sofa|bed|table|chair|wardrobe|rooms)\b/i;
 const NOT_ONE_NEW_WALL = /\b(?:walls|doors?|windows?|selected|house|home|bungalow|cottage|room|kitchen|bedroom|bathroom)\b/i;
 
 function stageIn(text: string): ArchitectStage | undefined {
   return STAGE_PATTERNS.find(({ pattern }) => pattern.test(text))?.stage;
 }
 
+/** The exterior looks: "modern", "traditional". */
+const EXTERIOR_LOOK: readonly [RegExp, ExteriorStyle][] = [
+  [/\b(?:modern|contemporary|minimal(?:ist)?)\b/i, "modern"],
+  [/\b(?:traditional|classic|conventional)\b/i, "traditional"]
+];
+/** What an exterior restyle is about. */
+const EXTERIOR_SUBJECT = /\b(?:exterior|outside|facade|façade|elevations?|look|style|appearance|house|home|building)\b/i;
+/** Roof shapes as people say them - mono-pitch first, so "mono-pitched" isn't read as a gable's "pitched". */
+const ROOF_SHAPE: readonly [RegExp, RoofStyle][] = [
+  [/\bmono[\s-]?pitch(?:ed)?\b|\bshed\b|\bskillion\b|\bsingle[\s-]slop(?:e|ed|ing)\b|\blean[\s-]to\b/i, "mono-pitch"],
+  [/\bflat\b/i, "flat"],
+  [/\bgabled?\b|\bpitched\b|\bsloping\b|\btwo[\s-]slope\b/i, "gable"]
+];
+const RESTYLE_VERB = /\b(?:make|change|turn|switch|give|restyle|update|convert|keep|use|style|instead)\b/i;
+const CREATE_VERB = /\b(?:build|create|design|add|plan|draw|start|put)\b/i;
+
+/** "Set the grid spacing to half a metre", "change the grid to 25 cm", "a 0.5 m grid". */
+const GRID_SETTING = /\bgrid\s+(?:spacing|size|step|cells?|lines?|to|of|every|at)\b|\b(?:set|make|change|use|switch)\s+(?:the\s+)?grid\b|\bgrid\s*[=:]|(?:met(?:er|re)s?|\bm|cm|mm)\s+grid\b/i;
+/** "Turn snapping off", "disable snapping", "no snapping". */
+const SNAP_OFF = /\bsnap(?:ping)?\s+(?:is\s+)?off\b|\b(?:turn|switch)\s+off\s+(?:the\s+)?snap|\b(?:disable|stop)\s+(?:the\s+)?snap|\b(?:no|without)\s+snap/i;
+/** "Turn snapping on", "enable snapping". */
+const SNAP_ON = /\bsnap(?:ping)?\s+(?:is\s+)?(?:back\s+)?on\b|\b(?:turn|switch)\s+on\s+(?:the\s+)?snap|\b(?:enable|start)\s+(?:the\s+)?snap/i;
+/** "Snap to 0.25 m", "snapping every half a metre", "snap step 0.1 m". */
+const SNAP_STEP = /\bsnap(?:ping)?\s+(?:to|every|at|step|of|by)\b|\bsnap(?:ping)?\s+(?:step|increment)\b/i;
+
 export function parseUtterance(raw: string): Utterance {
   const text = raw.trim().replace(/\s+/g, " ");
   if (text.length === 0) return { kind: "unknown" };
+
+  // Workspace view settings - never the model. Before yes/no, so "no, turn snapping off" isn't read as a "no".
+  // Only phrased as a setting: "put the wall on the grid, 3 m long" is about the wall.
+  if (GRID_SETTING.test(text) && !HOUSE_NOUN.test(text)) {
+    const spacing = readDistance(text);
+    if (spacing !== undefined) return { kind: "grid", spacing };
+  }
+  if (SNAP_OFF.test(text)) return { kind: "snapping", on: false };
+  const snapStep = SNAP_STEP.test(text) ? readDistance(text) : undefined;
+  if (snapStep !== undefined) return { kind: "snapping", on: true, step: snapStep };
+  if (SNAP_ON.test(text)) return { kind: "snapping", on: true };
+
+  // The exterior's look and the roof's shape - restyling what is built, never building or resizing.
+  if (RESTYLE_VERB.test(text) && !CREATE_VERB.test(text)) {
+    const look = EXTERIOR_LOOK.find(([pattern]) => pattern.test(text))?.[1];
+    const roofShape = /\broof\b/i.test(text) ? ROOF_SHAPE.find(([pattern]) => pattern.test(text))?.[1] : undefined;
+    if (look && EXTERIOR_SUBJECT.test(text)) return { kind: "exterior", style: look, ...(roofShape ? { roof: roofShape } : {}) };
+    if (roofShape) return { kind: "roof-style", style: roofShape };
+  }
 
   // "yes" / "no" alone, or followed by filler, is an answer; followed by
   // more ("yes, start with the foundation"), the rest is what counts.
@@ -237,6 +303,10 @@ export function parseUtterance(raw: string): Utterance {
   if (NEAREST.test(text)) return { kind: "nearest-free" };
   if (DEFAULTS.test(text) && !HOUSE_NOUN.test(text)) return { kind: "defaults" };
 
+  // A pipe run with its points ("run a 25 mm water pipe from 0, 0 to 3, 0") - before walls and rooms,
+  // so "a drain pipe from the bathroom ..." isn't taken for a room.
+  if (isPipeRun(text)) return { kind: "pipe-run", text };
+
   // One NEW wall: a build verb and "a/an/another/new ... wall" - never
   // "the ... wall" (an existing one), walls (the structure stage), or
   // anything about doors, windows, rooms or a whole house.
@@ -244,14 +314,50 @@ export function parseUtterance(raw: string): Utterance {
     return { kind: "build-wall", text };
   }
 
+  // One NEW room: a build verb and "a/an/another/new ... kitchen/room/..." -
+  // not a whole house, not "the rooms" (the rooms stage), and not something
+  // to add INTO a room (a wall, door, window or furniture).
+  if (WALL_BUILD_VERB.test(text) && ONE_NEW_ROOM.test(text) && !NOT_ONE_NEW_ROOM.test(text) && !ONE_NEW_WALL.test(text) && !HOUSE_NOUN.test(text)) {
+    return { kind: "build-room", text };
+  }
+
+  // "Move it beside the living room": moving the room just built (or selected) next to another.
+  if (/\b(?:move|put|place|shift)\s+(?:it|this|that)\s+(?:beside|next\s+to|adjacent\s+to|alongside|(?:east|west|north|south)\s+of|behind|in\s+front\s+of)\b/i.test(text)) {
+    return { kind: "adjust", text };
+  }
+
   // Room-aware edits on the house as it stands (see roomEdits.ts). A
   // "selected" object is left to the AI pipeline's own deterministic
   // edits ("make the selected wall 5 metres long"), exactly as before.
+  // A change to "it"/"this"/"the new wall" - not a selected-object edit
+  // (the AI pipeline's own deterministic edits keep those), not a house
+  // plan change ("make it 12 x 10 m", "3 bedrooms").
+  if (!/\bselected\b/i.test(text) && !DIMENSIONS.test(text) && !/\bbed(?:room)?s?\b/i.test(text) && !HOUSE_NOUN.test(text) && isAdjustment(text)) {
+    return { kind: "adjust", text };
+  }
+  // "Make that room 4.5 metres wide", "move this room 2 m east": the room itself is what's changed - read as "it", but only ever a room.
+  // Only when it is the verb's own object: "make the wall in that room 4 m long" is about the wall, not the room.
+  // Never the possessive: "make that room's left wall 6 m long" is about the wall. "The room" too: with several rooms, it asks which.
+  const THAT_ROOM = /\b(make|move|shift|resize|change|set|extend|shrink|enlarge|widen|lengthen|stretch|push|slide|nudge)\s+(?:that|this|the)\s+(?:room|space)\b(?!['’]s\b)/i;
+  if (THAT_ROOM.test(text) && !/\bselected\b/i.test(text) && !HOUSE_NOUN.test(text)) {
+    const asIt = text.replace(THAT_ROOM, "$1 it");
+    if (isAdjustment(asIt)) return { kind: "adjust", text: asIt, room: true };
+  }
+  // "Move the kitchen to X 10, Y 8", "move it to 10, 8": an edit to something already there - never choosing where the house goes.
+  if (readMoveTo(text) && /\b(?:move|shift|put|place)\b/i.test(text) && !HOUSE_NOUN.test(text)) {
+    if (isAdjustment(text)) return { kind: "adjust", text };
+    return { kind: "unknown" };
+  }
   if (SHOW_ROOF.test(text)) return { kind: "show-roof" };
   if (SHOW.test(text)) return { kind: "show", text };
   if (REFURNISH.test(text)) return { kind: "refurnish", text };
   if (!/\bselected\b/i.test(text)) {
     const opening = OPENING_REF.exec(text);
+    // Any distance the slide would read ("by half a metre") means a slide along the wall, never a move to another wall.
+    if (opening && isRelocation(text) && readDistance(text) === undefined) {
+      const word = (opening[1] ?? opening[2]).toLowerCase();
+      return { kind: "move-opening", text, opening: word.startsWith("window") ? "window" : "door", relocate: true };
+    }
     if (MOVE.test(text) && opening) {
       const word = (opening[1] ?? opening[2]).toLowerCase();
       const distance = readDistance(text);

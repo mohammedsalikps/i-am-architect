@@ -9,7 +9,7 @@ export interface AssetPlacementSnapResult {
   /**
    * Whether the position snapped to something MEANINGFUL - a real
    * object's key point, or an alignment with one. Deliberately EXCLUDES
-   * a plain grid snap: snapMove() always lands on the 0.1m grid as its
+   * a plain grid snap: snapMove() always lands on the snap-step grid as its
    * last resort, so treating that as "snapped" would make the indicator
    * true almost all the time, which stops being informative (task: "a
    * CLEAR indication when an object is snapped" - clear implies
@@ -51,7 +51,7 @@ function toSnapObject(record: { id: string; type: string; kind?: string; positio
  * not the asset being placed itself. Respects the same `SnapSettings`
  * toggle as every other snap in the app.
  */
-export function createAssetPlacementSnapper(stores: SnapSourceStores, settings: { isEnabled(): boolean }) {
+export function createAssetPlacementSnapper(stores: SnapSourceStores, settings: { isEnabled(): boolean; getStep?(): number }) {
   return {
     snap(candidate: { x: number; z: number }, dimensions: { width: number; height: number; depth: number }, rotationRadians: number): AssetPlacementSnapResult {
       if (!settings.isEnabled()) {
@@ -74,7 +74,8 @@ export function createAssetPlacementSnapper(stores: SnapSourceStores, settings: 
         rotation: rotationRadians,
         dimensions: { width: dimensions.width, height: dimensions.height, depth: dimensions.depth }
       };
-      const result = snapMove(moving, moving.position, others);
+      // The workspace's snap step (0.1 m unless it was changed), like every other snap.
+      const result = snapMove(moving, moving.position, others, { grid: settings.getStep?.() });
       return { position: { x: result.position.x, z: result.position.z }, snapped: result.mode === "point" || result.mode === "align" };
     }
   };

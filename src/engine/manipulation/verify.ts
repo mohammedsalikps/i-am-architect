@@ -558,6 +558,28 @@ function run(): void {
     assertSameJson(groups, ["begin", "end"], "one history group around the gesture");
   });
 
+  check("I. a drag steps by the workspace's snap step (moveStep), read fresh on every move", () => {
+    const calls: { changes: { position: { x: number } } }[] = [];
+    let step = 0.5;
+    const manipulator = new ObjectManipulator({
+      commandExecutor: {
+        execute(input: unknown): CommandResult {
+          calls.push(input as { changes: { position: { x: number } } });
+          return { success: true };
+        }
+      },
+      history: { beginGroup: () => undefined, endGroup: () => undefined, cancelGroup: () => undefined },
+      readObject: (id) => (id === "wall-1" ? { id, type: "wall", position: point(0, 1.35, 0), rotation: 0, dimensions: { height: 2.7, length: 4, thickness: 0.2 } } : undefined),
+      moveStep: () => step
+    });
+    manipulator.begin("wall-1", { kind: "move" }, point(0, 1.35, 0));
+    manipulator.update(point(1.2, 1.35, 0));
+    step = 0.25;
+    manipulator.update(point(1.65, 1.35, 0));
+    manipulator.end();
+    assertSameJson(calls.map((call) => call.changes.position.x), [1, 1.75], "1.2 m on a 0.5 m step is 1 m; 1.65 m on a 0.25 m step is 1.75 m");
+  });
+
   check("I. no manipulation code writes a store or a construction mesh directly", () => {
     const manipulatorSource = readFileSync(fileURLToPath(new URL("./ObjectManipulator.ts", import.meta.url)), "utf8");
     assertTrue(!/\.(add|update|set|remove)\(/.test(manipulatorSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")),

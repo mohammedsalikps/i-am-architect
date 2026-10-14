@@ -391,6 +391,126 @@ function resolveOpening(
   return choose(candidates, `Which ${type}${where}? There are ${candidates.length}.`);
 }
 
+/** "north wall" etc. as a room side: north is the back (-Z), south the front (+Z), east the right (+X), west the left. */
+const COMPASS_SIDE: Readonly<Record<string, Side>> = { north: "back", south: "front", east: "right", west: "left" };
+const OPPOSITE_SIDE: Readonly<Record<Side, Side>> = { front: "back", back: "front", left: "right", right: "left" };
+
+/** The opening already there: "the door", "the kitchen window", "that door", "door-3" - never "a/another door" (that's adding one). */
+const EXISTING_OPENING = String.raw`(?:(?:the|that|this)\s+(?:[a-z0-9-]+\s+){0,2}?(?:door|window)|(?:door|window)-\d+)`;
+/** Where it goes: a whole wall named by its side - "the other wall", "the north wall", "the left-hand wall". Never "the left side of …". */
+const DESTINATION_WALL = String.raw`(?:the\s+)?(other|opposite|front|back|rear|left|right|north|south|east|west)(?:[\s-]+hand)?\s+wall\b`;
+
+/**
+ * "Put the door on the other wall", "move the window to the north wall": an
+ * existing opening moved into ANOTHER wall - not along its own wall, and
+ * not a new one. "Move/shift" says where with to/onto/into ("move the door
+ * on the front wall 1 m left" names which door, then slides it); "put/
+ * place" with on/in too. The destination phrase is group `destMove`/`destPut`.
+ */
+export const RELOCATE_OPENING = new RegExp(
+  String.raw`\b(?:(?:move|shift|switch|relocate)\s+${EXISTING_OPENING}\s+(?<destMove>(?:to|onto|into)\s+${DESTINATION_WALL})|(?:put|place)\s+${EXISTING_OPENING}\s+(?<destPut>(?:on|onto|in|into|to)\s+${DESTINATION_WALL}))`,
+  "i"
+);
+
+/** A distance in the words ("1 m", "50 cm", "half a metre"): a slide along the wall, never a move to another wall. parseUtterance also checks readDistance(). */
+const SAYS_DISTANCE = /\b(?:\d+(?:\.\d+)?|a|an|one|two|three|four|five|six|seven|eight|nine|ten|half(?:\s+a)?)\s*(?:m|cm|mm|met(?:er|re)s?|centimet(?:er|re)s?|millimet(?:er|re)s?)\b/i;
+
+export function isRelocation(text: string): boolean {
+  return RELOCATE_OPENING.test(text) && !SAYS_DISTANCE.test(text);
+}
+
+/** A room as the user can tell it apart: its name, with its id when another room has the same name. */
+function roomLabel(room: RoomInfo, among: readonly RoomInfo[]): string {
+  return among.some((other) => other !== room && other.name.toLowerCase() === room.name.toLowerCase()) ? `${room.name} (${room.id})` : room.name;
+}
+
+/**
+ * "Put the door on the other wall": the opening moves into another wall of
+ * its room - the opposite one for "other"/"opposite", or the side named -
+ * centred on that room's stretch of it, keeping its size and (a window) its
+ * sill height, as one validated update (same id, one undo step). A room
+ * named for the destination ("… of the kitchen", "… of room-3") must be the
+ * opening's own; a door between two rooms is asked about (whose wall?).
+ */
+export function relocateOpening(ctx: RoomEditContext, request: { text: string; opening: "door" | "window" }): RoomEditResult {
+  const { text, opening } = request;
+  const match = RELOCATE_OPENING.exec(text);
+  if (!match) return nothingChanged(`Which wall should the ${opening} go in?`);
+  const destination = match.groups?.destMove ?? match.groups?.destPut ?? "";
+  const word = (/(other|opposite|front|back|rear|left|right|north|south|east|west)/i.exec(destination)?.[1] ?? "other").toLowerCase();
+  // "… to the north wall of the kitchen" / "… of room-3": whose wall is meant.
+  const after = text.slice((match.index ?? 0) + match[0].length);
+  const ofRoom = /^\s+of\s+(?:the\s+)?([a-z0-9][\w -]*?)\s*(?:[.,!?;]|$)/i.exec(after);
+  // Which opening is meant is read from the words WITHOUT the destination ("the kitchen door", not "… on the left wall of the bedroom").
+  const which = text.replace(destination, " ").replace(ofRoom?.[0] ?? "", " ");
+  const snapshot = ctx.snapshot();
+  const target = resolveOpening(
+    snapshot,
+    which,
+    opening,
+    (ref) => `Put ${ref} on the ${word} wall`,
+    (room) => `Put the ${room.name} ${opening} on the ${word} wall`
+  );
+  if (isResult(target)) return target;
+  const all = listRooms(snapshot);
+  const rooms = all.filter((room) => describeRoom(snapshot, room).openings.some((entry) => entry.object.id === target.object.id));
+  if (rooms.length === 0) return nothingChanged(`${target.object.id} isn't in a room's wall, so there's no "${word} wall" to move it to.`);
+  const theirs = rooms.map((room) => `the ${roomLabel(room, all)}`).join(" and ");
+
+  let room: RoomInfo | undefined;
+  if (ofRoom) {
+    const said = ofRoom[1].trim().toLowerCase();
+    const byId = all.filter((candidate) => candidate.id.toLowerCase() === said);
+    const named = byId.length > 0 ? byId : (() => {
+      const found = resolveRooms(all, said);
+      return found.kind === "found" ? found.rooms : found.kind === "ambiguous" ? found.options : [];
+    })();
+    const own = named.filter((candidate) => rooms.some((mine) => mine.id === candidate.id));
+    if (named.length > 0 && own.length === 0) {
+      return nothingChanged(`${target.object.id} is in ${theirs}, so it can only move to another wall of ${rooms.length === 1 ? "that room" : "those rooms"} - not into the ${named[0].name}. Add a new ${opening} there instead.`);
+    }
+    if (own.length === 1) room = own[0];
+  }
+  if (!room) {
+    const named = resolveRooms(rooms, which);
+    if (named.kind === "found" && named.rooms.length === 1) room = named.rooms[0];
+    else if (rooms.length === 1) room = rooms[0];
+  }
+  if (!room) {
+    // Between two rooms: "the north wall" or "the other wall" depends on whose wall - ask, never guess. Answered by room id, so two rooms with the same name can still be told apart.
+    const say = (entry: RoomInfo): string => `Put ${target.object.id} on the ${word} wall of ${entry.id}`;
+    const unique = (entry: RoomInfo): boolean => !rooms.some((other) => other !== entry && other.name.toLowerCase() === entry.name.toLowerCase());
+    return result(
+      `${target.object.id} is between ${theirs}. Which room's ${word} wall should it go to? Nothing was changed.`,
+      "question",
+      rooms.map((entry) => ({ label: `The ${roomLabel(entry, rooms)}'s ${word} wall`, say: say(entry) })),
+      { focusIds: [target.object.id] },
+      { options: rooms.map((entry) => ({ keys: unique(entry) ? [entry.id, entry.name.toLowerCase()] : [entry.id], say: say(entry) })) }
+    );
+  }
+  const model = describeRoom(snapshot, room);
+  const current = model.openings.find((entry) => entry.object.id === target.object.id)!;
+  const side: Side = word === "other" || word === "opposite" ? OPPOSITE_SIDE[current.wall.side] : word === "rear" ? "back" : (COMPASS_SIDE[word] ?? (word as Side));
+  const wanted = model.walls.find((wall) => wall.side === side);
+  if (!wanted) return nothingChanged(`The ${room.name} has no ${side} wall to put ${target.name} in.`);
+  if (wanted.wall.id === current.wall.wall.id) return nothingChanged(`${target.name[0].toUpperCase()}${target.name.slice(1)} is already in the ${room.name}'s ${side} wall (${wanted.wall.id}).`);
+  // Centred on this room's stretch of the wall; a window keeps the height of its sill above the wall's base.
+  const offset = Math.round(((wanted.span.from + wanted.span.to) / 2) * 1000) / 1000;
+  const fromWall = current.wall.wall;
+  const sill = Math.round((target.object.position.y - (fromWall.position.y - (fromWall.dimensions.height ?? 0) / 2) - (target.object.dimensions.height ?? 0) / 2) * 1000) / 1000;
+  const placement = opening === "window" ? { offset, sill } : { offset };
+  const run = ctx.run([{ type: `${opening}.update`, id: target.object.id, changes: { hostId: wanted.wall.id, hostPlacement: placement } }]);
+  if (!run.ok) return result(`${target.name[0].toUpperCase()}${target.name.slice(1)} can't go in the ${room.name}'s ${side} wall: ${run.message} Nothing was changed.`, "error", []);
+  const after2 = ctx.snapshot().objects.find((object) => object.id === target.object.id);
+  if (after2?.hostId !== wanted.wall.id) return result(`The engine accepted the move, but ${target.object.id} isn't in ${wanted.wall.id}. Please check it (Undo reverses it).`, "error", [{ label: "Undo", say: "undo" }], { focusIds: [target.object.id] });
+  return result(
+    `Moved ${target.name} (${target.object.id}) from the ${room.name}'s ${current.wall.side} wall (${current.wall.wall.id}) to its ${side} wall (${wanted.wall.id}), centred on it. One undo puts it back.`,
+    "success",
+    [{ label: "Undo", say: "undo" }],
+    { focusIds: [target.object.id, wanted.wall.id] }
+  );
+}
+
 export function moveOpening(ctx: RoomEditContext, request: { text: string; opening: "door" | "window"; distance?: number; direction?: Direction }): RoomEditResult {
   const { text, opening, distance, direction } = request;
   const snapshot = ctx.snapshot();

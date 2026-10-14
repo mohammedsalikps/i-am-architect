@@ -1,45 +1,64 @@
-/* Professional dark CAD-style theme for the application shell. */
+/* Two themes from one set of design tokens. Light (the default): warm white
+   and light grey surfaces, navy text, one architectural-blue accent, subtle
+   borders and minimal shadows. Dark: the same hierarchy on graphite
+   surfaces (:root[data-theme="dark"] below). Every colour, shadow and
+   state in this file reads a token, so a theme switch changes the whole
+   workspace - and the 3D viewport follows it (scene/sceneTheme.ts).
+   ui/theme.ts sets data-theme on <html>; index.html applies the saved
+   choice before the first paint. */
 
 :root {
-  --color-bg: #14151a;
-  --color-surface: #1b1d23;
-  --color-surface-raised: #23252d;
-  --color-surface-sunken: #101116;
-  --color-border: #2b2e36;
-  --color-text: #eceef1;
-  --color-text-muted: #8d93a1;
-  --color-accent: #4f8ef7;
-  --color-accent-soft: rgba(79, 142, 247, 0.14);
+  color-scheme: light;
+  --color-bg: #f3f4f6;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f2f4f8;
+  --color-surface-sunken: #eceff3;
+  --color-border: #e1e5eb;
+  --color-text: #17233a;
+  --color-text-muted: #5f6b7d;
+  --color-accent: #1f5fbf;
+  --color-accent-soft: rgba(31, 95, 191, 0.1);
   --color-accent-text: #ffffff;
-  --color-success: #4caf7d;
+  --color-success: #1d8655;
   /* The EAVARA mark's own quiet warm accent - used sparingly (the brand
      mark, the empty state's eyebrow, the AI result card) so it reads as
      the school's identity, not a second UI accent color competing with
      the tool-blue used for every interactive state. */
-  --color-brand: #c9a769;
+  --color-brand: #9b7a3a;
   /* One named danger color, replacing five slightly different reds
      (#ff8a80, #e5746b, #a83c38, and one inline rgba(216,76,68,...)) that
      had drifted into separate rules over time - the AI error card, the
      delete/danger button, the save-status error line, and a relationship
      warning were each their own shade. All now read from this one family,
      the same soft/solid pairing --color-accent already uses. */
-  --color-danger: #ff8a80;
-  --color-danger-soft: rgba(255, 138, 128, 0.14);
-  --color-danger-border: #a83c38;
-  --shadow-panel: 0 12px 32px rgba(0, 0, 0, 0.4);
+  --color-danger: #c2412d;
+  --color-danger-soft: rgba(194, 65, 45, 0.09);
+  --color-danger-border: #e3a497;
+  /* Text on the brand-coloured badge. */
+  --color-brand-text: #221a0c;
+  /* The "no colour yet" swatch's hatch. */
+  --hatch-a: #eef0f3;
+  --hatch-b: #e2e5ea;
+  /* Keyboard focus: one visible ring everywhere (see "Interaction states" at the end). */
+  --focus-ring-color: var(--color-accent);
+  --focus-ring-width: 2px;
+  --disabled-opacity: 0.45;
+  --shadow-panel: 0 10px 28px rgba(16, 24, 40, 0.1);
   /* A dialog sits above a dimming scrim, so it earns a slightly heavier
      shadow than an in-page panel - project-chooser and auth-dialog each
      hand-wrote this identical value independently; named once here. */
-  --shadow-modal: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 18px 44px rgba(16, 24, 40, 0.18);
   /* A light lift for small chrome that floats over other content without
      becoming a dialog: the viewport's view-controls overlay, the AI
      result card, a pressed ribbon tool - present, not heavy. */
-  --shadow-elevation-1: 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-elevation-1: 0 1px 3px rgba(16, 24, 40, 0.08);
   /* The floating viewport overlays' (view-controls, the manipulation
      readout) own translucent chrome - distinct from --color-surface,
      which is opaque, because these sit over the 3D scene and stay
      slightly see-through on purpose. */
-  --overlay-bg: rgba(26, 26, 26, 0.85);
+  --overlay-bg: rgba(255, 255, 255, 0.94);
+  /* The dimming behind a dialog. */
+  --scrim: rgba(16, 24, 40, 0.32);
 
   /* A small, consistent radius scale - already the range this file used
      ad hoc (2-6px controls, one 10px outlier, a couple of pill shapes);
@@ -68,11 +87,23 @@
      differ by role. */
   --letter-spacing-label: 0.06em;
 
+  /* Type scale - labels, body, section titles, panel titles. */
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-lg: 15px;
+  --font-weight-medium: 500;
+  --font-weight-strong: 600;
+  /* Controls: one height and one quick transition. */
+  --control-height: 30px;
+  --transition-fast: 120ms ease;
+
   --topbar-height: 52px;
   --mainnav-height: 36px;
   --ribbon-height: 72px;
-  --rail-width: 56px;
-  --sidebar-left-width: 208px;
+  --rail-width: 70px;
+  --sidebar-left-width: 236px;
   --sidebar-right-width: 260px;
   /* Tall enough that the AI panel's own header + input row + a "Design
      Complete" result card's heading and summary line are all visible at
@@ -87,9 +118,38 @@
   --bottomworkspace-height: 190px;
   --statusbar-height: 26px;
 
-  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
   color: var(--color-text);
+}
+
+/* Dark: graphite surfaces, light text, a lighter blue accent (dark text on
+   it for contrast), deeper shadows. Same tokens, same hierarchy. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #11151b;
+  --color-surface: #191e26;
+  --color-surface-raised: #222833;
+  --color-surface-sunken: #141920;
+  --color-border: #2d3540;
+  --color-text: #e5e9ef;
+  --color-text-muted: #9ba6b5;
+  --color-accent: #6aa5ff;
+  --color-accent-soft: rgba(106, 165, 255, 0.16);
+  --color-accent-text: #0b1322;
+  --color-success: #45c083;
+  --color-brand: #c9a660;
+  --color-danger: #f07a63;
+  --color-danger-soft: rgba(240, 122, 99, 0.14);
+  --color-danger-border: #8f4134;
+  --color-brand-text: #1d160a;
+  --hatch-a: #232a35;
+  --hatch-b: #1b2129;
+  --shadow-panel: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 18px 44px rgba(0, 0, 0, 0.55);
+  --shadow-elevation-1: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --overlay-bg: rgba(25, 30, 38, 0.94);
+  --scrim: rgba(0, 0, 0, 0.55);
 }
 
 button {
@@ -221,7 +281,7 @@ button {
   height: 28px;
   border-radius: var(--radius-md);
   background: var(--color-brand);
-  color: #221a0c;
+  color: var(--color-brand-text);
   font-weight: 700;
   font-size: 12px;
   letter-spacing: 0.02em;
@@ -229,8 +289,8 @@ button {
 }
 
 /* The EAVARA pine mark (brandMark.ts) fills the badge with a little
-   margin; its fill is currentColor, so it takes the badge's own #221a0c
-   text color above for free. */
+   margin; its fill is currentColor, so it takes the badge's own
+   --color-brand-text above for free. */
 .app-header__brand-mark svg {
   width: 14px;
   height: 20px;
@@ -343,7 +403,7 @@ button {
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
 }
 
 .project-chooser[hidden] {
@@ -437,7 +497,7 @@ button {
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--scrim);
 }
 
 .auth-dialog[hidden] {
@@ -962,6 +1022,155 @@ button {
   color: var(--color-accent);
 }
 
+/* Grid & plot (ui/workspacePanel.ts): a popover under the Snap row. */
+.workspace-control {
+  position: relative;
+  display: inline-flex;
+}
+
+.workspace-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  width: 270px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-panel);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.workspace-panel[hidden] {
+  display: none;
+}
+
+.workspace-panel__convention {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+}
+
+.workspace-panel__heading {
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-strong);
+  letter-spacing: var(--letter-spacing-label);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.workspace-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 4px 0;
+}
+
+.workspace-panel__number,
+.workspace-panel__select {
+  width: 96px;
+  height: 26px;
+  padding: 2px 6px;
+  background: var(--color-surface-sunken);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspace-panel__select:disabled {
+  opacity: var(--disabled-opacity);
+}
+
+.workspace-panel__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 4px 0;
+}
+
+.workspace-panel__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.workspace-panel__summary,
+.workspace-panel__note {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+}
+
+.workspace-panel__note:empty {
+  display: none;
+}
+
+.workspace-panel__note[data-tone="error"] {
+  color: var(--color-danger);
+}
+
+.workspace-panel__note[data-tone="success"] {
+  color: var(--color-success);
+}
+
+/* The orientation gizmo (ui/axisGizmo.ts): X/Y/Z as the camera sees them, bottom-right above the scale bar. */
+.axis-gizmo {
+  position: absolute;
+  right: 12px;
+  bottom: 50px;
+  z-index: 1;
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-elevation-1);
+  pointer-events: none;
+}
+
+.axis-gizmo svg {
+  display: block;
+}
+
+/* The scale bar (ui/scaleBar.ts): bottom-right over the scene, true at the view's centre. */
+.scale-bar {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--overlay-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.scale-bar[hidden] {
+  display: none;
+}
+
+.scale-bar__bar {
+  height: 6px;
+  border: 2px solid var(--color-text);
+  border-top: none;
+}
+
 /* ---------- View controls (viewport overlay) ---------- */
 
 .view-controls {
@@ -993,6 +1202,37 @@ button {
 .view-controls__button.is-active {
   background: var(--color-accent);
   color: var(--color-accent-text);
+}
+
+/* Select / Measure / Annotate (ui/viewportTools.ts), in the Snap row. */
+.viewport-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.viewport-tool svg {
+  flex: none;
+}
+
+.viewport-tool:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.viewport-tool:disabled:hover {
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 1100px) {
+  /* Icons only (each keeps its name as aria-label and tooltip), so the row never wraps over the copilot. */
+  .viewport-tool__label {
+    display: none;
+  }
+
+  .viewport-tool {
+    padding: 5px 8px;
+  }
 }
 
 /* Separates Perspective/Top/Front/Side from Fit House/Focus Selected. */
@@ -1028,7 +1268,7 @@ button {
   width: min(380px, calc(100% - 48px));
   padding: 28px 28px 24px;
   text-align: center;
-  background: rgba(27, 29, 35, 0.82);
+  background: var(--overlay-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   backdrop-filter: blur(6px);
@@ -1573,6 +1813,106 @@ button {
   background: var(--color-surface);
 }
 
+/* Two lines: the room's name, then its area and contents. */
+.hierarchy-room__name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.hierarchy-room__label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A room's floor area and contents, quietly under its name. */
+.hierarchy-room__meta {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+/* "Other objects", by type: a collapsible header per group. */
+.hierarchy-group__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.hierarchy-group__header:hover {
+  background: var(--color-surface-raised);
+}
+
+.hierarchy-group__chevron {
+  width: 12px;
+  color: var(--color-text-muted);
+  font-size: 10px;
+}
+
+.hierarchy-group__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hierarchy-group__members {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 0 4px 14px;
+}
+
+/* How many objects the room holds - quiet, beside its name. */
+.hierarchy-room__count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+/* Focus / Isolate: shown on hover, keyboard focus or selection, so names read in full. */
+.hierarchy-room__actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.hierarchy-room__header:hover .hierarchy-room__actions,
+.hierarchy-room__header:focus-within .hierarchy-room__actions,
+.hierarchy-room__header--active .hierarchy-room__actions {
+  display: inline-flex;
+}
+
+@media (hover: none) {
+  .hierarchy-room__actions {
+    display: inline-flex;
+  }
+}
+
 .hierarchy-room__action {
   flex-shrink: 0;
   padding: 3px 7px;
@@ -1851,10 +2191,10 @@ button {
 .color-swatch--placeholder {
   background: repeating-linear-gradient(
     45deg,
-    #3a3a3a,
-    #3a3a3a 4px,
-    #2a2a2a 4px,
-    #2a2a2a 8px
+    var(--hatch-a),
+    var(--hatch-a) 4px,
+    var(--hatch-b) 4px,
+    var(--hatch-b) 8px
   );
 }
 
@@ -2526,7 +2866,7 @@ button {
   width: min(360px, calc(100% - 24px));
   display: flex;
   flex-direction: column;
-  background: rgba(27, 29, 35, 0.92);
+  background: var(--overlay-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-panel);
@@ -2567,14 +2907,40 @@ button {
   letter-spacing: 0.2px;
 }
 
-.architect__badge {
-  font-size: 10px;
+/* What the architect is doing, always visible (ui/architectPanel.ts): Ready, Listening, Thinking, Speaking, Applied, Stopped. */
+.architect__state {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-strong);
   text-transform: uppercase;
   letter-spacing: var(--letter-spacing-label);
-  color: var(--color-success);
-  border: 1px solid rgba(76, 175, 125, 0.4);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  padding: 1px 7px;
+  padding: 1px 8px;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.architect__state--listening {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-soft);
+}
+
+.architect__state--thinking,
+.architect__state--speaking {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.architect__state--applied {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.architect__state--stopped {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
 }
 
 .architect__collapse {
@@ -2823,7 +3189,7 @@ button {
 
 /* The empty state centres in the space beside the panel, not under it. */
 .viewport-area--with-architect .empty-state {
-  padding-left: 384px;
+  padding-left: 376px;
 }
 
 @media (max-width: 1023px) {
@@ -3011,4 +3377,454 @@ button {
   border-color: var(--color-accent);
   background: var(--color-surface-raised);
   box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+/* --- Workspace polish (light architectural theme) --- */
+
+/* The left rail is wide enough for "Measurements" on one line. */
+.sidebar-rail__item {
+  white-space: nowrap;
+  font-size: 10px;
+}
+
+/* The AI copilot floats over the viewport at the height its conversation
+   needs (never a tall empty block), can be resized from its corner, and
+   never covers more than the viewport. */
+.architect {
+  bottom: auto;
+  max-height: calc(100% - 24px);
+  width: 352px;
+  min-width: 300px;
+  max-width: calc(100% - 24px);
+  min-height: 0;
+  resize: both;
+  overflow: hidden;
+}
+
+.architect__log {
+  flex: 1 1 auto;
+  /* Small enough that the composer always fits a short laptop viewport (1280 x 800). */
+  min-height: 56px;
+}
+
+.architect__composer {
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+/* First line: the instruction and Send, side by side; the tools on one line beneath. */
+.architect__input {
+  flex: 1 1 calc(100% - 96px);
+  box-sizing: border-box;
+  order: -2;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.architect__send {
+  order: -1;
+  min-height: 32px;
+}
+
+.architect__tool {
+  min-height: 32px;
+}
+
+/* --- AI Architect copilot: interaction state (ui/copilotState.ts) --- */
+
+.copilot__status {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.copilot__steps {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.copilot__step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  text-align: center;
+  position: relative;
+}
+
+.copilot__step:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  top: 5px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--color-border);
+  z-index: 0;
+}
+
+.copilot__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--color-border);
+  background: var(--color-surface);
+  position: relative;
+  z-index: 1;
+}
+
+.copilot__step--done {
+  color: var(--color-text);
+}
+
+.copilot__step--done .copilot__dot {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.copilot__step--done::before,
+.copilot__step--active::before {
+  background: var(--color-accent) !important;
+}
+
+.copilot__step--active {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.copilot__step--active .copilot__dot {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.copilot__state-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.copilot__state {
+  margin: 0;
+  flex: 1;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.copilot__state--applied {
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.copilot__state--error {
+  color: var(--color-danger);
+}
+
+.copilot__state--previewing,
+.copilot__state--clarifying,
+.copilot__state--understanding {
+  color: var(--color-accent);
+}
+
+.copilot__transcript {
+  margin: 0;
+  font-size: 12.5px;
+  font-style: italic;
+  color: var(--color-text);
+}
+
+.copilot__level {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 20px;
+  width: 64px;
+  flex-shrink: 0;
+}
+
+.copilot__bar {
+  flex: 1;
+  height: 8%;
+  border-radius: 2px;
+  background: var(--color-accent);
+  transition: height 80ms linear;
+}
+
+.copilot__stop {
+  flex-shrink: 0;
+  border: 1px solid var(--color-danger-border);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-radius: var(--radius-pill);
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.copilot__tags {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.copilot__tag {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.copilot__tag--ai {
+  color: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.copilot__tag--preview {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.copilot__tag--applied {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+/* The copilot's optional parts really disappear when hidden (their own display rules would otherwise win). */
+.copilot__status[hidden],
+.copilot__steps[hidden],
+.copilot__level[hidden],
+.copilot__transcript[hidden],
+.copilot__stop[hidden] {
+  display: none;
+}
+
+/* Narrower desktops: a slimmer copilot, and the view controls kept on the
+   right edge of the viewport so the copilot never hides them. */
+/* Up to 1420px the AI panel and the view controls would meet at the top of the
+   viewport (measured: overlapping from 1281px to about 1394px, the common 1366px
+   laptop included) - the panel moves below the controls instead. */
+@media (max-width: 1420px) {
+  .architect {
+    width: 336px;
+    min-width: 260px;
+    /* Below the view controls, never over them. */
+    top: 84px;
+    max-height: calc(100% - 96px);
+  }
+
+  .viewport-area__controls {
+    left: auto;
+    right: 12px;
+    transform: none;
+    align-items: flex-end;
+  }
+}
+
+@media (max-width: 1100px) {
+  .architect {
+    width: 290px;
+  }
+
+  .view-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: 260px;
+  }
+}
+
+@media (max-width: 1100px) {
+  :root {
+    --sidebar-left-width: 200px;
+    --sidebar-right-width: 230px;
+  }
+
+  /* Below the (wrapped) view controls, never over them. */
+  .architect {
+    top: 112px;
+    max-height: calc(100% - 124px);
+  }
+}
+
+/* A step this task passed over (typed, not spoken; no question needed) - visibly not "done". */
+.copilot__step--skipped {
+  color: var(--color-text-muted);
+  opacity: 0.6;
+}
+
+.copilot__step--skipped .copilot__dot {
+  border-style: dashed;
+  background: transparent;
+}
+
+/* --- Project tree search (ui/leftSidebar.ts, ui/projectSearch.ts) --- */
+.hierarchy-search {
+  margin: 0 0 var(--space-2);
+}
+
+.hierarchy-search__input {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--color-text);
+}
+
+.hierarchy-search__input:focus {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.hierarchy-search__where {
+  color: var(--color-text-muted);
+}
+
+.hierarchy-objects__item--selected .hierarchy-search__where {
+  color: inherit;
+  opacity: 0.8;
+}
+
+/* Record book: a pipe's sheet size, a fitting's sheet source, or why a joint has no part - under the dimensions. */
+.record-book__source {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+.record-book__source--warn {
+  color: var(--color-danger);
+}
+
+.record-book__row--derived td:first-child .record-book__id {
+  font-style: italic;
+}
+
+/* --- Interaction states, both themes (zero specificity: a component's own rule still wins) --- */
+:where(button, [role="button"], a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+}
+
+/* --- Theme toggle (top bar; ui/theme.ts) --- */
+.app-header__theme {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.app-header__theme:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-accent);
+}
+
+.app-header__theme-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* --- AI companion: labelled tools, voice settings, quiet notes (ui/architectPanel.ts) --- */
+.architect__composer .architect__tool {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.architect__tool-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.architect__tool--on {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.architect__voice-settings {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.architect__voice-settings[hidden] {
+  display: none;
+}
+
+.architect__setting {
+  display: grid;
+  gap: 3px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.architect__setting--check {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--space-2);
+  color: var(--color-text);
+}
+
+.architect__select {
+  height: var(--control-height);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0 6px;
+}
+
+.architect__setting-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.architect__msg--note {
+  align-self: center;
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px dashed var(--color-border);
 }

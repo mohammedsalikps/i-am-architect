@@ -99,31 +99,40 @@ export function computeArchitecturalFit(box: THREE.Box3, directionFromTarget: TH
   right.normalize();
   const camUp = new THREE.Vector3().crossVectors(right, forward).normalize();
 
-  let halfWidth = 0;
-  let halfHeight = 0;
+  // Every corner must project inside the padded frame at its OWN depth: a
+  // corner nearer the camera (positive along `outward`) looks bigger, so
+  // it needs that much more distance - exactly that much. Ignoring depth
+  // (sizing off the projected extent at the centre) clipped a house's
+  // near eaves in the head-on Front and Side views; adding a whole
+  // half-depth for every corner over-corrected three-quarter views. Per
+  // corner is exact for a perspective camera, from any direction.
+  const padding = options.padding ?? DEFAULT_PADDING;
+  const tanVertical = Math.tan(THREE.MathUtils.degToRad(options.fovDegrees) / 2);
+  const tanHorizontal = tanVertical * options.aspect;
+  let needed = 0;
   const corner = new THREE.Vector3();
   const offset = new THREE.Vector3();
   for (let i = 0; i < 8; i += 1) {
     corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
     offset.subVectors(corner, center);
-    halfWidth = Math.max(halfWidth, Math.abs(offset.dot(right)));
-    halfHeight = Math.max(halfHeight, Math.abs(offset.dot(camUp)));
+    const nearer = offset.dot(outward);
+    needed = Math.max(needed, nearer + (Math.abs(offset.dot(right)) * padding) / tanHorizontal, nearer + (Math.abs(offset.dot(camUp)) * padding) / tanVertical);
   }
-
-  const padding = options.padding ?? DEFAULT_PADDING;
-  const verticalHalfFov = THREE.MathUtils.degToRad(options.fovDegrees) / 2;
-  const horizontalHalfFov = Math.atan(Math.tan(verticalHalfFov) * options.aspect);
-  const distanceForHeight = halfHeight / Math.tan(verticalHalfFov);
-  const distanceForWidth = halfWidth / Math.tan(horizontalHalfFov);
-  // halfDepth is deliberately NOT added to distance here: the padding
-  // margin below already covers the perspective foreshortening a deep
-  // box's near corner introduces (the same "generous, not pixel-tight"
-  // trade-off computeFitCamera's own docs already make) - adding the
-  // full half-depth on top of it was measured to over-correct, pushing a
-  // corner-viewed box's distance back ABOVE the sphere-based fit this
-  // function exists to improve on.
-  const distance = Math.max(Math.max(distanceForHeight, distanceForWidth) * padding, options.minDistance ?? DEFAULT_MIN_DISTANCE);
+  const distance = Math.max(needed, options.minDistance ?? DEFAULT_MIN_DISTANCE);
 
   const position = center.clone().addScaledVector(outward, distance);
   return { position, target: center, distance };
+}
+
+/**
+ * `box` grown about its own centre to at least `minimum` in each axis -
+ * so "Fit House" on a lone wall or a small first room still shows it in
+ * the context of its plot, instead of filling the screen with it. A box
+ * already larger than `minimum` is returned unchanged (as a copy).
+ */
+export function withMinimumExtent(box: THREE.Box3, minimum: { x: number; y: number; z: number }): THREE.Box3 {
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const half = new THREE.Vector3(Math.max(size.x, minimum.x) / 2, Math.max(size.y, minimum.y) / 2, Math.max(size.z, minimum.z) / 2);
+  return new THREE.Box3(center.clone().sub(half), center.clone().add(half));
 }

@@ -25,7 +25,13 @@
         min-height: 100%;
         overflow-x: hidden;
         overflow-y: auto;
-        background: #1a1a1a;
+        background: #f3f4f6;
+      }
+
+      /* The dark theme's --color-bg, before styles.css has loaded. */
+      html[data-theme="dark"],
+      html[data-theme="dark"] body {
+        background: #11151b;
       }
 
       #app {
@@ -301,6 +307,8 @@
         }
       }
     </style>
+    <!-- The saved light/dark theme, applied before the first paint (a file: the CSP allows no inline script). -->
+    <script src="/theme-preload.js"></script>
   </head>
   <body>
     <!-- Eavara startup screen (see the styles above and src/ui/splash.ts).

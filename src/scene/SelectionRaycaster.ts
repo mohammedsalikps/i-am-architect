@@ -28,7 +28,9 @@ const CLICK_DRAG_THRESHOLD_PX = 5;
  *
  * Reads `mesh.userData.objectId` on whatever it hits - every mesh
  * builder (buildWallMesh, buildPillarMesh, ...) sets that same field,
- * so this class needs no per-type special-casing.
+ * so this class needs no per-type special-casing. A mesh that stands for
+ * several objects (a pipe fitting) may instead give
+ * `userData.pickObjectId(point)`, which names the one clicked.
  */
 export class SelectionRaycaster {
   private readonly raycaster = new THREE.Raycaster();
@@ -84,7 +86,9 @@ export class SelectionRaycaster {
     const [hit] = this.raycaster.intersectObjects(meshes, false);
 
     if (hit) {
-      this.selectionStore.select(hit.object.userData.objectId as string);
+      // A mesh shared by several objects (a pipe fitting) says which one a click at this point means.
+      const pick = hit.object.userData.pickObjectId as ((point: THREE.Vector3) => string) | undefined;
+      this.selectionStore.select(pick ? pick(hit.point) : (hit.object.userData.objectId as string));
     } else {
       this.selectionStore.clear();
     }

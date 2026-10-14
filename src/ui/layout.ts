@@ -4,7 +4,7 @@ import { createMainNav } from "./mainNav";
 import { createConstructionRibbon } from "./constructionRibbon";
 import { buildRibbonTabs, type RibbonActions } from "./ribbonTabs";
 import { createLeftSidebar } from "./leftSidebar";
-import { createRightSidebar } from "./rightSidebar";
+import { createRightSidebar, type RoomEditHandler } from "./rightSidebar";
 import { createCommandBar } from "./commandBar";
 import type { AiInstructionSubmitter } from "../engine/ai/AiPromptController";
 import { createStatusBar, type PlacementStatusInfo } from "./statusBar";
@@ -24,10 +24,12 @@ import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 import type { SnapSettings } from "../engine/snapping/SnapSettings";
+import { formatSpacing, type WorkspaceState } from "../engine/workspace/workspaceSettings";
 import type { AuthController } from "../engine/auth/AuthController";
 import type { VisibilityStore } from "../scene/visibility/VisibilityStore";
 import { buildAIProjectSnapshot } from "../engine/ai/types.ts";
 import type { HighlightConstructionObjects } from "./constructionMethodPanel.ts";
+import type { ThemeStore } from "./theme";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
@@ -77,27 +79,46 @@ export type AppShellOptions = {
   commandExecutor: CommandExecutor;
   /** Whether drags snap - shown and toggled by the viewport's Snap button. */
   snapSettings: SnapSettings;
+  /** Select / Measure / Annotate (ui/viewportTools.ts), shown in the Snap button's row. */
+  viewportTools?: HTMLElement[];
   /** Arms pick-and-place for one catalog design asset - see ui/assetLibrary.ts and main.ts's addAsset(). */
   onAddAsset: (assetId: string) => void;
   /** The Construction Method tab's viewport highlight - see SceneManager.highlightConstructionObjects() and constructionMethodPanel.ts. */
   onHighlightConstructionObjects: HighlightConstructionObjects;
+  /** A close-up of one point - a pipe fitting picked in the record book. See SceneManager.focusOnPoint(). */
+  onFocusPoint?: (point: { x: number; y: number; z: number }) => void;
+  /** Light/dark - the top bar's switch (ui/theme.ts). */
+  theme?: ThemeStore;
   /** The EAVARA Architect conversation (ui/architectPanel.ts), floated over the viewport. When present, the empty state's "Ask AI to Design" opens it. */
   architect?: { element: HTMLElement; focusInput: () => void };
+  /** The workspace's grid and snapping (engine/workspace/workspaceSettings.ts), shown live in the status bar. */
+  workspace?: { subscribe(listener: (state: WorkspaceState) => void): () => void };
+  /** The "Grid & plot" control (ui/workspacePanel.ts), after the Snap button. */
+  workspaceControl?: HTMLElement;
+  /** Extra overlays drawn over the viewport - the scale bar (ui/scaleBar.ts). */
+  viewportOverlays?: HTMLElement[];
+  /** Moves or resizes a room with its walls - the inspector's room rows (ArchitectSession.editRoom). */
+  onRoomEdit?: RoomEditHandler;
 };
 
-/** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on. */
-function createSnapToggle(snapSettings: SnapSettings): HTMLElement {
+/** The viewport's Snap on/off button - drags snap to endpoints, corners, walls, and the grid while it's on - after the viewport tools, when there are any. */
+function createSnapToggle(snapSettings: SnapSettings, tools: HTMLElement[] = [], after: HTMLElement[] = []): HTMLElement {
   const button = el("button", {
     className: "view-controls__button snap-toggle",
-    attrs: { type: "button", title: "Snap to endpoints, corners, walls, and the 0.1 m grid while dragging" }
+    attrs: { type: "button" }
   });
   button.addEventListener("click", () => snapSettings.toggle());
+  // The step is told on every change too (SnapSettings.setStep), so the label always shows the live increment.
   snapSettings.subscribe((enabled) => {
-    button.textContent = enabled ? "Snap: On" : "Snap: Off";
+    const step = formatSpacing(snapSettings.getStep());
+    button.textContent = enabled ? `Snap: ${step}` : "Snap: Off";
+    button.title = enabled
+      ? `Dragged objects snap to ends, corners and walls, and to a ${step} grid. Click to turn snapping off; change the step in Grid & plot.`
+      : "Snapping is off - dragged objects move freely. Click to turn it on.";
     button.setAttribute("aria-pressed", String(enabled));
     button.classList.toggle("snap-toggle--on", enabled);
   });
-  return el("div", { className: "view-controls" }, [button]);
+  return el("div", { className: "view-controls" }, [...tools, ...(tools.length > 0 ? [el("span", { className: "view-controls__divider" })] : []), button, ...after]);
 }
 
 /** True once every construction store is empty - a fresh "New Project" or a signed-out reset, before the first wall exists. */
@@ -184,7 +205,11 @@ export type AppShell = {
  * how this collapses at narrow widths.
  */
 export function createAppShell(options: AppShellOptions): AppShell {
+  // The top bar's search drives the Project tree's own search (built below - called only after construction).
   const topBar = createTopBar({
+    onSearch: (query) => leftSidebar.searchProject(query),
+    onSearchPick: () => leftSidebar.pickFirstSearchResult(),
+    theme: options.theme,
     projectMeta: options.projectMeta,
     persistence: options.persistence,
     auth: options.auth,
@@ -242,7 +267,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
     selectionStore: options.selectionStore,
     commandExecutor: options.commandExecutor,
     onDuplicateSelected: options.onDuplicateSelected,
-    onDeleteSelected: options.onDeleteSelected
+    onDeleteSelected: options.onDeleteSelected,
+    onRoomEdit: options.onRoomEdit
   });
 
   const viewportContainer = el("div", { className: "viewport-container" });
@@ -250,7 +276,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   // purely a viewport concern, so they're now an overlay on the
   // viewport itself instead of competing for header space.
   const viewControls = createViewControls(options.onViewChange, options.onFitToScene, options.onFocusSelected);
-  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings)]);
+  const viewControlsOverlay = el("div", { className: "viewport-area__controls" }, [viewControls, createSnapToggle(options.snapSettings, options.viewportTools, options.workspaceControl ? [options.workspaceControl] : [])]);
 
   const commandBar = createCommandBar(
     options.ribbonActions.addWall,
@@ -277,7 +303,8 @@ export function createAppShell(options: AppShellOptions): AppShell {
         selectionStore: options.selectionStore
       }).objects,
     () => options.projectMeta.get().id,
-    options.onHighlightConstructionObjects
+    options.onHighlightConstructionObjects,
+    options.onFocusPoint
   );
 
   // The viewport's own "nothing built yet" state (task: don't leave an
@@ -318,13 +345,14 @@ export function createAppShell(options: AppShellOptions): AppShell {
   const viewportArea = el("main", { className: options.architect ? "viewport-area viewport-area--with-architect" : "viewport-area" }, [
     viewportContainer,
     viewControlsOverlay,
+    ...(options.viewportOverlays ?? []),
     emptyState,
     ...(options.architect ? [options.architect.element] : [])
   ]);
 
   const body = el("div", { className: "app-body" }, [leftSidebar.element, viewportArea, rightSidebar]);
 
-  const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore });
+  const statusBar = createStatusBar({ projectMeta: options.projectMeta, selectionStore: options.selectionStore, workspace: options.workspace });
 
   const root = el("div", { className: "app-shell" }, [
     topBar,

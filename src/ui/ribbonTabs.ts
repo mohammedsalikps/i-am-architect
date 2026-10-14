@@ -4,6 +4,8 @@
 // renders it).
 import { ELEMENT_CATEGORIES, getElementKind } from "../engine/elements/catalog.ts";
 import { ROOM_PRESETS } from "../engine/elements/roomPresets.ts";
+import { PIPE_SIZES, SYSTEM_KIND, pipeOutsideDiameter, pipeSizeFor } from "../engine/plumbing/upvcSheet.ts";
+import type { CreateElementOptions } from "../engine/elements/createElement";
 import { constructionIconSvg } from "./constructionIcons.ts";
 import type { ElementCategory } from "../engine/elements/catalog";
 import type { RoomPreset } from "../engine/elements/roomPresets";
@@ -49,7 +51,12 @@ export interface RibbonActions {
   addSlab(): void;
   addDoor(): void;
   addWindow(): void;
-  addElement(kind: string): void;
+  /**
+   * Arms placement of a catalog kind. `options` presets the new element
+   * (a pipe size's diameter); `placement` gives the armed tool its own id
+   * and label, so each preset lights up - and toggles - on its own.
+   */
+  addElement(kind: string, options?: Omit<CreateElementOptions, "kind">, placement?: { toolId: string; label: string }): void;
   addRoom(preset: RoomPreset): void;
   /** Repaints the selected object (a wall, an element, ...): the same object, material "paint" and the chosen color. */
   paintSelected(color: string): void;
@@ -60,7 +67,7 @@ export interface RibbonActions {
 
 type OriginalType = "wall" | "pillar" | "beam" | "slab" | "door" | "window";
 
-type RibbonItem = { original: OriginalType } | { kind: string } | { roomPresets: true } | { paint: true };
+type RibbonItem = { original: OriginalType } | { kind: string } | { roomPresets: true } | { paint: true } | { pipeSizes: "water-pipe" | "drain-pipe" };
 
 interface RibbonGroup {
   label: string;
@@ -97,7 +104,7 @@ export const RIBBON_LAYOUT: Readonly<Record<"home" | ElementCategory, readonly R
     { label: "Paint", items: [{ paint: true }] }
   ],
   plumbing: [
-    { label: "Pipes", items: [k("water-pipe"), k("drain-pipe")] },
+    { label: "Pipes (uPVC)", items: [k("water-pipe"), { pipeSizes: "water-pipe" }, k("drain-pipe"), { pipeSizes: "drain-pipe" }] },
     { label: "Equipment", items: [k("water-tank"), k("pump")] },
     { label: "Fixtures", items: [k("sink"), k("toilet"), k("shower"), k("tap")] }
   ],
@@ -182,6 +189,27 @@ function toolsFor(item: RibbonItem, group: string, actions: RibbonActions): Ribb
       // rather than threading a distinct id per preset through addElement().
       isActive: () => actions.isPlacementActive("room")
     }));
+  }
+  if ("pipeSizes" in item) {
+    // The uPVC sheet's other sizes for this kind - the kind's own tool is the default (largest) size.
+    const kind = item.pipeSizes;
+    const defaultDiameter = getElementKind(kind)?.dimensions.find((spec) => spec.key === "diameter")?.default ?? 0;
+    const defaultSize = pipeSizeFor(kind, defaultDiameter);
+    return PIPE_SIZES.filter((size) => SYSTEM_KIND[size.system] === kind && size.id !== defaultSize?.id).map((size) => {
+      const water = size.system === "clean-water";
+      const label = `${water ? "Water" : "Drain"} ${size.nominal} mm`;
+      const toolId = `${kind}:${size.nominal}`;
+      const od = Math.round(pipeOutsideDiameter(size) * 10000) / 10;
+      return {
+        id: toolId,
+        label,
+        icon: constructionIconSvg(kind) ?? iconFor(label),
+        title: `Click, then click in the viewport to place a ${size.nominal} mm ${water ? "clean-water" : "sanitation"} ${size.role} pipe (uPVC, ${od} mm outside diameter - fittings sheet p.${size.source.page})`,
+        group,
+        run: () => actions.addElement(kind, { dimensions: { diameter: pipeOutsideDiameter(size) } }, { toolId, label: `${label} pipe` }),
+        isActive: () => actions.isPlacementActive(toolId)
+      };
+    });
   }
   if ("paint" in item) {
     return [

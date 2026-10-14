@@ -51,6 +51,15 @@ import { ArchitectSession } from "./engine/architect/ArchitectSession";
 import type { PlanPoint } from "./engine/architect/parseUtterance";
 import { createArchitectPanel } from "./ui/architectPanel";
 import { createSiteOverlay } from "./scene/siteOverlay";
+import { createMeasureTool, MEASURE_TOOL_ID, type MeasureTool } from "./scene/measureTool";
+import { createViewportTools } from "./ui/viewportTools";
+import { createThemeStore } from "./ui/theme";
+import { WorkspaceSettings } from "./engine/workspace/workspaceSettings";
+import { scaleBarFor } from "./engine/workspace/scaleBar";
+import { createWorkspacePanel } from "./ui/workspacePanel";
+import { createScaleBarOverlay } from "./ui/scaleBar";
+import { createAxisGizmo } from "./ui/axisGizmo";
+import { SCENE_PALETTES } from "./scene/sceneTheme";
 
 const appRoot = document.getElementById("app");
 
@@ -196,12 +205,21 @@ async function submitArchitectFallback(instruction: string, options: AIRunOption
  * shared commandExecutor and history as everything else, so each build
  * stage is one ordinary undo step.
  */
+// The workspace's view settings - grid spacing, snapping and its step, the
+// axes and the dimension labels - remembered per browser, never part of
+// the model or its undo history (engine/workspace/workspaceSettings.ts).
+// The Grid & plot popover, the status bar and the conversation ("set the
+// grid spacing to half a metre") all change this one object.
+const workspace = new WorkspaceSettings(sessionStore());
+
 const architect = new ArchitectSession({
   commandExecutor,
   history,
   snapshot: () => buildAIProjectSnapshot(project),
+  elementParams: (id) => elementStore.get(id)?.params,
   undo: () => history.undo(),
-  fallback: submitArchitectFallback
+  fallback: submitArchitectFallback,
+  workspace
 });
 
 /**
@@ -242,6 +260,8 @@ function pickArchitectLocation(footprint: HouseFootprint | null, done: (point: P
 
 const architectPanel = createArchitectPanel({
   session: architect,
+  // Voice settings (language, voice, pause, interrupting) are remembered per browser.
+  storage: sessionStore(),
   onFocus: (objectIds) => sceneManager.current?.focusOn(objectIds),
   onPickLocation: pickArchitectLocation,
   // The same VisibilityStore as the hierarchy's eye buttons - a view
@@ -417,18 +437,19 @@ function addWindow(): void {
  * kind's real dimensions come from (ElementKindDefinition.dimensions +
  * .axes) - never a second, hand-maintained size list.
  */
-function elementGhostSize(definition: ElementKindDefinition): PlacementTool["ghostSize"] {
-  const byKey = new Map(definition.dimensions.map((spec) => [spec.key, spec.default]));
+function elementGhostSize(definition: ElementKindDefinition, dimensions: Record<string, number> = {}): PlacementTool["ghostSize"] {
+  // Preset dimensions (a pipe size's diameter) win over the catalog defaults.
+  const byKey = new Map(definition.dimensions.map((spec) => [spec.key, dimensions[spec.key] ?? spec.default]));
   return { x: byKey.get(definition.axes.x) ?? 0.5, y: byKey.get(definition.axes.y) ?? 0.5, z: byKey.get(definition.axes.z) ?? 0.5 };
 }
 
 /** Arms pick-and-place for one catalog element kind - an element.add command once placed, so it validates and undoes like any other add. */
-function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}): void {
+function addElement(kind: string, options: Omit<CreateElementOptions, "kind"> = {}, placement?: { toolId: string; label: string }): void {
   const definition = getElementKind(kind);
   if (!definition) {
     return;
   }
-  armPlacement(kind, definition.label, elementGhostSize(definition), (point) => ({
+  armPlacement(placement?.toolId ?? kind, placement?.label ?? definition.label, elementGhostSize(definition, options.dimensions), (point) => ({
     type: "element.add",
     element: { ...options, kind, position: { x: point.x, z: point.z } }
   }));
@@ -505,7 +526,7 @@ const ribbonActions: RibbonActions = {
   addSlab,
   addDoor,
   addWindow,
-  addElement: (kind) => addElement(kind),
+  addElement: (kind, options, placement) => addElement(kind, options, placement),
   addRoom: (preset) => {
     const { kind, ...options } = roomPresetOptions(preset);
     addElement(kind, options);
@@ -705,6 +726,20 @@ let assetPlacementPreview: AssetPlacementPreview | null = null;
 
 // Whether drags snap - a UI preference (the viewport's Snap toggle), not part of the model.
 const snapSettings = new SnapSettings();
+// SnapSettings is what the scene's drags read; the workspace is where
+// snapping is chosen and remembered. Kept in step both ways - the Snap
+// button flips SnapSettings directly - and neither echoes an unchanged value.
+workspace.subscribe((state) => {
+  snapSettings.setStep(state.snapStep);
+  snapSettings.setEnabled(state.snapping);
+});
+snapSettings.subscribe((enabled) => workspace.setSnapping(enabled));
+
+// Grid & plot (by the Snap button) and the scale bar over the viewport.
+const workspacePanel = createWorkspacePanel({ settings: workspace, onSetPlot: (length, width) => architect.setPlot(length, width) });
+const scaleBar = createScaleBarOverlay();
+// The corner orientation gizmo: names X/Y/Z where they never sit on the building.
+const axisGizmo = createAxisGizmo(SCENE_PALETTES.light); // the theme subscription below sets the current theme at once
 
 // Which objects are hidden right now - a viewport/session concern, never
 // part of the saved project document (see VisibilityStore's own docs).
@@ -712,7 +747,19 @@ const snapSettings = new SnapSettings();
 // SceneManager's layers share exactly one instance.
 const visibilityStore = new VisibilityStore();
 
+// Select / Measure / Annotate in the viewport's tool row. The Measure tool
+// needs the real scene, so it is built after SceneManager (below).
+let measureTool: MeasureTool | null = null;
+const viewportTools = createViewportTools({
+  onSelect: () => sceneManager.current?.placementController.disarm(),
+  onMeasure: () => measureTool?.toggle()
+});
+
+// Light/dark for the whole workspace: index.html has already applied the saved choice to <html>.
+const themeStore = createThemeStore({ storage: sessionStore(), root: document.documentElement });
+
 const shell = createAppShell({
+  theme: themeStore,
   projectMeta,
   persistence,
   auth,
@@ -727,6 +774,7 @@ const shell = createAppShell({
     }
   },
   onFocusObjects: (objectIds) => sceneManager.current?.focusOn(objectIds),
+  onFocusPoint: (point) => sceneManager.current?.focusOnPoint(point),
   visibilityStore,
   ribbonActions,
   onDuplicateSelected: duplicateSelected,
@@ -750,9 +798,15 @@ const shell = createAppShell({
   history,
   commandExecutor,
   snapSettings,
+  viewportTools: viewportTools.elements,
   onAddAsset: addAsset,
   onHighlightConstructionObjects: (objectIds) => sceneManager.current?.highlightConstructionObjects(objectIds) ?? { resolved: 0, unresolved: objectIds?.length ?? 0 },
-  architect: architectPanel
+  architect: architectPanel,
+  workspace,
+  workspaceControl: workspacePanel.element,
+  viewportOverlays: [scaleBar.element, axisGizmo.element],
+  // A room's inspector rows move and resize it with its walls, with the conversation's own checks.
+  onRoomEdit: (roomId, edit) => architect.editRoom(roomId, edit)
 });
 
 appRoot.append(shell.root);
@@ -776,6 +830,25 @@ sceneManager.current = new SceneManager(
   visibilityStore
 );
 sceneManager.current.start();
+// Grid spacing, axes and dimension labels follow the workspace settings;
+// the scale bar follows the zoom; the popover says what the labels show.
+workspace.subscribe((state) => sceneManager.current?.setWorkspace(state));
+sceneManager.current.onViewChange((metresPerPixel) => scaleBar.update(scaleBarFor(metresPerPixel)));
+sceneManager.current.onDimensionSummary((summary) => workspacePanel.setDimensionSummary(summary));
+// The viewport follows the theme (backdrop, fog, ground, grid).
+themeStore.subscribe((theme) => sceneManager.current?.setTheme(theme));
+// The floating AI Architect copilot covers the viewport's left side: frame
+// the scene in the part still visible, following the panel as it is
+// resized or collapsed.
+const updateViewportInset = (): void => {
+  const panel = architectPanel.element;
+  const viewport = shell.viewportContainer.getBoundingClientRect();
+  const collapsed = panel.classList.contains("architect--collapsed") || panel.offsetParent === null;
+  sceneManager.current?.setOverlayInset(collapsed ? 0 : panel.getBoundingClientRect().right - viewport.left + 8);
+};
+new ResizeObserver(updateViewportInset).observe(architectPanel.element);
+window.addEventListener("resize", updateViewportInset);
+updateViewportInset();
 // The startup wall (or a restored project's whole model, once loaded)
 // framed on first paint, rather than the camera's fixed default
 // position - which, for anything bigger than the single startup wall,
@@ -795,10 +868,28 @@ persistence.subscribe((state) => {
 // The ribbon shows which tool is armed (RibbonTool.isActive), and the
 // status bar shows the placement banner and its Cancel button - both
 // re-derived from PlacementController, not duplicated state of their own.
+// The Measure tool's readout replaces the status bar's "click to place"
+// line while it is armed.
+const cancelPlacement = (): void => sceneManager.current?.placementController.disarm();
+measureTool = createMeasureTool({
+  ...sceneManager.current.getViewportContext(),
+  placementController: sceneManager.current.placementController,
+  snapObjects: () => buildAIProjectSnapshot(project).objects,
+  snapping: () => snapSettings.isEnabled(),
+  snapStep: () => snapSettings.getStep(),
+  onReadout: (text) => {
+    if (text) shell.setPlacementStatus({ label: "Measure", text, onCancel: cancelPlacement });
+  }
+});
 sceneManager.current.placementController.subscribe((tool) => {
   shell.refreshRibbon();
   shell.refreshAssetLibrary();
-  shell.setPlacementStatus(tool ? { label: tool.label, onCancel: () => sceneManager.current?.placementController.disarm() } : null);
+  viewportTools.setMode(!tool ? "select" : tool.id === MEASURE_TOOL_ID ? "measure" : "placing");
+  if (tool?.id === MEASURE_TOOL_ID) {
+    shell.setPlacementStatus({ label: tool.label, text: measureTool?.readout() ?? "Measure.", onCancel: cancelPlacement });
+  } else {
+    shell.setPlacementStatus(tool ? { label: tool.label, onCancel: cancelPlacement } : null);
+  }
 });
 
 // Phase 5A: a real, translucent GLTF preview + pre-placement rotation +
@@ -837,8 +928,25 @@ createElementPlacementHud({
 // model changes - an undo, a redo, or a manual edit can un-build a stage,
 // and the progress strip and marks should say so. Coalesced to one
 // refresh per frame: a build stage changes dozens of objects at once.
-const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene);
-architect.subscribe((state) => siteOverlay.update(state));
+const siteOverlay = createSiteOverlay(sceneManager.current.getViewportContext().scene, SCENE_PALETTES[themeStore.get()]);
+themeStore.subscribe((theme) => siteOverlay.setPalette(SCENE_PALETTES[theme]));
+sceneManager.current.onFrame((camera, viewport) => siteOverlay.fitLabels(camera, viewport));
+sceneManager.current.onFrame((camera) => axisGizmo.update(camera));
+themeStore.subscribe((theme) => axisGizmo.setPalette(SCENE_PALETTES[theme]));
+// A new or corrected preview is framed once, so the footprint and its
+// dimension labels can actually be read; the camera is left alone while
+// the same preview stays up, so the user can orbit around it.
+let framedPreview = "";
+architect.subscribe((state) => {
+  siteOverlay.update(state);
+  workspacePanel.setPlot(state.site ? { length: state.site.length, width: state.site.width } : null);
+  const preview = state.preview;
+  const key = preview ? JSON.stringify([preview.label, preview.center, preview.sizeX, preview.sizeZ, preview.height]) : "";
+  if (preview && key !== framedPreview) {
+    sceneManager.current?.focusOnRegion(preview);
+  }
+  framedPreview = key;
+});
 let architectRefreshQueued = false;
 const refreshArchitect = (): void => {
   if (architectRefreshQueued) return;

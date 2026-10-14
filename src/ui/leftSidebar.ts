@@ -5,6 +5,7 @@ import { createTabStrip, comingSoon } from "./tabStrip";
 import { ELEMENT_KINDS } from "../engine/elements/catalog";
 import { ASSET_DEFINITIONS } from "../engine/assets/catalog";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
+import { searchProjectItems } from "./projectSearch";
 import type { AssemblyStore } from "../engine/assemblies/AssemblyStore";
 import type { CommandExecutor } from "../engine/commands/CommandExecutor";
 import type { SelectionStore } from "../engine/selection/SelectionStore";
@@ -27,6 +28,8 @@ interface HierarchyObject {
   hostId?: string | null;
   connections?: readonly unknown[];
   position: { x: number; y: number; z: number };
+  /** Searched by the tree's search box, along with kind and assetId. */
+  material?: string;
 }
 
 interface ObjectSource {
@@ -35,6 +38,8 @@ interface ObjectSource {
   labelOf(object: HierarchyObject): string;
   /** Orders the source's objects. */
   orderOf(object: HierarchyObject): number;
+  /** The group it lists under among "Other objects": "Walls", "Doors", "Water Pipes"... */
+  groupOf(object: HierarchyObject): string;
 }
 
 /** "wall-12" -> 12, so "wall-2" lists before "wall-10". */
@@ -54,8 +59,15 @@ function originalSource(label: string, store: ObjectSource["store"]): ObjectSour
     store,
     // A door or window in a wall says which: "Door in wall-3".
     labelOf: (object) => (typeof object.hostId === "string" ? `${label} in ${object.hostId}` : label),
-    orderOf: (object) => idNumber(object.id)
+    orderOf: (object) => idNumber(object.id),
+    groupOf: () => `${label}s`
   };
+}
+
+/** An element's group: its catalog kind, in the plural ("Water Pipes", "Roofs"). */
+function elementGroup(object: HierarchyObject): string {
+  const definition = ELEMENT_KINDS.find((entry) => entry.kind === object.kind);
+  return `${definition?.label ?? "Element"}s`;
 }
 
 /** An element's name, with how many endpoint connections it has, if any. */
@@ -115,7 +127,7 @@ function objectRow(
  * under it, not under an invented floor.
  */
 function roomSection(
-  room: { id: string; label: string },
+  room: { id: string; label: string; area: string },
   memberItems: { id: string; label: string }[],
   selectedId: string | null,
   selectionStore: SelectionStore,
@@ -125,7 +137,7 @@ function roomSection(
   /** Every object id in the project - what Isolate hides everything else among (see VisibilityStore.isolate()'s own docs). */
   allObjectIds: readonly string[]
 ): HTMLElement {
-  const roomLabel = `${room.label} (${memberItems.length} object${memberItems.length === 1 ? "" : "s"})`;
+  const countText = `${memberItems.length} object${memberItems.length === 1 ? "" : "s"}`;
   const isExpanded = expanded.has(room.id);
   const isolating = visibilityStore.isIsolating();
 
@@ -143,11 +155,15 @@ function roomSection(
     }
   });
 
-  const nameButton = el("button", {
-    className: `hierarchy-room__name${room.id === selectedId ? " hierarchy-objects__item--selected" : ""}`,
-    text: roomLabel,
-    attrs: { type: "button" }
-  });
+  // The room's full name, with its floor area and contents quietly beneath.
+  const nameButton = el(
+    "button",
+    {
+      className: `hierarchy-room__name${room.id === selectedId ? " hierarchy-objects__item--selected" : ""}`,
+      attrs: { type: "button", title: `${room.label} - ${room.area}, ${countText}`, "aria-label": `${room.label}, ${room.area}, ${countText}` }
+    },
+    [el("span", { className: "hierarchy-room__label", text: room.label }), el("span", { className: "hierarchy-room__meta", text: `${room.area} · ${countText}` })]
+  );
   nameButton.addEventListener("click", () => selectionStore.select(room.id));
 
   const focusButton = el("button", {
@@ -179,7 +195,12 @@ function roomSection(
     }
   });
 
-  const header = el("div", { className: "hierarchy-room__header" }, [toggle, nameButton, focusButton, isolateButton]);
+  // Focus and Isolate show on hover, keyboard focus or selection (always on touch screens) - the room's name gets the row.
+  const header = el("div", { className: `hierarchy-room__header${room.id === selectedId || isolating ? " hierarchy-room__header--active" : ""}` }, [
+    toggle,
+    nameButton,
+    el("span", { className: "hierarchy-room__actions" }, [focusButton, isolateButton])
+  ]);
   const children: HTMLElement[] = [header];
   if (isExpanded) {
     if (memberItems.length === 0) {
@@ -207,18 +228,39 @@ function roomSection(
  * supports one yet (see the milestone's own known-limitations note); a
  * multi-story project still lists every room flatly under "Building".
  */
+/** The tree's own search, for the top bar to drive (see LeftSidebar.searchProject). */
+interface ProjectSearchHandle {
+  setQuery(query: string): void;
+  pickFirst(): boolean;
+}
+
 function buildProjectHierarchy(
   selectionStore: SelectionStore,
   visibilityStore: VisibilityStore,
   sources: readonly ObjectSource[],
   elementStore: ElementStore,
-  onFocusObjects: (objectIds: string[]) => void
+  onFocusObjects: (objectIds: string[]) => void,
+  exposeSearch?: (handle: ProjectSearchHandle) => void
 ): HTMLElement {
   const root = el("div", { className: "hierarchy-objects" });
   const expandedRooms = new Set<string>();
+  /** "Other objects" groups the user opened or closed - otherwise a small group starts open, a long one closed. */
+  const groupOpen = new Map<string, boolean>();
   let renderedKey: string | null = null;
+  // The search box swaps the tree for a flat list of matching objects;
+  // picking one selects it and frames it in the viewport.
+  const search = el("input", {
+    className: "hierarchy-search__input",
+    attrs: { type: "search", placeholder: "Find in project…", "aria-label": "Search the project's objects", autocomplete: "off", spellcheck: "false" }
+  }) as HTMLInputElement;
+  let matches: { id: string; focusIds: string[] }[] = [];
+  const pick = (match: { id: string; focusIds: string[] }): void => {
+    selectionStore.select(match.id);
+    onFocusObjects(match.focusIds);
+  };
 
   const render = (): void => {
+    const query = search.value.trim();
     const selectedId = selectionStore.get();
     const hidden = visibilityStore.getHidden();
     const allObjects = sources.flatMap((source) => source.store.getAll());
@@ -227,7 +269,13 @@ function buildProjectHierarchy(
     const items = sources.flatMap((source) =>
       source.store
         .getAll()
-        .map((object) => ({ id: object.id, label: source.labelOf(object), order: source.orderOf(object) }))
+        .map((object) => ({
+          id: object.id,
+          label: source.labelOf(object),
+          order: source.orderOf(object),
+          group: source.groupOf(object),
+          detail: [object.material, object.kind, object.assetId].filter((word) => typeof word === "string").join(" ")
+        }))
         .sort((a, b) => a.order - b.order)
     );
     const itemById = new Map(items.map((item) => [item.id, item]));
@@ -246,7 +294,7 @@ function buildProjectHierarchy(
         }
       }
       return {
-        room: { id: room.id, label: `${itemById.get(room.id)?.label ?? "Room"} — ${roomArea(room)} m²` },
+        room: { id: room.id, label: itemById.get(room.id)?.label ?? "Room", area: `${roomArea(room)} m²` },
         memberItems
       };
     });
@@ -259,10 +307,12 @@ function buildProjectHierarchy(
     // mid-click (a pending field edit commits when the press starts)
     // would swallow it.
     const key = JSON.stringify([
+      query,
       selectedId,
       Array.from(hidden).sort(),
       visibilityStore.isIsolating(),
       Array.from(expandedRooms).sort(),
+      Array.from(groupOpen.entries()).sort(),
       roomEntries.map(({ room, memberItems }) => [room.id, room.label, memberItems.map((item) => item.id)]),
       otherItems.map((item) => [item.id, item.label])
     ]);
@@ -270,6 +320,37 @@ function buildProjectHierarchy(
       return;
     }
     renderedKey = key;
+
+    if (query) {
+      const roomOf = new Map<string, string>();
+      for (const { room, memberItems } of roomEntries) {
+        const name = itemById.get(room.id)?.label ?? "room";
+        for (const item of memberItems) roomOf.set(item.id, name);
+      }
+      const searchable = [
+        ...roomEntries.map(({ room, memberItems }) => ({ id: room.id, label: room.label, detail: "room", focusIds: [room.id, ...memberItems.map((item) => item.id)] })),
+        ...items
+          .filter((item) => !roomIds.has(item.id))
+          .map((item) => ({ id: item.id, label: item.label, detail: `${item.detail}${roomOf.has(item.id) ? ` in ${roomOf.get(item.id)}` : ""}`, focusIds: [item.id] }))
+      ];
+      const found = searchProjectItems(searchable, query);
+      matches = found;
+      root.replaceChildren(
+        el("h4", { className: "hierarchy-objects__group-title", text: found.length === 0 ? "No matches" : `${found.length} match${found.length === 1 ? "" : "es"}` }),
+        ...(found.length === 0
+          ? [el("p", { className: "sidebar__placeholder", text: `Nothing in the project matches “${query}”. Search by name, id, material or room.` })]
+          : found.map((match) => {
+              const row = objectRow(match, selectedId, selectionStore, visibilityStore);
+              // Picking a result also frames it - the whole room, for a room.
+              row.querySelector(".hierarchy-objects__item")?.addEventListener("click", () => onFocusObjects(match.focusIds));
+              const where = match.detail.match(/ in (.+)$/);
+              if (where) row.querySelector(".hierarchy-objects__item")?.append(el("span", { className: "hierarchy-search__where", text: ` · ${where[1]}` }));
+              return row;
+            }))
+      );
+      return;
+    }
+    matches = [];
 
     const sections: HTMLElement[] = [];
     if (roomEntries.length > 0) {
@@ -288,7 +369,38 @@ function buildProjectHierarchy(
     if (otherItems.length === 0) {
       sections.push(el("p", { className: "sidebar__placeholder", text: roomEntries.length > 0 ? "Everything else is inside a room." : "No objects in the scene yet." }));
     } else {
-      sections.push(...otherItems.map((item) => objectRow(item, selectedId, selectionStore, visibilityStore)));
+      // By type - "Walls · 9", "Doors · 6" - each a collapsible group. A group
+      // with the selected object in it is always open, so a pick in the
+      // viewport always shows up here.
+      const groups = new Map<string, typeof otherItems>();
+      for (const item of otherItems) {
+        const members = groups.get(item.group) ?? [];
+        members.push(item);
+        groups.set(item.group, members);
+      }
+      for (const [group, members] of groups) {
+        const holdsSelection = members.some((item) => item.id === selectedId);
+        const open = holdsSelection || (groupOpen.get(group) ?? members.length <= 4);
+        const header = el(
+          "button",
+          { className: "hierarchy-group__header", attrs: { type: "button", "aria-expanded": String(open) } },
+          [
+            el("span", { className: "hierarchy-group__chevron", text: open ? "▾" : "▸", attrs: { "aria-hidden": "true" } }),
+            el("span", { className: "hierarchy-group__name", text: group }),
+            el("span", { className: "hierarchy-room__count", text: String(members.length) })
+          ]
+        );
+        header.addEventListener("click", () => {
+          groupOpen.set(group, !open);
+          render();
+        });
+        sections.push(
+          el("div", { className: "hierarchy-group" }, [
+            header,
+            ...(open ? [el("div", { className: "hierarchy-group__members" }, members.map((item) => objectRow(item, selectedId, selectionStore, visibilityStore)))] : [])
+          ])
+        );
+      }
     }
 
     root.replaceChildren(...sections);
@@ -299,8 +411,34 @@ function buildProjectHierarchy(
   }
   selectionStore.subscribe(render);
   visibilityStore.subscribe(render);
+  search.addEventListener("input", render);
+  exposeSearch?.({
+    setQuery(query) {
+      search.value = query;
+      render();
+    },
+    pickFirst() {
+      if (matches.length === 0) return false;
+      pick(matches[0]);
+      return true;
+    }
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && matches.length > 0) {
+      event.preventDefault();
+      pick(matches[0]);
+    } else if (event.key === "Escape" && search.value) {
+      event.stopPropagation();
+      search.value = "";
+      render();
+    }
+  });
 
-  return el("div", { className: "sidebar__section" }, [el("h3", { className: "sidebar__section-title", text: "Building" }), root]);
+  return el("div", { className: "sidebar__section" }, [
+    el("h3", { className: "sidebar__section-title", text: "Building" }),
+    el("div", { className: "hierarchy-search" }, [search]),
+    root
+  ]);
 }
 
 /**
@@ -323,6 +461,10 @@ export interface LeftSidebar {
   element: HTMLElement;
   /** Re-checks the Assets tab's own card active-states - see AssetLibrary.refresh()'s own docs. A no-op if the Assets tab has never been built (nothing to refresh yet). */
   refreshAssetLibrary(): void;
+  /** Runs the Project tree's search for `query` (the top bar's search box drives it), showing the Project tab. */
+  searchProject(query: string): void;
+  /** Selects and frames the first search result; false when there is none. */
+  pickFirstSearchResult(): boolean;
 }
 
 export function createLeftSidebar(
@@ -350,8 +492,8 @@ export function createLeftSidebar(
     originalSource("Slab", slabStore),
     originalSource("Door", doorStore),
     originalSource("Window", windowStore),
-    { store: elementStore, labelOf: elementLabel, orderOf: elementOrder },
-    { store: assetStore, labelOf: assetLabel, orderOf: assetOrder }
+    { store: elementStore, labelOf: elementLabel, orderOf: elementOrder, groupOf: elementGroup },
+    { store: assetStore, labelOf: assetLabel, orderOf: assetOrder, groupOf: () => "Furniture & fittings" }
   ];
 
   // Built up front, like commandBar.ts's own AI Prompt tab - so its
@@ -360,12 +502,16 @@ export function createLeftSidebar(
   // unconditionally, the same way it already refreshes the ribbon).
   const assetLibrary = createAssetLibrary({ onPlaceAsset: onAddAsset, isPlacementActive });
 
-  const { strip, panel } = createTabStrip(
+  let projectSearch: ProjectSearchHandle | null = null;
+  const { strip, panel, activate } = createTabStrip(
     [
       {
         id: "project",
         label: "Project",
-        build: () => buildProjectHierarchy(selectionStore, visibilityStore, objectSources, elementStore, onFocusObjects)
+        build: () =>
+          buildProjectHierarchy(selectionStore, visibilityStore, objectSources, elementStore, onFocusObjects, (handle) => {
+            projectSearch = handle;
+          })
       },
       {
         id: "assemblies",
@@ -396,6 +542,15 @@ export function createLeftSidebar(
 
   return {
     element: el("aside", { className: "sidebar sidebar--left" }, [strip, panel]),
-    refreshAssetLibrary: assetLibrary.refresh
+    refreshAssetLibrary: assetLibrary.refresh,
+    searchProject(query) {
+      // Clearing the search leaves whichever panel is open.
+      if (query.trim()) activate("project");
+      projectSearch?.setQuery(query);
+    },
+    pickFirstSearchResult() {
+      activate("project");
+      return projectSearch?.pickFirst() ?? false;
+    }
   };
 }

@@ -312,12 +312,13 @@ function parseElement(raw: Record<string, unknown>, path: string): Parsed<Persis
     return fail(`${where}: a ${definition.label.toLowerCase()} has no "${unexpected}" parameter.`);
   }
   const params: Record<string, number | string> = {};
-  for (const key of paramKeys) {
-    const value = rawParams[key];
+  for (const spec of definition.params) {
+    // A parameter added after this project was saved reads as its legacy value (a roof's style: gable).
+    const value = rawParams[spec.key] ?? spec.legacy;
     if (typeof value !== "number" && typeof value !== "string") {
-      return fail(`${where}: params.${key} is missing.`);
+      return fail(`${where}: params.${spec.key} is missing.`);
     }
-    params[key] = value;
+    params[spec.key] = value;
   }
 
   const connections = parseConnections(raw.connections, where);

@@ -112,7 +112,9 @@ const server = createServer({
   projectStore,
   // One JSON line per request - route, status, timing, signed-in or not. Never tokens, emails or bodies.
   requestLog: (line) => console.log(line),
-  authProviderCheck
+  authProviderCheck,
+  // Render sets RENDER_GIT_COMMIT to the deployed commit; /health reports it (X-Release) so a release can be verified.
+  release: process.env.RENDER_GIT_COMMIT
 });
 
 server.listen(config.port, () => {
@@ -120,6 +122,7 @@ server.listen(config.port, () => {
   console.log(`Accepting browser requests from: ${config.frontendOrigins.join(", ")}`);
   console.log(storageDescription);
   console.log(`AI provider: ${providerDescription}.`);
+  if (process.env.RENDER_GIT_COMMIT) console.log(`Release: ${process.env.RENDER_GIT_COMMIT.slice(0, 12)}.`);
 });
 
 // Hosts stop containers with SIGTERM: finish in-flight requests, then exit.

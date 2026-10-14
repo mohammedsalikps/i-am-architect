@@ -6,7 +6,7 @@
  * other verify.ts in this project.
  */
 import * as THREE from "three";
-import { computeArchitecturalFit, computeFitCamera } from "./fitCamera.ts";
+import { computeArchitecturalFit, computeFitCamera, withMinimumExtent } from "./fitCamera.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -37,6 +37,19 @@ async function run(): Promise<void> {
   }
 
   console.log("computeFitCamera verification\n");
+
+  check("Fit House frames at least a plot-sized area: a lone wall is grown about its centre; a big house is untouched", () => {
+    const wall = new THREE.Box3(new THREE.Vector3(-2, 0, -4.1), new THREE.Vector3(2, 2.7, -3.9));
+    const grown = withMinimumExtent(wall, { x: 14, y: 3, z: 14 });
+    const size = grown.getSize(new THREE.Vector3());
+    const center = grown.getCenter(new THREE.Vector3());
+    if (Math.abs(size.x - 14) > 1e-9 || Math.abs(size.z - 14) > 1e-9 || Math.abs(size.y - 3) > 1e-9) throw new Error(`grown size ${size.toArray()}`);
+    if (Math.abs(center.x) > 1e-9 || Math.abs(center.z + 4) > 1e-9) throw new Error(`same centre: ${center.toArray()}`);
+    const house = new THREE.Box3(new THREE.Vector3(-10, 0, -8), new THREE.Vector3(10, 6, 8));
+    const kept = withMinimumExtent(house, { x: 14, y: 3, z: 14 });
+    if (!kept.equals(house)) throw new Error("a box already bigger than the minimum is unchanged");
+    if (kept === house) throw new Error("returns a copy, never the caller's box");
+  });
 
   check("frames a box centered on the origin: the target is the box's center", () => {
     const box = new THREE.Box3(new THREE.Vector3(-1, 0, -1), new THREE.Vector3(1, 2, 1));
@@ -171,6 +184,32 @@ async function run(): Promise<void> {
     const tight = computeArchitecturalFit(box, direction, { fovDegrees: 60, aspect: 16 / 9, padding: 1.0 });
     const padded = computeArchitecturalFit(box, direction, { fovDegrees: 60, aspect: 16 / 9, padding: 2.0 });
     assertTrue(padded.distance > tight.distance, "more padding -> further back");
+  });
+
+  check("Fit House from the Front, Side, Top and Perspective presets: every corner of the house is in frame - head-on views no longer clip the near eaves - and the house still fills the view", () => {
+    // A 10 x 8 m house with its roof and 0.3 m eaves, as the planner builds it (centred at z = 0.5).
+    const box = new THREE.Box3(new THREE.Vector3(-5.3, 0, -3.8), new THREE.Vector3(5.3, 4.4, 4.8));
+    const aspect = 874 / 525; // the 1440 x 900 layout's viewport
+    const presets: Record<string, THREE.Vector3> = {
+      front: new THREE.Vector3(0, 4, 14),
+      side: new THREE.Vector3(14, 4, 0),
+      top: new THREE.Vector3(0, 14, 0.01),
+      perspective: new THREE.Vector3(8, 8, 8)
+    };
+    for (const [name, direction] of Object.entries(presets)) {
+      const fit = computeArchitecturalFit(box, direction, { fovDegrees: 45, aspect });
+      const camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000);
+      camera.position.copy(fit.position);
+      camera.lookAt(fit.target);
+      camera.updateMatrixWorld();
+      let reach = 0;
+      for (let i = 0; i < 8; i += 1) {
+        const corner = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).project(camera);
+        reach = Math.max(reach, Math.abs(corner.x), Math.abs(corner.y));
+      }
+      assertTrue(reach <= 1 / 1.18 + 1e-6, `${name}: every corner inside the padded frame (furthest at ${reach.toFixed(3)} of the half-width)`);
+      assertTrue(reach >= 0.8, `${name}: and framed tightly, not lost in empty space (furthest corner at ${reach.toFixed(3)})`);
+    }
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

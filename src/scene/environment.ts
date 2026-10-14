@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import { SCENE_PALETTES } from "./sceneTheme";
+import type { ScenePalette } from "./sceneTheme";
 
 /**
  * The viewport's backdrop: a soft vertical gradient rather than a single
@@ -24,7 +26,7 @@ import * as THREE from "three";
  * sampled at an angle, so no vertical banding is visible at any window
  * size.
  */
-export function createHorizonBackground(): THREE.Texture {
+export function createHorizonBackground(palette: ScenePalette = SCENE_PALETTES.light): THREE.Texture {
   const canvas = document.createElement("canvas");
   canvas.width = 2;
   canvas.height = 256;
@@ -36,9 +38,10 @@ export function createHorizonBackground(): THREE.Texture {
     return texture;
   }
   const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  gradient.addColorStop(0, "#15161a"); // zenith - near-black, not pitch black
-  gradient.addColorStop(0.55, "#24262b"); // horizon - a lighter charcoal band, enough to read as a studio wall, not a void
-  gradient.addColorStop(1, "#1a1b1f"); // recedes toward the ground's own dark tone
+  // The theme's own stops (scene/sceneTheme.ts): zenith, the horizon band, and the ground's tone.
+  gradient.addColorStop(0, palette.sky.zenith);
+  gradient.addColorStop(0.55, palette.sky.horizon);
+  gradient.addColorStop(1, palette.sky.ground);
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -48,4 +51,4 @@ export function createHorizonBackground(): THREE.Texture {
 }
 
 /** Matches the gradient's lower band, so distant geometry fades into the same dark tone instead of a mismatched flat fog color. */
-export const HORIZON_FOG_COLOR = 0x1a1b1f;
+export const HORIZON_FOG_COLOR = SCENE_PALETTES.light.fog;

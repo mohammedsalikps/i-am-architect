@@ -3,6 +3,7 @@ import { getElementKind } from "../../engine/elements/catalog";
 import type { ElementShape } from "../../engine/elements/catalog";
 import { getMaterial } from "../../engine/materials/materialLibrary";
 import type { ElementData } from "../../engine/elements/types";
+import { isRoofStyle } from "../../engine/elements/roofStyles";
 import { OUTLINE_COLOR, OUTLINE_SCALE } from "../selectionOutline";
 
 /**
@@ -103,6 +104,41 @@ function gableGeometry(s: ElementSize): THREE.BufferGeometry {
   return geometry;
 }
 
+/** A mono-pitch wedge: one slope across Z, high at the back (-Z), thin at the front, running along local X. */
+function monoPitchGeometry(s: ElementSize): THREE.BufferGeometry {
+  const edge = Math.min(0.2, s.y * 0.3);
+  const profile = new THREE.Shape();
+  profile.moveTo(-s.z / 2, -s.y / 2);
+  profile.lineTo(s.z / 2, -s.y / 2);
+  profile.lineTo(s.z / 2, -s.y / 2 + edge);
+  profile.lineTo(-s.z / 2, s.y / 2);
+  profile.closePath();
+  const geometry = new THREE.ExtrudeGeometry(profile, { depth: s.x, bevelEnabled: false });
+  geometry.translate(0, 0, -s.x / 2);
+  geometry.rotateY(Math.PI / 2);
+  return geometry;
+}
+
+/** A flat roof: a deck across the whole box, a slightly lighter membrane on it, and a parapet up to the box's top. */
+function flatRoofParts(s: ElementSize, main: THREE.MeshStandardMaterial, color: string): THREE.Mesh[] {
+  const deck = Math.min(0.22, s.y * 0.5);
+  const parapet = s.y - deck;
+  const rim = Math.min(0.15, s.x / 8, s.z / 8);
+  const bottom = -s.y / 2;
+  const parts = [box(s.x, deck, s.z, main, 0, bottom + deck / 2, 0)];
+  if (parapet > 0.02) {
+    const y = bottom + deck + parapet / 2;
+    parts.push(
+      box(s.x, parapet, rim, main, 0, y, s.z / 2 - rim / 2),
+      box(s.x, parapet, rim, main, 0, y, -s.z / 2 + rim / 2),
+      box(rim, parapet, s.z - 2 * rim, main, s.x / 2 - rim / 2, y, 0),
+      box(rim, parapet, s.z - 2 * rim, main, -s.x / 2 + rim / 2, y, 0)
+    );
+  }
+  parts.push(box(s.x - 2 * rim, 0.01, s.z - 2 * rim, plainMaterial(lighter(color, 0.18), 0.9), 0, bottom + deck + 0.005, 0));
+  return parts;
+}
+
 function buildParts(shape: ElementShape, s: ElementSize, element: ElementData, main: THREE.MeshStandardMaterial): THREE.Mesh[] {
   const bottom = -s.y / 2;
   switch (shape) {
@@ -110,8 +146,13 @@ function buildParts(shape: ElementShape, s: ElementSize, element: ElementData, m
     case "plate":
       return [box(s.x, s.y, s.z, main)];
 
-    case "roof-gable":
+    case "roof-gable": {
+      // The roof's style picks the shape inside the same box (engine/elements/roofStyles.ts).
+      const style = isRoofStyle(element.params.style) ? element.params.style : "gable";
+      if (style === "flat") return flatRoofParts(s, main, element.color);
+      if (style === "mono-pitch") return [part(monoPitchGeometry(s), main)];
       return [part(gableGeometry(s), main)];
+    }
 
     case "stair": {
       const steps = integerParam(element.params.steps, 3, 40, 16);
