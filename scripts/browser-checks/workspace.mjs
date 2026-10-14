@@ -70,7 +70,7 @@ const toggleText = () => b.evaluate(`document.querySelector(".app-header__theme"
 
 expect("app loaded", await b.goto(APP, READY));
 await sleep(2500);
-await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
 await sleep(500);
 
 // --- light, as a first visit gets it ---
@@ -120,7 +120,7 @@ expect("reload: the viewport is dark too", reloadedLuma < lightLuma - 80, String
 for (const width of [1280, 1366, 1440, 1920]) {
   await b.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await sleep(900);
-  await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+  await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
   await sleep(500);
   const layout = JSON.parse(
     await b.evaluate(`(() => {
@@ -133,10 +133,11 @@ for (const width of [1280, 1366, 1440, 1920]) {
       const perspective = [...document.querySelectorAll(".view-controls__button")].find((button) => button.textContent.trim() === "Perspective")?.getBoundingClientRect();
       const hit = perspective ? document.elementFromPoint(perspective.x + perspective.width / 2, perspective.y + perspective.height / 2) : null;
       const toggle = box(".app-header__theme");
-      return JSON.stringify({ panelOverControls: hits(panel, controls), panelOverInspector: hits(panel, inspector), panelOverBottom: hits(panel, bottom), perspectiveClickable: hit?.textContent?.trim() === "Perspective", toggleVisible: !!toggle && toggle.width > 0 && toggle.right <= window.innerWidth });
+      const drawerOpen = !document.querySelector(".assistant-drawer")?.hidden && !!panel && panel.width > 0;
+      return JSON.stringify({ drawerOpen, panelOverControls: hits(panel, controls), panelOverInspector: hits(panel, inspector), panelOverBottom: hits(panel, bottom), perspectiveClickable: hit?.textContent?.trim() === "Perspective", toggleVisible: !!toggle && toggle.width > 0 && toggle.right <= window.innerWidth });
     })()`)
   );
-  expect(`${width} px (dark): the AI panel covers neither the view controls, the inspector nor the bottom panel; the theme toggle is visible`, !layout.panelOverControls && !layout.panelOverInspector && !layout.panelOverBottom && layout.perspectiveClickable && layout.toggleVisible, JSON.stringify(layout));
+  expect(`${width} px (dark): the open AI assistant drawer covers neither the view controls, the inspector nor the records dock; the theme toggle is visible`, layout.drawerOpen && !layout.panelOverControls && !layout.panelOverInspector && !layout.panelOverBottom && layout.perspectiveClickable && layout.toggleVisible, JSON.stringify(layout));
 }
 await b.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 await sleep(800);

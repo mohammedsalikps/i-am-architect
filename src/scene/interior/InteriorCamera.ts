@@ -149,7 +149,8 @@ export class InteriorCamera {
   };
 
   private readonly handleKeyDown = (event: KeyboardEvent): void => {
-    if (isTyping(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+    // A key a control already handled (a menu's or a panel edge's arrows) is not walking.
+    if (event.defaultPrevented || isTyping(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Escape") {
       this.handlers.onExit();
       return;

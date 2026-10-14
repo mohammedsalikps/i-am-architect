@@ -86,7 +86,8 @@ const canvasPoint = async () =>
   })())`));
 /** A real mouse click on an element's centre, as a person would - focus moves with it. */
 const clickOn = async (expression) => {
-  const point = JSON.parse(await b.evaluate(`JSON.stringify((() => { const r = (${expression}).getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })())`));
+  // Scrolled into view first, as a person would on a short viewport (the room list scrolls).
+  const point = JSON.parse(await b.evaluate(`JSON.stringify((() => { const target = ${expression}; target.scrollIntoView({ block: "nearest" }); const r = target.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })())`));
   for (const type of ["mousePressed", "mouseReleased"]) await b.send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", buttons: type === "mousePressed" ? 1 : 0, clickCount: 1 });
 };
 const roomButton = (name) => `[...document.querySelectorAll(".interior-explore__room")].find((x) => x.querySelector(".interior-explore__room-name").textContent === ${JSON.stringify(name)})`;
@@ -137,11 +138,16 @@ await b.shot(outDir, "91-interior-living-room");
 
 // --- typing to the companion is never walking ---
 const typingFrom = await navigator();
+await b.evaluate(`document.querySelector(".assistant-fab").click()`); // the companion's input is in the assistant drawer
+await sleep(600);
 await b.evaluate(`document.querySelector(".architect__input").focus()`);
+const typingFocused = await b.evaluate(`document.activeElement === document.querySelector(".architect__input")`);
 await key("KeyW", 800);
 nav = await navigator();
-expect("W typed into the companion's input does not walk", nav.x === typingFrom.x && nav.z === typingFrom.z, `${nav.x}, ${nav.z}`);
+expect("W typed into the companion's input does not walk", typingFocused && nav.x === typingFrom.x && nav.z === typingFrom.z, `focused ${typingFocused}; ${nav.x}, ${nav.z}`);
 await b.evaluate(`(() => { const input = document.querySelector(".architect__input"); input.value = ""; input.blur(); })()`);
+await b.evaluate(`document.querySelector(".assistant-drawer .architect__collapse").click()`);
+await sleep(600);
 
 // --- another room ---
 await clickOn(roomButton("Kitchen"));
@@ -209,19 +215,20 @@ expect("Undo and Redo still work after exploring", JSON.stringify(undone) !== JS
 // --- the button and the open navigator cover neither the view controls nor the companion ---
 await clickOn(`document.querySelector(".interior-explore__toggle")`);
 await sleep(1200);
-for (const width of [1024, 1100, 1180, 1280, 1366, 1440, 1920]) {
-  await b.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+for (const [width, height] of [[1024, 900], [1100, 900], [1180, 900], [1280, 900], [1366, 900], [1440, 900], [1920, 900], [1366, 650]]) {
+  await b.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   await sleep(900);
   const layout = JSON.parse(
     await b.evaluate(`(() => {
       const box = (selector) => document.querySelector(selector)?.getBoundingClientRect() ?? null;
       const hits = (a, c) => !!a && !!c && a.left < c.right && a.right > c.left && a.top < c.bottom && a.bottom > c.top;
-      const toggle = box(".interior-explore__bar"), panel = box(".interior-explore"), controls = box(".viewport-area__controls"), companion = box(".architect");
+      const toggle = box(".interior-explore__bar"), panel = box(".interior-explore"), controls = box(".viewport-area__controls"), assistant = box(".assistant-fab");
       const clickable = (selector, text) => { const r = [...document.querySelectorAll(selector)].find((x) => x.textContent.trim() === text)?.getBoundingClientRect(); return !!r && document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.textContent?.trim() === text; };
-      return JSON.stringify({ overControls: hits(toggle, controls) || hits(panel, controls), overCompanion: hits(toggle, companion) || hits(panel, companion), toggleClickable: clickable(".interior-explore__toggle", "Interior Explore"), perspectiveClickable: clickable(".view-controls__button", "Perspective"), exitClickable: clickable(".interior-explore button", "Exit interior") });
+      const assistantClickable = !!assistant && assistant.width > 0 && !!document.elementFromPoint(assistant.x + assistant.width / 2, assistant.y + assistant.height / 2)?.closest(".assistant-fab");
+      return JSON.stringify({ overControls: hits(toggle, controls) || hits(panel, controls), overAssistant: hits(toggle, assistant) || hits(panel, assistant), assistantClickable, toggleClickable: clickable(".interior-explore__toggle", "Interior Explore"), perspectiveClickable: clickable(".view-controls__button", "Perspective"), exitClickable: clickable(".interior-explore button", "Exit interior") });
     })()`)
   );
-  expect(`${width} px: the Interior Explore button and navigator cover neither the view controls nor the companion`, !layout.overControls && !layout.overCompanion && layout.toggleClickable && layout.perspectiveClickable && layout.exitClickable, JSON.stringify(layout));
+  expect(`${width}x${height}: the Interior Explore button and navigator cover neither the view controls nor the assistant's button, and Exit interior is in reach`, !layout.overControls && !layout.overAssistant && layout.assistantClickable && layout.toggleClickable && layout.perspectiveClickable && layout.exitClickable, JSON.stringify(layout));
 }
 await b.send("Emulation.setDeviceMetricsOverride", { width: W, height: H, deviceScaleFactor: 1, mobile: false });
 await sleep(600);

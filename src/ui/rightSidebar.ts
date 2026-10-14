@@ -39,11 +39,36 @@ import type {
   UpdateAssetCommand
 } from "../engine/commands/types";
 
+/** Inspector sections the person folded, by title - kept for the page, so a new selection's panel opens them folded too. */
+const foldedSections = new Set<string>();
+
+/**
+ * One inspector section: its title is a toggle that folds the rows away
+ * (Transform, Dimensions, Material...), so the sections that matter right
+ * now stay in view. The rows themselves are unchanged when shown.
+ */
 function section(title: string, rows: HTMLElement[]): HTMLElement {
-  return el("div", { className: "sidebar__section" }, [
-    el("h3", { className: "sidebar__section-title", text: title }),
-    ...rows
+  const folded = foldedSections.has(title);
+  const toggle = el("button", {
+    className: "sidebar__section-toggle",
+    text: title,
+    attrs: { type: "button", "aria-expanded": String(!folded), title: `Show or hide ${title}` }
+  });
+  const body = el("div", { className: "sidebar__section-body" }, rows);
+  body.hidden = folded;
+  const root = el("div", { className: `sidebar__section sidebar__section--collapsible${folded ? " is-folded" : ""}` }, [
+    el("h3", { className: "sidebar__section-title" }, [toggle]),
+    body
   ]);
+  toggle.addEventListener("click", () => {
+    const fold = !body.hidden;
+    body.hidden = fold;
+    root.classList.toggle("is-folded", fold);
+    toggle.setAttribute("aria-expanded", String(!fold));
+    if (fold) foldedSections.add(title);
+    else foldedSections.delete(title);
+  });
+  return root;
 }
 
 function readOnlyRow(label: string, value: string): HTMLElement {
@@ -1064,6 +1089,8 @@ export type RightSidebarOptions = {
   onDeleteSelected: () => void;
   /** Moves or resizes a room together with its walls (ArchitectSession.editRoom). Without it, a room's rows edit only the room record. */
   onRoomEdit?: RoomEditHandler;
+  /** Added at the end of the Properties / Materials tab row - the shell's collapse button. */
+  headerExtras?: HTMLElement[];
 };
 
 /** A room's new centre (plan X/Z) and/or size, metres - see ArchitectSession.editRoom. */
@@ -1416,10 +1443,40 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     return panels;
   };
 
-  const render = (): void => {
+  // A store change while a field here holds typed, uncommitted text (a
+  // companion reply landing mid-edit) waits until focus leaves the field -
+  // redrawing at once would replace the field and lose the text. The
+  // field's own commit (its "change") still redraws at once.
+  let committing = false;
+  let redrawOnBlur = false;
+  const holdsEdit = (): boolean => {
+    const active = document.activeElement;
+    return !committing && active instanceof HTMLInputElement && properties.contains(active) && active.value !== active.defaultValue;
+  };
+  const draw = (): void => {
+    redrawOnBlur = false;
     const selectedId = options.selectionStore.get();
     properties.replaceChildren(...panelsFor(selectedId), ...relationshipPanels(selectedId));
   };
+  const render = (): void => {
+    if (holdsEdit()) {
+      redrawOnBlur = true;
+      return;
+    }
+    draw();
+  };
+  // Capture runs before the field's own handler, bubbling after it.
+  properties.addEventListener("change", () => {
+    committing = true;
+  }, true);
+  properties.addEventListener("change", () => {
+    committing = false;
+  });
+  properties.addEventListener("focusout", () => {
+    if (redrawOnBlur && !holdsEdit()) {
+      draw();
+    }
+  });
 
   options.wallStore.subscribe(render);
   options.pillarStore.subscribe(render);
@@ -1428,6 +1485,7 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   options.doorStore.subscribe(render);
   options.windowStore.subscribe(render);
   options.elementStore.subscribe(render);
+  options.assetStore.subscribe(render);
   options.selectionStore.subscribe(render);
 
   const materials = createMaterialsPanel(options);
@@ -1440,8 +1498,10 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
       { id: "colors", label: "Colors", build: () => comingSoon("Saved color palettes"), disabled: true }
     ],
     "sidebar-tabs",
-    "sidebar-tabs__item"
+    "sidebar-tabs__item",
+    { label: "Inspector" }
   );
+  if (options.headerExtras?.length) strip.append(el("span", { className: "sidebar-tabs__spacer" }), ...options.headerExtras);
 
-  return el("aside", { className: "sidebar sidebar--right" }, [strip, panel]);
+  return el("aside", { className: "sidebar sidebar--right", attrs: { "aria-label": "Inspector" } }, [strip, panel]);
 }

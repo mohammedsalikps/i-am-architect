@@ -102,6 +102,15 @@ const {
 // an explicit, documented absolute default.
 const BACKEND_URL = import.meta.env.VITE_AI_BACKEND_URL ?? "http://localhost:8787";
 
+/** window.sessionStorage for the panel layout (kept for this browser session only) - null where the browser refuses it. */
+function layoutStorage(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 /** window.localStorage - or, where the browser refuses it (some privacy modes), a map that lasts for this page only. */
 function sessionStore(): SessionStorageLike {
   try {
@@ -276,7 +285,9 @@ const architectPanel = createArchitectPanel({
   // setting, never part of the model or its undo history.
   onSetHidden: (objectIds, hidden) => {
     for (const id of objectIds) visibilityStore.setHidden(id, hidden);
-  }
+  },
+  // It lives in the workspace's assistant drawer: its header button closes the drawer, keeping the conversation.
+  onClose: () => shell.closeAssistant()
 });
 
 // Project storage goes through the backend's /api/projects routes - the
@@ -850,6 +861,8 @@ const shell = createAppShell({
   workspace,
   workspaceControl: workspacePanel.element,
   viewportOverlays: [scaleBar.element, axisGizmo.element, interiorExplore.element],
+  interiorExplore,
+  layoutStorage: layoutStorage(),
   // A room's inspector rows move and resize it with its walls, with the conversation's own checks.
   onRoomEdit: (roomId, edit) => architect.editRoom(roomId, edit)
 });
@@ -882,18 +895,6 @@ sceneManager.current.onViewChange((metresPerPixel) => scaleBar.update(scaleBarFo
 sceneManager.current.onDimensionSummary((summary) => workspacePanel.setDimensionSummary(summary));
 // The viewport follows the theme (backdrop, fog, ground, grid).
 themeStore.subscribe((theme) => sceneManager.current?.setTheme(theme));
-// The floating AI Architect copilot covers the viewport's left side: frame
-// the scene in the part still visible, following the panel as it is
-// resized or collapsed.
-const updateViewportInset = (): void => {
-  const panel = architectPanel.element;
-  const viewport = shell.viewportContainer.getBoundingClientRect();
-  const collapsed = panel.classList.contains("architect--collapsed") || panel.offsetParent === null;
-  sceneManager.current?.setOverlayInset(collapsed ? 0 : panel.getBoundingClientRect().right - viewport.left + 8);
-};
-new ResizeObserver(updateViewportInset).observe(architectPanel.element);
-window.addEventListener("resize", updateViewportInset);
-updateViewportInset();
 // The startup wall (or a restored project's whole model, once loaded)
 // framed on first paint, rather than the camera's fixed default
 // position - which, for anything bigger than the single startup wall,

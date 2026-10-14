@@ -9,6 +9,15 @@ export type TabDefinition = {
   disabled?: boolean;
   /** Runs when the user switches away from this tab to another one - e.g. clearing a temporary viewport highlight. Never called for the tab's own initial build. */
   onDeactivate?: () => void;
+  /** An icon (SVG markup, shellIcons.ts) shown above the label - the left rail's tabs. */
+  icon?: string;
+};
+
+export type TabStripOptions = {
+  /** A click on a tab button - `wasActive` when it was already the open tab (the rail collapses its panel then). Runs after the tab is activated. */
+  onSelect?: (id: string, wasActive: boolean) => void;
+  /** The strip's accessible name ("Project browser", "Records"). */
+  label?: string;
 };
 
 export type TabStrip = {
@@ -18,6 +27,8 @@ export type TabStrip = {
   panel: HTMLElement;
   /** Activates a tab by id programmatically - same effect as clicking its button. A no-op for an unknown or disabled id. */
   activate: (id: string) => void;
+  /** The open tab's id. */
+  activeId: () => string | null;
 };
 
 /**
@@ -39,12 +50,15 @@ export type TabStrip = {
  */
 export const SHOW_COMING_SOON = false;
 
-export function createTabStrip(tabs: TabDefinition[], stripClassName: string, buttonClassName: string): TabStrip {
+export function createTabStrip(tabs: TabDefinition[], stripClassName: string, buttonClassName: string, options: TabStripOptions = {}): TabStrip {
   if (tabs.length === 0) {
     throw new Error("createTabStrip requires at least one tab");
   }
 
+  // The row (which a caller may extend with a collapse button) holds the tablist, so only tabs are in the tablist.
   const strip = el("div", { className: stripClassName });
+  const tabList = el("div", { className: "tab-strip__tabs", attrs: { role: "tablist", ...(options.label ? { "aria-label": options.label } : {}) } });
+  strip.append(tabList);
   const panel = el("div", { className: "tab-strip__panel" });
   const buttons = new Map<string, HTMLButtonElement>();
   const built = new Map<string, HTMLElement>();
@@ -57,6 +71,7 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
     activeId = id;
     for (const [tabId, button] of buttons) {
       button.classList.toggle(`${buttonClassName}--active`, tabId === id);
+      button.setAttribute("aria-selected", String(tabId === id));
     }
     let content = built.get(id);
     if (!content) {
@@ -72,15 +87,25 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
     if (tab.disabled && !SHOW_COMING_SOON) continue;
     const button = el("button", {
       className: buttonClassName,
-      text: tab.label,
-      attrs: { type: "button", ...(tab.disabled ? { title: "Coming soon" } : {}) }
+      attrs: { type: "button", role: "tab", "aria-selected": "false", "data-tab": tab.id, ...(tab.disabled ? { title: "Coming soon" } : {}) }
     });
+    if (tab.icon) {
+      const icon = el("span", { className: "tab-strip__icon", attrs: { "aria-hidden": "true" } });
+      icon.innerHTML = tab.icon;
+      button.append(icon, el("span", { className: "tab-strip__label", text: tab.label }));
+    } else {
+      button.textContent = tab.label;
+    }
     button.disabled = !!tab.disabled;
     if (!tab.disabled) {
-      button.addEventListener("click", () => activate(tab.id));
+      button.addEventListener("click", () => {
+        const wasActive = activeId === tab.id;
+        activate(tab.id);
+        options.onSelect?.(tab.id, wasActive);
+      });
     }
     buttons.set(tab.id, button);
-    strip.append(button);
+    tabList.append(button);
   }
 
   const initial = tabs.find((t) => !t.disabled) ?? tabs[0];
@@ -94,7 +119,8 @@ export function createTabStrip(tabs: TabDefinition[], stripClassName: string, bu
       if (tab && !tab.disabled) {
         activate(id);
       }
-    }
+    },
+    activeId: () => activeId
   };
 }
 

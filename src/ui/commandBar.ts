@@ -495,6 +495,14 @@ function buildManualBuildTab(onAddWall: () => void): HTMLElement {
  */
 export interface CommandBar {
   element: HTMLElement;
+  /** The tab row - the dock's header, where the shell adds its collapse toggle. */
+  tabs: HTMLElement;
+  /** Opens a tab by id (the dock's own open/closed state is the shell's). */
+  showTab(id: string): void;
+  /** Saves the construction record book as CSV (File ▸ Export) - built first if its tab was never opened. */
+  exportRecordBook(): void;
+  /** The dock was folded: undo anything a tab shows over the viewport (the Construction Method highlight), as switching away from that tab does. */
+  dockClosed(): void;
   /** Switches to the AI Prompt tab and focuses its input - the viewport empty-state's "Ask AI to Design" action (see ui/layout.ts). */
   focusAiInput(): void;
   /** Re-derives the Measurements record book from the scene - layout.ts calls it whenever the model changes. A no-op until the tab is first opened. */
@@ -513,7 +521,9 @@ export function createCommandBar(
   getProjectId: () => string | null,
   onHighlightConstructionObjects: HighlightConstructionObjects,
   /** A close-up of one point (a fitting in the record book). */
-  onFocusPoint?: (point: { x: number; y: number; z: number }) => void
+  onFocusPoint?: (point: { x: number; y: number; z: number }) => void,
+  /** A click on a tab - the shell opens the dock on it. */
+  onTabSelect?: (id: string, wasActive: boolean) => void
 ): CommandBar {
   // Built up front (not lazily inside the tab strip's own build()) so
   // its `focusInput()` is available whichever tab is active.
@@ -530,8 +540,10 @@ export function createCommandBar(
         id: "measurements",
         label: "Measurements",
         build: () => {
-          recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject, onFocusPoint);
-          return recordBookTab.element;
+          // File ▸ Export may have built it already.
+          const tab = recordBookTab ?? buildRecordBookTab(getConstructionObjects, onSelectObject, onFocusPoint);
+          recordBookTab = tab;
+          return tab.element;
         }
       },
       {
@@ -549,12 +561,21 @@ export function createCommandBar(
       { id: "design-review", label: "Design Review", build: () => comingSoon("Design review"), disabled: true }
     ],
     "command-bar__tabs",
-    "command-bar__tab"
+    "command-bar__tab",
+    { label: "Records and work areas", onSelect: onTabSelect }
   );
 
-  const element = el("footer", { className: "command-bar" }, [strip, panel]);
+  const element = el("footer", { className: "command-bar", attrs: { "aria-label": "Records and work areas" } }, [strip, panel]);
   return {
     element,
+    tabs: strip,
+    showTab: activate,
+    dockClosed: () => constructionMethodTab?.clearHighlight(),
+    exportRecordBook: () => {
+      if (!recordBookTab) recordBookTab = buildRecordBookTab(getConstructionObjects, onSelectObject, onFocusPoint);
+      recordBookTab.refresh();
+      recordBookTab.exportCsv();
+    },
     focusAiInput: () => {
       activate("ai-prompt");
       aiPromptTab.focusInput();

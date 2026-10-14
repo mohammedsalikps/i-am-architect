@@ -15,6 +15,8 @@ import type { AIContextObject } from "../engine/ai/types.ts";
 export interface RecordBookPanel {
   element: HTMLElement;
   refresh(): void;
+  /** Downloads the record book as CSV - the same file its Export CSV button saves. */
+  exportCsv(): void;
 }
 
 const ALL_TYPES = "";
@@ -171,5 +173,5 @@ export function buildRecordBookTab(getObjects: () => readonly AIContextObject[],
   }
 
   refresh();
-  return { element: root, refresh };
+  return { element: root, refresh, exportCsv: () => download(recordBookCsv(book)) };
 }
