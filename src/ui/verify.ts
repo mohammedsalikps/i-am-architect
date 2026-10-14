@@ -1224,6 +1224,21 @@ function run(): void {
     }
   });
 
+  check("the inspector redraws when any store it counts changes - furniture included - but never under a field being typed in", () => {
+    const sidebar = sourceOf("./rightSidebar.ts");
+    const counted = /const allObjects = \(\): ListedObject\[\] => \[([\s\S]*?)\];/.exec(sidebar);
+    assertTrue(counted !== null, "allObjects() lists the stores the summary counts");
+    const stores = [...counted[1].matchAll(/options\.(\w+)\.getAll\(\)/g)].map((match) => match[1]);
+    assertTrue(stores.includes("assetStore"), `furniture is counted (${stores.join(", ")})`);
+    for (const store of [...stores, "selectionStore"]) {
+      assertTrue(new RegExp(`options\\.${store}\\.subscribe\\(render\\);`).test(sidebar), `render follows ${store}`);
+    }
+    assertTrue(/!committing && active instanceof HTMLInputElement && properties\.contains\(active\) && active\.value !== active\.defaultValue/.test(sidebar), "a field holding typed, uncommitted text is recognised - not while it commits");
+    assertTrue(/const render = \(\): void => \{\s*if \(holdsEdit\(\)\) \{\s*redrawOnBlur = true;\s*return;\s*\}\s*draw\(\);/.test(sidebar), "a change from elsewhere while one is typed in waits");
+    assertTrue(/properties\.addEventListener\("change", \(\) => \{\s*committing = true;\s*\}, true\);\s*properties\.addEventListener\("change", \(\) => \{\s*committing = false;\s*\}\);/.test(sidebar), "the field's own commit is marked around its change handler, so it redraws at once");
+    assertTrue(/properties\.addEventListener\("focusout", \(\) => \{\s*if \(redrawOnBlur && !holdsEdit\(\)\) \{\s*draw\(\);/.test(sidebar), "and a held change is drawn as soon as focus leaves the field");
+  });
+
   console.log(`\n${passed} passed, ${failed} failed.`);
   if (failed > 0) {
     throw new Error(`${failed} verification check(s) failed`);

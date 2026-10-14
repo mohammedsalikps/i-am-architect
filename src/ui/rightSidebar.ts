@@ -1416,10 +1416,40 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
     return panels;
   };
 
-  const render = (): void => {
+  // A store change while a field here holds typed, uncommitted text (a
+  // companion reply landing mid-edit) waits until focus leaves the field -
+  // redrawing at once would replace the field and lose the text. The
+  // field's own commit (its "change") still redraws at once.
+  let committing = false;
+  let redrawOnBlur = false;
+  const holdsEdit = (): boolean => {
+    const active = document.activeElement;
+    return !committing && active instanceof HTMLInputElement && properties.contains(active) && active.value !== active.defaultValue;
+  };
+  const draw = (): void => {
+    redrawOnBlur = false;
     const selectedId = options.selectionStore.get();
     properties.replaceChildren(...panelsFor(selectedId), ...relationshipPanels(selectedId));
   };
+  const render = (): void => {
+    if (holdsEdit()) {
+      redrawOnBlur = true;
+      return;
+    }
+    draw();
+  };
+  // Capture runs before the field's own handler, bubbling after it.
+  properties.addEventListener("change", () => {
+    committing = true;
+  }, true);
+  properties.addEventListener("change", () => {
+    committing = false;
+  });
+  properties.addEventListener("focusout", () => {
+    if (redrawOnBlur && !holdsEdit()) {
+      draw();
+    }
+  });
 
   options.wallStore.subscribe(render);
   options.pillarStore.subscribe(render);
@@ -1428,6 +1458,7 @@ export function createRightSidebar(options: RightSidebarOptions): HTMLElement {
   options.doorStore.subscribe(render);
   options.windowStore.subscribe(render);
   options.elementStore.subscribe(render);
+  options.assetStore.subscribe(render);
   options.selectionStore.subscribe(render);
 
   const materials = createMaterialsPanel(options);
