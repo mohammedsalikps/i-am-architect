@@ -146,8 +146,15 @@ export class ManipulationController {
     window.addEventListener("keydown", this.handleKeyDown);
   }
 
+  /** Off while Interior Explore walks the camera - nothing is dragged by accident. */
+  private enabled = true;
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
   private readonly handlePointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0 || event.target !== this.canvas) {
+    if (!this.enabled || event.button !== 0 || event.target !== this.canvas) {
       return;
     }
     if (this.drag) {

@@ -459,7 +459,8 @@ answering with its first 12 characters in `X-Release`.
 
 | Date | Release (master) | Backend (Render) | Frontend (Vercel) | Notes |
 |---|---|---|---|---|
-| 2026-10-14 | the merge that added this row | same commit | same commit | The companion's header says "Waiting" (not "Thinking") while a signed-out AI request waits on the sign-in dialog. No document change - both services deploy together. |
+| 2026-10-14 | the merge that added this row | same commit | same commit | Interior Explore: walk through a project's rooms at eye height (1.6 m above the floor) - a room navigator, Fit room, Exit interior / Esc back to the exterior view. A view only: roofs are hidden through the eye-button visibility and restored on leaving; no document change - both services deploy together. |
+| 2026-10-14 | `a4c58b5` | `a4c58b5` (`X-Release: a4c58b5f458b`) | `a4c58b5` (Production) | The companion's header says "Waiting" (not "Thinking") while a signed-out AI request waits on the sign-in dialog. No document change - both services deploy together. |
 | 2026-10-14 | `c34c174` | `c34c174` (`X-Release: c34c174290d6`) | `c34c174` (Production) | Production CSP fix: `connect-src` allows `data:`, so the inlined glTF furniture models load on the hosted site (they had fallen back to placeholder boxes). |
 | 2026-10-14 | `5cb2c21` | `a3b7643` first - merge of `feature/pro-workspace` with `[backend-first]`; `X-Release: a3b7643ba9bc` confirmed before the frontend went out - then `5cb2c21` | `5cb2c21` (Production) | Architect MVP: pro workspace, plumbing, light/dark theme, interruptible companion, coordinates/grid/dimensions, modern house generation. Saved projects gain a roof `style` (older backends refuse it). |
 

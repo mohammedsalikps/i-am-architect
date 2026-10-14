@@ -36,6 +36,8 @@ export class SelectionRaycaster {
   private readonly raycaster = new THREE.Raycaster();
   private readonly meshProviders: Array<() => THREE.Object3D[]> = [];
   private pointerDownPosition: { x: number; y: number } | null = null;
+  /** Off while Interior Explore walks the camera - a click there is looking around, never picking. */
+  private enabled = true;
 
   constructor(
     private readonly camera: THREE.PerspectiveCamera,
@@ -46,13 +48,18 @@ export class SelectionRaycaster {
     this.domElement.addEventListener("pointerup", this.handlePointerUp);
   }
 
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+    this.pointerDownPosition = null;
+  }
+
   /** Registers a source of selectable meshes - call once per layer (e.g. `wallLayer.getMeshes`). */
   registerLayer(getMeshes: () => THREE.Object3D[]): void {
     this.meshProviders.push(getMeshes);
   }
 
   private readonly handlePointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0) {
+    if (!this.enabled || event.button !== 0) {
       this.pointerDownPosition = null; // ignore right/middle button (pan/other controls)
       return;
     }
