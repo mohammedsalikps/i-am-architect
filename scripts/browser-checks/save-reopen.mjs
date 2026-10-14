@@ -50,7 +50,7 @@ const reloadAndOpen = async () => {
   await sleep(1500);
   const signedIn = await b.waitFor(`!!document.querySelector(".app-header__account-name")?.textContent.trim()`, 15000);
   const fresh = await records();
-  await b.evaluate(`[...document.querySelectorAll(".app-header__actions button")].find((button) => button.textContent.trim().startsWith("Open")).click()`);
+  await b.evaluate(`(() => { [...document.querySelectorAll(".menu-bar .menu__button")].find((button) => button.textContent.trim() === "File").click(); [...document.querySelectorAll(".menu__item")].find((item) => item.textContent.trim().startsWith("Open")).click(); })()`);
   await b.waitFor(`!!document.querySelector(".project-chooser__item")`, 15000);
   await b.evaluate(`[...document.querySelectorAll(".project-chooser__item-actions button")].find((button) => button.textContent.trim() === "Open").click()`);
   await sleep(2500);
@@ -60,7 +60,7 @@ const reloadAndOpen = async () => {
 // --- start, and a throwaway account on the local mock backend ---
 log("app loaded", await b.goto(APP, READY));
 await sleep(1500);
-await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
 await b.evaluate(`document.querySelector(".app-header__account .toolbar-button--primary").click()`);
 await b.waitFor(`!!document.querySelector(".auth-dialog__title")?.textContent`);
 if ((await b.evaluate(`document.querySelector(".auth-dialog__title").textContent`)) === "Sign in") {

@@ -2,6 +2,7 @@ import { el } from "./dom";
 import { createAssemblyPanel } from "./assemblyPanel";
 import { createAssetLibrary } from "./assetLibrary";
 import { createTabStrip, comingSoon } from "./tabStrip";
+import { SHELL_ICONS } from "./shellIcons";
 import { ELEMENT_KINDS } from "../engine/elements/catalog";
 import { ASSET_DEFINITIONS } from "../engine/assets/catalog";
 import { isRoom, objectsInRoom, roomArea } from "../engine/elements/rooms";
@@ -459,6 +460,10 @@ function buildProjectHierarchy(
  */
 export interface LeftSidebar {
   element: HTMLElement;
+  /** The icon rail (Project / Assemblies / Assets) - always shown; the shell adds its collapse toggle. */
+  rail: HTMLElement;
+  /** Opens a rail tab by id. */
+  showTab(id: string): void;
   /** Re-checks the Assets tab's own card active-states - see AssetLibrary.refresh()'s own docs. A no-op if the Assets tab has never been built (nothing to refresh yet). */
   refreshAssetLibrary(): void;
   /** Runs the Project tree's search for `query` (the top bar's search box drives it), showing the Project tab. */
@@ -483,7 +488,9 @@ export function createLeftSidebar(
   onFocusObjects: (objectIds: string[]) => void,
   onAddAsset: (assetId: string) => void,
   /** Whether placement tool `id` is currently armed - the same function passed to the ribbon as RibbonActions.isPlacementActive (see ribbonTabs.ts), reused for the Assets tab's own active-card state. */
-  isPlacementActive: (id: string) => boolean
+  isPlacementActive: (id: string) => boolean,
+  /** A click on a rail tab - the shell opens the browser on it, or collapses the browser when it was already open on it. */
+  onRailSelect?: (id: string, wasActive: boolean) => void
 ): LeftSidebar {
   const objectSources: ObjectSource[] = [
     originalSource("Wall", wallStore),
@@ -508,6 +515,7 @@ export function createLeftSidebar(
       {
         id: "project",
         label: "Project",
+        icon: SHELL_ICONS.tree,
         build: () =>
           buildProjectHierarchy(selectionStore, visibilityStore, objectSources, elementStore, onFocusObjects, (handle) => {
             projectSearch = handle;
@@ -516,6 +524,7 @@ export function createLeftSidebar(
       {
         id: "assemblies",
         label: "Assemblies",
+        icon: SHELL_ICONS.layers,
         build: () =>
           createAssemblyPanel(
             assemblyStore,
@@ -530,18 +539,21 @@ export function createLeftSidebar(
             elementStore
           )
       },
-      { id: "assets", label: "Assets", build: () => assetLibrary.element },
+      { id: "assets", label: "Assets", icon: SHELL_ICONS.chair, build: () => assetLibrary.element },
       { id: "layers", label: "Layers", build: () => comingSoon("Layer management"), disabled: true },
       { id: "views", label: "Views", build: () => comingSoon("Saved views"), disabled: true },
       { id: "measurements", label: "Measurements", build: () => comingSoon("Measurements"), disabled: true },
       { id: "documents", label: "Documents", build: () => comingSoon("Document management"), disabled: true }
     ],
     "sidebar-rail",
-    "sidebar-rail__item"
+    "sidebar-rail__item",
+    { label: "Project browser", onSelect: onRailSelect }
   );
 
   return {
-    element: el("aside", { className: "sidebar sidebar--left" }, [strip, panel]),
+    element: el("aside", { className: "sidebar sidebar--left", attrs: { "aria-label": "Project browser" } }, [strip, panel]),
+    rail: strip,
+    showTab: activate,
     refreshAssetLibrary: assetLibrary.refresh,
     searchProject(query) {
       // Clearing the search leaves whichever panel is open.

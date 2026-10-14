@@ -38,6 +38,7 @@ import { SCENE_PALETTES } from "../scene/sceneTheme.ts";
 import { DEFAULT_WORKSPACE, WORKSPACE_KEY, WorkspaceSettings, formatSpacing, readWorkspace } from "../engine/workspace/workspaceSettings.ts";
 import { dimensionSummary, formatLength, plotEdgeText, roomDimensionText, wallDimensionText } from "../engine/workspace/dimensions.ts";
 import { metresPerPixelAt, scaleBarFor } from "../engine/workspace/scaleBar.ts";
+import { COMPACT_WIDTH, DOCK_HEIGHT, INSPECTOR_TAB_WIDTH, LAYOUT_STORAGE_KEY, MIN_VIEWPORT_WIDTH, PANEL_WIDTHS, RAIL_WIDTH, clampDockHeight, clampWidth, columnWidths, createLayoutStore, defaultLayout, fitToWidth, parseLayout, viewportWidth } from "./workspaceLayout.ts";
 import { GROUND_SIZE, MAJOR_GRID_SPACING, minorGrid } from "../scene/ground.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
@@ -208,15 +209,13 @@ function run(): void {
     assertTrue(/^minmax\([^,]+,\s*1fr\)$/.test(flexibleTracks[0]), `body row should be minmax(<floor>, 1fr), got "${flexibleTracks[0]}"`);
   });
 
-  check("the command bar and status bar are the last two shell rows, both fixed-height", () => {
-    // commandBar is now { element, focusAiInput } (see CommandBar in commandBar.ts,
-    // the same shape statusBar already has below) - the mounted child is its .element.
-    assertEqual(fromEnd(shellChildren, 2), "commandBar.element", "second-to-last shell child");
+  check("the status bar is the last shell row at a fixed height; the records dock sits under the viewport, inside the body", () => {
     // statusBar is { element, setPlacementStatus } (see StatusBar in statusBar.ts) - the mounted child is its .element.
     assertEqual(fromEnd(shellChildren, 1), "statusBar.element", "last shell child");
-    for (const track of shellTracks.slice(-2)) {
-      assertTrue(/^var\(--[a-z-]+\)$/.test(track), `bottom rows should use a fixed-height variable, got "${track}"`);
-    }
+    assertTrue(/^var\(--[a-z-]+\)$/.test(fromEnd(shellTracks, 1) ?? ""), `the status row should use a fixed-height variable, got "${fromEnd(shellTracks, 1)}"`);
+    assertTrue(/center\.append\(viewportArea, commandBar\.element\)/.test(layoutSource), "the records dock (commandBar.element) mounts under the viewport in .app-center");
+    assertEqual(lastValueOf(rules, ".app-center", "grid-template-rows"), "minmax(0, 1fr) auto", ".app-center rows: the viewport flexes, the dock takes its own height");
+    assertEqual(lastValueOf(rules, ".app-center", "min-height"), "0", ".app-center min-height");
   });
 
   // --- Tall content scrolls inside its own region ---
@@ -242,28 +241,39 @@ function run(): void {
     assertEqual(lastValueOf(rules, ".viewport-container", "height"), "100%", ".viewport-container height");
   });
 
-  check("the command bar fits its fixed row, its tab panel scrolling if its content is taller", () => {
+  check("the records dock: its panel takes --dock-height when open, folds to the tab row when closed, and scrolls inside", () => {
     assertEqual(lastValueOf(rules, ".command-bar", "min-height"), "0", ".command-bar min-height");
     assertEqual(lastValueOf(rules, ".command-bar", "display"), "flex", ".command-bar display");
     assertEqual(lastValueOf(rules, ".command-bar", "flex-direction"), "column", ".command-bar flex-direction");
+    assertEqual(lastValueOf(rules, ".command-bar > .tab-strip__panel", "height"), "var(--dock-height)", "the open dock's panel height");
+    assertEqual(lastValueOf(rules, ".command-bar.is-collapsed > .tab-strip__panel", "display"), "none", "the folded dock shows only its tabs");
+    assertTrue(/center\.style\.setProperty\("--dock-height", `\$\{shownDockHeight\(state\.dock\.height, centerSize\(\)\)\}px`\)/.test(layoutSource), "layout.ts sets --dock-height from the layout, clamped to the space it opens into");
+    assertTrue(/getSize: \(\) => shownDockHeight\(/.test(layoutSource) && /max: \(\) => dockCeiling\(centerSize\(\)\)/.test(layoutSource), "the dock's drag handle starts from, announces and stops at the height on screen");
+    assertTrue(/Math\.max\(DOCK_HEIGHT\.min, Math\.min\(Math\.floor\(centerHeight \* DOCK_HEIGHT\.maxShare\), centerHeight - DOCK_CHROME - VIEWPORT_MIN_HEIGHT\)\)/.test(layoutSource), "the dock leaves the viewport its minimum height where the centre has room, and never goes below its own minimum");
+  });
+
+  check("the body's columns come from the layout store, each region pinned to its own column", () => {
+    assertEqual(lastValueOf(rules, ".app-body", "grid-template-columns"), "var(--col-left) minmax(0, 1fr) var(--col-assistant) var(--col-right)", ".app-body columns");
+    for (const [selector, column] of [[".app-body > .sidebar--left", "1"], [".app-body > .app-center", "2"], [".app-body > .assistant-drawer", "3"], [".app-body > .app-inspector", "4"]]) {
+      // A closed (display: none) drawer must not let the inspector auto-place into its column.
+      assertEqual(lastValueOf(rules, selector, "grid-column"), column, `${selector} grid-column`);
+    }
+    for (const variable of ["--col-left", "--col-assistant", "--col-right", "--left-width", "--right-width", "--assistant-width"]) {
+      assertTrue(layoutSource.includes(`body.style.setProperty("${variable}"`), `layout.ts sets ${variable}`);
+    }
+    const rail = rules.find((rule) => rule.media === null && rule.selectors.includes(":root") && rule.declarations.some(([name]) => name === "--rail-width"));
+    assertEqual(rail?.declarations.find(([name]) => name === "--rail-width")?.[1], `${RAIL_WIDTH}px`, "CSS --rail-width matches workspaceLayout.ts's RAIL_WIDTH");
   });
 
   // --- Narrow (stacked) layout ---
 
-  check("in the stacked narrow layout, .app-body itself is the scroll container", () => {
-    const stackedMedia = rules.find(
-      (rule) =>
-        rule.media !== null &&
-        rule.selectors.includes(".app-body") &&
-        rule.declarations.some(([name, value]) => name === "display" && value === "flex")
-    )?.media;
-    assertTrue(stackedMedia, "expected a media query that stacks .app-body with display: flex");
-    assertEqual(lastValueOf(rules, ".app-body", "overflow-y", stackedMedia), "auto", "stacked .app-body overflow-y");
-    assertEqual(lastValueOf(rules, ".app-body", "min-height", stackedMedia), "0", "stacked .app-body min-height");
-    // Inside a scrolling column every child is content-sized, so the
-    // viewport needs its own definite height or it would collapse to 0.
-    assertTrue(lastValueOf(rules, ".viewport-area", "height", stackedMedia), "stacked .viewport-area needs a definite height");
-    assertEqual(lastValueOf(rules, ".viewport-area", "flex-shrink", stackedMedia), "0", "stacked .viewport-area flex-shrink");
+  check("on a compact window the open panels draw over the viewport instead of squeezing it", () => {
+    assertTrue(/body\.classList\.toggle\("is-compact", compact\)/.test(layoutSource) && /isCompact\(window\.innerWidth\)/.test(layoutSource), "layout.ts marks the body compact below COMPACT_WIDTH");
+    for (const selector of [".app-body.is-compact .sidebar--left > .tab-strip__panel", ".app-body.is-compact .sidebar--right", ".app-body.is-compact .assistant-drawer"]) {
+      assertEqual(lastValueOf(rules, selector, "position"), "absolute", `${selector} position`);
+      assertTrue(/^min\(var\(--[a-z-]+-width\), calc\(100vw - /.test(lastValueOf(rules, selector, "width") ?? ""), `${selector} never wider than the window`);
+    }
+    assertEqual(lastValueOf(rules, ".app-body.is-compact .splitter--left", "display"), "none", "no resize handles over a compact viewport");
   });
 
   // --- The Eavara startup screen (index.html + splash.ts) ---
@@ -392,7 +402,11 @@ function run(): void {
       assertTrue(!/commandExecutor|\.execute\(|history\.|Store\.(add|update|remove|delete)\(/.test(code), `${path} never edits the model`);
     }
     assertTrue(/viewportOverlays: \[[^\]]*interiorExplore\.element\]/.test(mainSource), "the Interior Explore button and its room navigator: one overlay over the viewport");
-    assertTrue(!/interior/i.test(sourceOf("./layout.ts")), "not a button in the view-preset row - that row keeps its width beside the companion");
+    const shell = sourceOf("./layout.ts");
+    assertTrue(
+      /const viewControlsOverlay = el\(/.test(shell) && !/const viewControlsOverlay = el\([^;]*interior/i.test(shell) && !/createViewControls\([^)]*interior/i.test(shell),
+      "not a button in the view-preset row - that row keeps its width"
+    );
     for (const exit of ["onViewChange: \\(preset\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onFitToScene: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onFocusSelected: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "onNewProject: \\(\\) => \\{\\s*interiorExplore\\.exit\\(\\);", "state\\.status === \"opened\"\\) \\{\\s*interiorExplore\\.exit\\(\\);"]) {
       assertTrue(new RegExp(exit).test(mainSource), `leaves Interior Explore first: ${exit.split(":")[0].replace(/\\/g, "")}`);
     }
@@ -1237,6 +1251,177 @@ function run(): void {
     assertTrue(/const render = \(\): void => \{\s*if \(holdsEdit\(\)\) \{\s*redrawOnBlur = true;\s*return;\s*\}\s*draw\(\);/.test(sidebar), "a change from elsewhere while one is typed in waits");
     assertTrue(/properties\.addEventListener\("change", \(\) => \{\s*committing = true;\s*\}, true\);\s*properties\.addEventListener\("change", \(\) => \{\s*committing = false;\s*\}\);/.test(sidebar), "the field's own commit is marked around its change handler, so it redraws at once");
     assertTrue(/properties\.addEventListener\("focusout", \(\) => \{\s*if \(redrawOnBlur && !holdsEdit\(\)\) \{\s*draw\(\);/.test(sidebar), "and a held change is drawn as soon as focus leaves the field");
+  });
+
+  // --- The workspace layout: panels, sizes and fitting (workspaceLayout.ts) ---
+
+  check("workspace layout: the starting panels follow the window - browser and inspector where there is room, assistant and dock closed", () => {
+    const wide = defaultLayout(1920);
+    assertTrue(wide.left.open && wide.right.open && !wide.assistant.open && !wide.dock.open && wide.ribbon.open, "1920: browser, inspector and palette open; assistant and dock closed");
+    assertTrue(wide.left.width > PANEL_WIDTHS.left.initial && wide.right.width > PANEL_WIDTHS.right.initial, "1920: a little wider than the usual widths");
+    const desk = defaultLayout(1440);
+    assertTrue(desk.left.open && desk.right.open && desk.left.width === PANEL_WIDTHS.left.initial, "1440: browser and inspector open at their usual widths");
+    assertTrue(defaultLayout(1280).left.open, "1280: the browser still open");
+    const laptop = defaultLayout(1024);
+    assertTrue(!laptop.left.open && laptop.right.open, "1024: the browser folded to its rail, the inspector open");
+    const phone = defaultLayout(390);
+    assertTrue(!phone.left.open && !phone.right.open && !phone.assistant.open, "a compact window starts with every side panel closed");
+    for (const width of [1920, 1440, 1280, 1024]) {
+      assertTrue(viewportWidth(defaultLayout(width), width) >= MIN_VIEWPORT_WIDTH, `${width}: the starting viewport is at least ${MIN_VIEWPORT_WIDTH}px wide`);
+    }
+    assertEqual(columnWidths(laptop).left, RAIL_WIDTH, "a folded browser keeps only its rail");
+    assertEqual(columnWidths({ ...laptop, right: { ...laptop.right, open: false } }).right, INSPECTOR_TAB_WIDTH, "a folded inspector keeps its tab");
+  });
+
+  check("workspace layout: sizes stay within their ranges", () => {
+    assertEqual(clampWidth("left", 50), PANEL_WIDTHS.left.min, "too narrow a browser");
+    assertEqual(clampWidth("right", 5000), PANEL_WIDTHS.right.max, "too wide an inspector");
+    assertEqual(clampWidth("assistant", 401.6), 402, "whole pixels");
+    assertEqual(clampWidth("assistant", Number.NaN), PANEL_WIDTHS.assistant.initial, "not a number: the starting width");
+    assertEqual(clampDockHeight(20, 600), DOCK_HEIGHT.min, "too short a dock");
+    assertEqual(clampDockHeight(5000, 600), Math.floor(600 * DOCK_HEIGHT.maxShare), "the dock never takes more than its share of the space");
+    assertEqual(clampDockHeight(300, 600), 300, "a dock that fits keeps its height");
+  });
+
+  check("workspace layout: opening a panel fits the others around it - the browser goes first, never the one just opened", () => {
+    const desk = defaultLayout(1440);
+    const withAssistant = fitToWidth({ ...desk, assistant: { ...desk.assistant, open: true } }, 1440, 1440, "assistant");
+    assertTrue(withAssistant.assistant.open && !withAssistant.left.open && withAssistant.right.open, "1440: the assistant opens, the browser folds, the inspector stays");
+    assertTrue(viewportWidth(withAssistant, 1440) >= MIN_VIEWPORT_WIDTH, "…and the viewport keeps its minimum");
+    const laptop = defaultLayout(1024);
+    const laptopAssistant = fitToWidth({ ...laptop, assistant: { ...laptop.assistant, open: true } }, 1024, 1024, "assistant");
+    assertTrue(laptopAssistant.assistant.open && !laptopAssistant.right.open, "1024: the inspector folds to its tab for the assistant");
+    const browserBack = fitToWidth({ ...withAssistant, left: { ...withAssistant.left, open: true } }, 1440, 1440, "left");
+    assertTrue(browserBack.left.open && !browserBack.right.open && browserBack.assistant.open, "reopening the browser folds the inspector next, keeping the browser");
+    const roomy = fitToWidth(desk, 1440, 1440);
+    assertTrue(roomy === desk, "nothing to fit: the same layout back");
+    const tight = fitToWidth({ ...defaultLayout(1024), right: { open: false, width: 292 }, assistant: { open: true, width: 520 } }, 920, 920, "assistant");
+    assertTrue(tight.assistant.open && tight.assistant.width < 520 && tight.assistant.width >= PANEL_WIDTHS.assistant.min && viewportWidth(tight, 920) >= MIN_VIEWPORT_WIDTH, `alone and still too wide, the opened panel narrows (${tight.assistant.width}px)`);
+  });
+
+  check("workspace layout: on a compact window one side panel at a time, the one just opened", () => {
+    const phone = defaultLayout(390);
+    const both = fitToWidth({ ...phone, left: { ...phone.left, open: true }, right: { ...phone.right, open: true } }, 390, 390, "right");
+    assertTrue(both.right.open && !both.left.open, "the inspector, just opened, wins");
+    const browserWins = fitToWidth({ ...phone, left: { ...phone.left, open: true }, assistant: { ...phone.assistant, open: true } }, 800, 800, "left");
+    assertTrue(browserWins.left.open && !browserWins.assistant.open, "the browser, just opened, wins over an assistant opened before it");
+    assertTrue(COMPACT_WIDTH === 900, "compact below 900px");
+  });
+
+  check("workspace layout: a saved layout is read back field by field - anything odd keeps its default", () => {
+    const fallback = defaultLayout(1440);
+    assertEqual(JSON.stringify(parseLayout("not an object", fallback)), JSON.stringify(fallback), "garbage: the defaults");
+    const read = parseLayout({ left: { open: false, width: 9999 }, right: { open: "yes", width: 300 }, dock: { open: true, height: 12, tab: "nonsense" }, ribbon: { open: false } }, fallback);
+    assertTrue(!read.left.open && read.left.width === PANEL_WIDTHS.left.max, "a too-wide browser is clamped, its flag kept");
+    assertTrue(read.right.open === fallback.right.open && read.right.width === 300, "a non-boolean flag keeps the default; the width is kept");
+    assertTrue(read.dock.open && read.dock.height === DOCK_HEIGHT.min && read.dock.tab === fallback.dock.tab, "the dock's height floored, an unknown tab replaced");
+    assertTrue(!read.ribbon.open && !read.assistant.open, "the palette's flag kept; the missing assistant from the defaults");
+  });
+
+  check("workspace layout: the store saves every change for the session, tells its listeners, and a new store reads it back", () => {
+    const saved = new Map<string, string>();
+    const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => void saved.set(key, value) };
+    const measure = () => ({ windowWidth: 1440, bodyWidth: 1440 });
+    const store = createLayoutStore(storage, measure);
+    const seen: boolean[] = [];
+    store.subscribe((layout) => seen.push(layout.dock.open));
+    const { toggle } = store; // detached, as a click handler would hold it
+    toggle("dock");
+    store.setDockTab("construction-method");
+    store.setSize("right", 350);
+    store.setOpen("assistant", true);
+    assertEqual(JSON.stringify(seen.slice(0, 2)), "[false,true]", "listeners hear the dock open");
+    const restored = createLayoutStore(storage, measure).get();
+    assertTrue(restored.dock.open && restored.dock.tab === "construction-method" && restored.right.width === 350 && restored.assistant.open && !restored.left.open, "the next store (a reload) has the same arrangement");
+    assertTrue(saved.has(LAYOUT_STORAGE_KEY), `kept under ${LAYOUT_STORAGE_KEY}`);
+    const narrow = createLayoutStore(storage, () => ({ windowWidth: 1024, bodyWidth: 1024 })).get();
+    assertTrue(viewportWidth(narrow, 1024) >= MIN_VIEWPORT_WIDTH, "a layout saved on a wider window is fitted to a narrower one");
+    const refusing = createLayoutStore({ getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } }, measure);
+    refusing.toggle("dock");
+    assertTrue(refusing.get().dock.open, "storage refused (a privacy mode): the layout still works for the page");
+  });
+
+  check("workspace layout: a panel pushed out to make room comes back when the one that pushed it closes; a drag never closes a panel", () => {
+    const store = createLayoutStore(null, () => ({ windowWidth: 1440, bodyWidth: 1440 }));
+    store.setOpen("assistant", true);
+    assertTrue(!store.get().left.open && store.get().right.open, "1440: the assistant pushes the browser out");
+    store.setOpen("assistant", false);
+    assertTrue(store.get().left.open, "closing the assistant brings the browser back");
+    store.setOpen("assistant", true);
+    store.setOpen("left", true); // the person brings it back themself: it pushes the inspector out instead
+    assertTrue(store.get().left.open && !store.get().right.open && store.get().assistant.open, "reopened by hand, the browser stays; the inspector makes room");
+    store.setOpen("assistant", false);
+    assertTrue(store.get().left.open && !store.get().right.open, "the assistant closing doesn't touch the browser the person reopened");
+    store.setOpen("left", false);
+    assertTrue(store.get().right.open, "…and the browser closing brings back the inspector it pushed out");
+    let width = 1440;
+    const resizing = createLayoutStore(null, () => ({ windowWidth: width, bodyWidth: width }));
+    resizing.setOpen("assistant", true); // pushes the browser out at 1440
+    width = 800;
+    resizing.fit(800);
+    resizing.setOpen("assistant", false);
+    assertTrue(!resizing.get().left.open && !resizing.get().right.open && !resizing.get().assistant.open, "pushed out on a desktop window, then the window narrowed: closing the assistant opens no overlay");
+    const compact = createLayoutStore(null, () => ({ windowWidth: 800, bodyWidth: 800 }));
+    compact.setOpen("right", true);
+    compact.setOpen("assistant", true);
+    compact.setOpen("assistant", false);
+    assertTrue(!compact.get().right.open, "compact: an overlay never reappears by itself");
+    const narrow = createLayoutStore(null, () => ({ windowWidth: 1100, bodyWidth: 1100 }));
+    narrow.setOpen("left", true);
+    narrow.setSize("left", 440);
+    assertTrue(narrow.get().right.open && viewportWidth(narrow.get(), 1100) === MIN_VIEWPORT_WIDTH, `dragging the browser wider stops at the viewport's minimum (${narrow.get().left.width}px), the inspector stays open`);
+    narrow.setSize("left", 220);
+    assertEqual(narrow.get().left.width, 220, "narrowing is never limited");
+  });
+
+  check("the workspace chrome: menus, account, panels and viewport behave as one system", () => {
+    const menus = sourceOf("./menus.ts");
+    assertTrue(/event\.key === "Escape"[\s\S]{0,260}close\(true\)/.test(menus), "Escape closes a menu and returns focus to its button");
+    assertTrue(/if \(hadFocus\) button\.focus\(\);/.test(sourceOf("./interiorNavigator.ts")), "leaving Interior Explore with focus in its panel puts focus back on its button");
+    assertTrue(/closest\('\[aria-modal="true"\]'\) !== null;\s*if \(event\.key === "Escape" && inDialog\) \{\s*close\(false\);/.test(menus), "a dialog that opened while a menu was open keeps its own Escape");
+    assertTrue(/log\.scrollTop = log\.scrollHeight;\s*input\.focus\(\);/.test(sourceOf("./architectPanel.ts")), "the assistant opens on its newest reply");
+    assertTrue(/document\.addEventListener\("keydown", onKey, true\)/.test(menus) && /document\.removeEventListener\("keydown", onKey, true\)/.test(menus), "…wherever focus is while it is open (a capture listener only while open)");
+    assertTrue(/document\.addEventListener\("pointerdown", onOutside, true\)/.test(menus) && /document\.removeEventListener\("pointerdown", onOutside, true\)/.test(menus), "a click outside closes it; the listener is removed on close");
+    assertTrue(/if \(openMenu && openMenu !== menu\) openMenu\.close\(false\);\s*render\(\);/.test(menus), "one menu open at a time, its items rebuilt on every open");
+    assertTrue(/role: check \? "menuitemcheckbox" : "menuitem"/.test(menus) && /"aria-haspopup": "menu"/.test(menus), "menu semantics");
+    for (const label of ["File", "Edit", "View", "Build"]) assertTrue(layoutSource.includes(`label: "${label}"`), `the ${label} menu`);
+    assertTrue(!/run: \(\) => \{\s*\}|run: \(\) => undefined/.test(layoutSource), "no menu item is a placeholder");
+    for (const [label, run] of [
+      ["New project", "options.onNewProject"],
+      ["Open…", "options.onOpenProject"],
+      ["Save", "options.onSaveProject"],
+      ["Export record book (CSV)", "() => commandBar.exportRecordBook()"],
+      ["Undo", "options.onUndo"],
+      ["Redo", "options.onRedo"],
+      ["Duplicate selected", "options.onDuplicateSelected"],
+      ["Delete selected", "options.onDeleteSelected"],
+      ["Fit house", "options.onFitToScene"],
+      ["Focus selected", "options.onFocusSelected"]
+    ]) {
+      assertTrue(layoutSource.includes(`{ label: "${label}", run: ${run}`), `the "${label}" menu item runs ${run}`);
+    }
+    // Keyboard use of the menus and panels (src/ui/menus.ts, layout.ts, the Interior Explore camera).
+    assertTrue(/close\(event\.detail === 0\);\s*item\.run\(\);/.test(menus), "an item chosen from the keyboard returns focus to its menu's button");
+    assertTrue(!/element\.addEventListener\("keydown", \(event\) => \{\s*if \(list\.hidden\) return;/.test(menus), "no menu keeps a per-element Escape handler that misses focus elsewhere");
+    assertTrue(/event\.defaultPrevented \|\| isTyping\(event\.target\)/.test(sourceOf("../scene/interior/InteriorCamera.ts")), "arrow keys a menu or panel edge handled never also walk the Interior Explore camera");
+    assertTrue(/role: "tablist"/.test(sourceOf("./tabStrip.ts")) && /tabList\.append\(button\)/.test(sourceOf("./tabStrip.ts")), "only tabs inside a tablist - a strip's collapse button sits beside it");
+    assertTrue(/inspectorTab\.focus\(\);/.test(layoutSource) && /inspectorCollapse\.focus\(\);/.test(layoutSource), "folding or opening the inspector moves focus to the control that replaces the hidden one");
+    assertTrue(/if \(panel === "assistant"\) \{\s*closeAssistant\(\);/.test(layoutSource) && /event\.stopPropagation\(\); \/\/ closing the overlay is all this Escape does/.test(layoutSource), "a compact overlay's Escape closes only it, focus to its control");
+    assertTrue(/assistantFab\.setAttribute\("aria-label", label\)/.test(layoutSource) && /"aria-live": "polite"/.test(layoutSource), "the assistant's button names its state, and a reply while it is closed is announced");
+    assertTrue(/if \(dockWasOpen && !state\.dock\.open\) commandBar\.dockClosed\(\);/.test(layoutSource) && /dockClosed: \(\) => constructionMethodTab\?\.clearHighlight\(\)/.test(sourceOf("./commandBar.ts")), "folding the dock clears the Construction Method highlight, as switching tabs does");
+    const topBar = sourceOf("./topBar.ts");
+    assertTrue(/className: "app-header__account-name visually-hidden"/.test(topBar), "the email is no longer shown on the bar - only inside the avatar (for assistive technology)");
+    assertTrue(/label: "Sign out…", run: options\.onSignOut/.test(topBar), "Sign out lives in the account menu");
+    assertTrue(/if \(modelHasContent\(\) && !window\.confirm\("Sign out\?/.test(mainSource), "and asks first when the workspace holds a model");
+    for (const word of ["Undo", "Redo"]) assertTrue(topBar.includes(`"${word}", "`), `${word} keeps its word as its text and name`);
+    const scene = sourceOf("../scene/SceneManager.ts");
+    assertTrue(/new ResizeObserver\(\(\) => \{[\s\S]{0,260}this\.handleResize\(\);[\s\S]{0,40}\}\)\.observe\(container\)/.test(scene), "the viewport follows its own box as panels open, close and resize");
+    assertTrue(!/setOverlayInset\(/.test(mainSource), "no camera inset for a panel floating over the viewport - nothing floats over it now");
+    const panel = sourceOf("./architectPanel.ts");
+    assertTrue(/if \(onClose\) \{\s*onClose\(\);\s*return;\s*\}/.test(panel), "the assistant's header button closes the drawer, nothing else - the conversation is kept");
+    assertTrue(/onClose: \(\) => shell\.closeAssistant\(\)/.test(mainSource), "main.ts puts the assistant in the drawer");
+    const splitter = sourceOf("./splitter.ts");
+    assertTrue(/role: "separator"/.test(splitter) && /tabindex: "0"/.test(splitter) && /event\.key === "Home"/.test(splitter), "panel edges resize by pointer and keyboard");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -197,11 +197,16 @@ export function createAssetLibrary(options: AssetLibraryOptions): AssetLibrary {
   preview.element.addEventListener("mouseleave", () => {
     hideTimer = window.setTimeout(() => preview.hide(), PREVIEW_HIDE_DELAY_MS);
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      hideNow();
-    }
-  });
+  // Capture phase: hides even on an Escape something else stops (closing a compact overlay or a menu).
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key === "Escape") {
+        hideNow();
+      }
+    },
+    true
+  );
 
   const render = (): void => {
     cards = [];

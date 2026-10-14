@@ -28,11 +28,11 @@ function formatMeters(value: number): string {
   return text;
 }
 
+/** Everything below the viewport - the records dock (open, or folded to its tabs) and the status bar. */
 function reservedBottomPx(): number {
-  const rootStyles = getComputedStyle(document.documentElement);
-  const bottomWorkspace = parseFloat(rootStyles.getPropertyValue("--bottomworkspace-height")) || 0;
-  const statusBar = parseFloat(rootStyles.getPropertyValue("--statusbar-height")) || 0;
-  return bottomWorkspace + statusBar;
+  const dockTop = document.querySelector(".command-bar")?.getBoundingClientRect().top;
+  if (dockTop !== undefined && dockTop > 0) return Math.max(0, window.innerHeight - dockTop);
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--statusbar-height")) || 0;
 }
 
 /**

@@ -100,7 +100,7 @@ const records = async () => {
 console.log("SIMULATED speech (scripted recogniser and synthesiser) in headless Chrome - no microphone, no audio, no live Claude.\n");
 expect("app loaded with the simulated speech APIs", await b.goto(APP, READY));
 await sleep(1500);
-await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
 expect("mic and hands-free are enabled (speech recognition detected)", await b.evaluate(`!document.querySelector(".architect__mic").disabled && !document.querySelector(".architect__hands-free").disabled`));
 
 // 1. Hands-free on, default settings: the assistant speaks with the mic closed (interrupting by speaking is opt-in - it needs headphones).

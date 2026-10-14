@@ -45,7 +45,7 @@ const view = async (label) => {
 
 expect("app loaded", await b.goto(APP, READY));
 await sleep(1500);
-await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
 
 // --- demo UI ---
 const visibleTabs = JSON.parse(await b.evaluate(`JSON.stringify([...document.querySelectorAll(".sidebar-rail__item, .sidebar-tabs__item, .command-bar__tab, .viewport-tool")].filter((node) => node.offsetParent !== null).map((node) => (node.getAttribute("aria-label") || node.textContent).trim()))`));
@@ -66,7 +66,7 @@ r = await say("Lay a drain pipe from 0, 5 to 4, 5 then 4, 8");
 expect("a drain corner takes the 110 mm 87.5° bend, with the fall note", /110 mm 87\.5° elbow/.test(r.text) && /2\.5°/.test(r.text), r.text.slice(0, 220));
 r = await say("Run a 25 mm water pipe from 8, 3 to 9, 4.732");
 expect("a 30° turn has no sheet part: flagged, not drawn as an elbow", /Needs attention/.test(r.text) && /turn 30° here/.test(r.text), r.text.slice(0, 260));
-await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Minimise/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+await b.evaluate(`(() => { const drawer = document.querySelector(".assistant-drawer"); if (drawer && !drawer.hidden) drawer.querySelector(".architect__collapse")?.click(); })()`);
 await view("Top");
 await b.shot(outDir, "90-plumbing-top");
 await view("Perspective");
@@ -163,7 +163,7 @@ await b.send("Page.reload");
 await sleep(1500);
 await b.waitFor(READY, 60000);
 await sleep(1500);
-await b.evaluate(`[...document.querySelectorAll(".app-header__actions button")].find((button) => button.textContent.trim().startsWith("Open")).click()`);
+await b.evaluate(`(() => { [...document.querySelectorAll(".menu-bar .menu__button")].find((button) => button.textContent.trim() === "File").click(); [...document.querySelectorAll(".menu__item")].find((item) => item.textContent.trim().startsWith("Open")).click(); })()`);
 await b.waitFor(`!!document.querySelector(".project-chooser__item")`, 15000);
 await b.evaluate(`[...document.querySelectorAll(".project-chooser__item-actions button")].find((button) => button.textContent.trim() === "Open").click()`);
 await sleep(2500);
@@ -174,7 +174,7 @@ await b.shot(outDir, "93-plumbing-reopened");
 for (const width of [1300, 1366, 1400, 1440]) {
   await b.send("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
   await sleep(900);
-  await b.evaluate(`(() => { const button = document.querySelector(".architect__collapse"); if (button && /Expand/.test(button.getAttribute("aria-label") ?? "")) button.click(); })()`);
+  await b.evaluate(`(() => { const fab = document.querySelector(".assistant-fab"); if (fab && !fab.hidden) fab.click(); })()`);
   await sleep(500);
   const layout = JSON.parse(
     await b.evaluate(`(() => {
@@ -183,10 +183,11 @@ for (const width of [1300, 1366, 1400, 1440]) {
       const perspective = [...document.querySelectorAll(".view-controls__button")].find((button) => button.textContent.trim() === "Perspective").getBoundingClientRect();
       const hit = document.elementFromPoint(perspective.x + perspective.width / 2, perspective.y + perspective.height / 2);
       const overlap = panel.left < controls.right && panel.right > controls.left && panel.top < controls.bottom && panel.bottom > controls.top;
-      return JSON.stringify({ overlap, perspectiveClickable: hit?.textContent?.trim() === "Perspective" });
+      const drawerOpen = !document.querySelector(".assistant-drawer").hidden && panel.width > 0;
+      return JSON.stringify({ drawerOpen, overlap, perspectiveClickable: hit?.textContent?.trim() === "Perspective" });
     })()`)
   );
-  expect(`${width} px: the AI panel doesn't cover the view controls`, !layout.overlap && layout.perspectiveClickable, JSON.stringify(layout));
+  expect(`${width} px: the open AI assistant drawer doesn't cover the view controls`, layout.drawerOpen && !layout.overlap && layout.perspectiveClickable, JSON.stringify(layout));
 }
 
 b.close();

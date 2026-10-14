@@ -375,6 +375,18 @@ export class SceneManager {
     this.placementController.setDeselectCallback(() => selectionStore.clear());
 
     window.addEventListener("resize", this.handleResize);
+    // The workspace's panels open, close and resize without the window
+    // changing: follow the viewport's own box too, so the canvas and the
+    // camera's aspect always match it.
+    if (typeof ResizeObserver !== "undefined") {
+      let lastSize = "";
+      new ResizeObserver(() => {
+        const size = `${container.clientWidth}x${container.clientHeight}`;
+        if (size === lastSize) return;
+        lastSize = size;
+        this.handleResize();
+      }).observe(container);
+    }
   }
 
   /** Pixels of the viewport's left edge covered by a floating panel (the AI Architect copilot) - see setOverlayInset. */

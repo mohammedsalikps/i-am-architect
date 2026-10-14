@@ -27,6 +27,8 @@ export interface InteriorExplore {
   isActive(): boolean;
   /** Leaves Interior Explore, restoring the view - a no-op when it is off. */
   exit(): void;
+  /** Enters Interior Explore, or leaves it - the same as its button (View menu). */
+  toggle(): void;
 }
 
 const fmt = (value: number): string => String(Number(value.toFixed(2)));
@@ -57,12 +59,13 @@ export function createInteriorExplore(options: InteriorExploreOptions): Interior
     className: "interior-explore__hint",
     text: "Drag to look around · W/S or ↑/↓ to walk · A/D to step sideways · ←/→ to turn · wheel to step · Esc to exit"
   });
+  // Fit room and Exit interior right under the title, so they stay in reach on a short viewport - the room list scrolls instead.
   const panel = el("section", { className: "interior-explore", attrs: { id: "interior-explore", "aria-label": "Interior Explore" } }, [
     title,
+    el("div", { className: "interior-explore__actions" }, [fitButton, exitButton]),
     message,
     list,
     readout,
-    el("div", { className: "interior-explore__actions" }, [fitButton, exitButton]),
     hint
   ]);
   panel.hidden = true;
@@ -106,11 +109,16 @@ export function createInteriorExplore(options: InteriorExploreOptions): Interior
     message.textContent = "";
     current = target.room;
     options.showRoom(target.room, target.viewpoint, handlers);
+    // The list is rebuilt: a room picked from the keyboard keeps focus, on the room now entered.
+    const listHadFocus = list.contains(document.activeElement);
     renderRooms();
+    if (listHadFocus) list.querySelector<HTMLButtonElement>(".interior-explore__room.is-active")?.focus();
   };
 
   function close(): void {
     if (!open) return;
+    // Focus inside the panel (a room, Fit room, Exit interior) goes back to the button that entered - not to the page.
+    const hadFocus = panel.contains(document.activeElement);
     open = false;
     session.exit();
     options.exitScene();
@@ -120,6 +128,7 @@ export function createInteriorExplore(options: InteriorExploreOptions): Interior
     button.classList.remove("is-active");
     button.setAttribute("aria-pressed", "false");
     readout.textContent = "";
+    if (hadFocus) button.focus();
   }
 
   const start = (): void => {
@@ -138,6 +147,8 @@ export function createInteriorExplore(options: InteriorExploreOptions): Interior
     options.onEnter?.();
     message.textContent = "";
     goTo(entered.rooms[0].id);
+    // The keyboard now walks: focus on the room just entered - never left on a menu button whose arrows switch menus.
+    list.querySelector<HTMLButtonElement>(".interior-explore__room.is-active")?.focus();
   };
 
   button.addEventListener("click", () => (open ? close() : start()));
@@ -162,6 +173,7 @@ export function createInteriorExplore(options: InteriorExploreOptions): Interior
   return {
     element,
     isActive: () => open,
-    exit: close
+    exit: close,
+    toggle: () => (open ? close() : start())
   };
 }

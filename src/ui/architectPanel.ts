@@ -4,7 +4,8 @@ import type { VoiceState } from "./voiceInput";
 import { createHandsFree, createSpeechOutput, matchSpokenChoice, spokenNumbers } from "./handsFree";
 import type { HandsFreeStatus } from "./handsFree";
 import { COMPANION_STATE_LABEL, COPILOT_STEPS, INITIAL_COPILOT_STATE, companionStateOf, createInputGate, nextCopilotState, stepStatuses } from "./copilotState";
-import type { CopilotEvent, CopilotState } from "./copilotState";
+import type { CompanionState, CopilotEvent, CopilotState } from "./copilotState";
+import { SHELL_ICONS } from "./shellIcons";
 import { createLevelMeter } from "./levelMeter";
 import { createTurnController } from "./turnController";
 import { LANGUAGE_CHOICES, PAUSE_CHOICES, chooseVoice, readVoiceSettings, saveVoiceSettings } from "./voiceSettings";
@@ -15,8 +16,8 @@ import type { PlanPoint } from "../engine/architect/parseUtterance";
 import type { HouseFootprint } from "../engine/ai/housePlan";
 
 /**
- * The EAVARA Architect conversation, floating over the left of the
- * viewport: a transcript, the latest reply's suggested answers as chips,
+ * The EAVARA Architect conversation, in the workspace's assistant drawer
+ * (ui/layout.ts): a transcript, the latest reply's suggested answers as chips,
  * a progress strip for the house's six build stages, and a composer with
  * a location-pick button and a microphone.
  *
@@ -43,6 +44,14 @@ export interface ArchitectPanelOptions {
   onSetHidden: (objectIds: readonly string[], hidden: boolean) => void;
   /** Where the voice settings are remembered (localStorage); null: for this page only. */
   storage?: SettingsStorage | null;
+  /** The panel lives in a drawer: its header button closes the drawer (the conversation is kept) instead of minimising the panel in place. */
+  onClose?: () => void;
+}
+
+/** What the assistant is doing, and how many replies it has given - for the button that opens it. */
+export interface ArchitectActivity {
+  state: CompanionState;
+  replies: number;
 }
 
 export interface ArchitectPanel {
@@ -50,6 +59,8 @@ export interface ArchitectPanel {
   focusInput(): void;
   /** A turn is waiting on the sign-in dialog (main.ts's AI fallback): the header says "Waiting", not "Thinking". */
   setWaitingForSignIn(waiting: boolean): void;
+  /** Calls `listener` now and whenever the state or the reply count changes; returns an unsubscribe. */
+  subscribeActivity(listener: (activity: ArchitectActivity) => void): () => void;
 }
 
 /** Picked points are kept to 0.1 m (see ArchitectSession.pickedLocation) - shown the same way. */
@@ -155,10 +166,20 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   const turns = createTurnController<ArchitectReply>((text, { signal }) => session.handle(text, { signal }));
 
   let waitingForSignIn = false;
+  const activityListeners = new Set<(activity: ArchitectActivity) => void>();
+  let replyCount = 0;
+  let lastActivity: ArchitectActivity | null = null;
   const companionState = () =>
     companionStateOf({ speaking: handsFree.speaking, listening: voice.listening, busy: turns.busy, waitingForSignIn, stopped, applied: copilot.phase === "applied" });
+  const emitActivity = (): void => {
+    const activity = { state: companionState(), replies: replyCount };
+    if (lastActivity && lastActivity.state === activity.state && lastActivity.replies === activity.replies) return;
+    lastActivity = activity;
+    for (const listener of activityListeners) listener(activity);
+  };
   const renderState = (): void => {
     const state = companionState();
+    emitActivity();
     stateChip.textContent = COMPANION_STATE_LABEL[state];
     stateChip.title = state === "waiting" ? "Waiting for you to sign in - or to continue without an account" : "What the architect is doing";
     stateChip.className = `architect__state architect__state--${state}`;
@@ -237,6 +258,8 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   };
 
   const showReply = (reply: ArchitectReply): void => {
+    replyCount += 1;
+    emitActivity();
     const tags = [
       ...(reply.source === "ai" ? [el("span", { className: "copilot__tag copilot__tag--ai", text: "AI model", attrs: { title: "Answered by the AI model through the backend" } })] : []),
       ...(reply.preview ? [el("span", { className: "copilot__tag copilot__tag--preview", text: "Preview", attrs: { title: "Nothing is built until you confirm" } })] : []),
@@ -500,7 +523,17 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   }
   showSettings();
 
+  const onClose = options.onClose;
+  if (onClose) {
+    collapseButton.innerHTML = SHELL_ICONS.close;
+    collapseButton.title = "Close the assistant - the conversation is kept";
+    collapseButton.setAttribute("aria-label", "Close the assistant");
+  }
   collapseButton.addEventListener("click", () => {
+    if (onClose) {
+      onClose();
+      return;
+    }
     const collapsed = element.classList.toggle("architect--collapsed");
     collapseButton.textContent = collapsed ? "+" : "–";
     collapseButton.title = collapsed ? "Expand" : "Minimise";
@@ -526,12 +559,19 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     element,
     focusInput: () => {
       element.classList.remove("architect--collapsed");
-      collapseButton.textContent = "–";
+      if (!onClose) collapseButton.textContent = "–";
+      // Opened (the drawer, after replies arrived while it was closed): show the newest reply, not where it was left.
+      log.scrollTop = log.scrollHeight;
       input.focus();
     },
     setWaitingForSignIn: (waiting) => {
       waitingForSignIn = waiting;
       renderState();
+    },
+    subscribeActivity(listener) {
+      activityListeners.add(listener);
+      listener({ state: companionState(), replies: replyCount });
+      return () => activityListeners.delete(listener);
     }
   };
 }
