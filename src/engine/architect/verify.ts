@@ -1269,6 +1269,197 @@ async function main(): Promise<void> {
     assertTrue(!r.applied && /never joined/.test(r.text) && pipes().length === before2, `a cold run from a hot pipe's end is refused: ${r.text}`);
   });
 
+  await check("corrections by conversation reach the object meant: 'that room', 'that kitchen', the door to the other (or a named) wall - with 'No, stop.' in front - and undo puts it back", async () => {
+    const app = wire();
+    const room = () => app.context.elementStore.getAll().find((element) => element.kind === "room")!;
+    const door = () => app.context.doorStore.getAll()[0];
+    await app.say("Create a 4 by 5 metre kitchen at 8, 6, 3 metres high, brick walls, on the ground floor");
+    r = await app.say("build it");
+    assertTrue(r.applied === true, `built: ${r.text}`);
+    assertEqual(`${room().position.x},${room().position.z} ${room().dimensions.length}x${room().dimensions.width} h${room().dimensions.height}`, "8,6 4x5 h3", "at a nonzero point, exactly as said");
+    r = await app.say("Make that room 4.5 metres wide");
+    assertTrue(r.applied === true && /width 5 m → 4\.5 m/.test(r.text), `"that room" is the kitchen just built: ${r.text}`);
+    assertEqual(app.context.elementStore.getAll().filter((element) => element.kind === "room").length, 1, "no second room was created");
+    r = await app.say("add a door to the kitchen's front wall");
+    const front = door().hostId;
+    r = await app.say("Put the door on the other wall");
+    assertTrue(r.applied === true && door().hostId !== front && /front wall .* to its back wall/.test(r.text), `the other wall is the opposite one: ${r.text}`);
+    r = await app.say("move the door to the east wall");
+    assertTrue(r.applied === true && /to its right wall/.test(r.text), `east is the right (+X) wall: ${r.text}`);
+    const east = door().hostId;
+    r = await app.say("No, stop. Put the door on the other wall.");
+    assertTrue(r.applied === true && /right wall .* to its left wall/.test(r.text), `"No, stop." in front still moves it: ${r.text}`);
+    await app.say("undo");
+    assertEqual(door().hostId, east, "undo puts it back in the east wall");
+    assertEqual(app.context.doorStore.getAll().length, 1, "one door throughout - moved, never duplicated");
+    await app.say("Create a 3 by 3 metre store at 20, 6, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    r = await app.say("make that kitchen 5 m long");
+    assertTrue(r.applied === true && /\(the kitchen\): length 4 m → 5 m/.test(r.text), `"that kitchen" by name: ${r.text}`);
+  });
+
+  await check("'that room' is asked about when it could be two rooms - nothing changes until the user says which", async () => {
+    const app = wire();
+    await app.say("Create a 4 by 5 metre kitchen at 0, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    await app.say("Create a 3 by 3 metre store at 12, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    const kitchen = app.context.elementStore.getAll().find((element) => element.kind === "room" && element.position.x === 0)!;
+    app.context.selectionStore.select(kitchen.id);
+    const before = JSON.stringify(app.context.elementStore.getAll().map((element) => [element.id, element.dimensions]));
+    r = await app.say("make that room 3.5 metres wide");
+    assertTrue(r.tone === "question" && !r.applied && r.choices.filter((choice) => choice.say !== "cancel").length === 2, `asked, with both rooms (and Neither): ${r.text}`);
+    assertEqual(JSON.stringify(app.context.elementStore.getAll().map((element) => [element.id, element.dimensions])), before, "nothing changed");
+    r = await app.say(r.choices.find((choice) => /kitchen/i.test(choice.label))!.say);
+    assertTrue(r.applied === true && /the kitchen\): width 5 m → 3\.5 m/.test(r.text), `the answer applies it to the kitchen: ${r.text}`);
+  });
+
+  await check("moving an opening to another wall never swallows adding one or sliding one: adds stay adds, slides stay slides, a window keeps its sill, the destination isn't read as the door's current wall", async () => {
+    const app = wire();
+    await app.say("Create a 4 by 5 metre kitchen at 0, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    await app.say("add a window to the kitchen's front wall");
+    const windows = () => app.context.windowStore.getAll();
+    const first = windows()[0];
+    r = await app.say("Put a window in the back wall of the kitchen");
+    assertEqual(windows().length, 2, `"put a window in the back wall" adds one: ${r.text}`);
+    assertEqual(app.context.windowStore.get(first.id)!.hostId, first.hostId, "the existing window stays where it was");
+    r = await app.say(`move ${first.id} to the left wall`);
+    const moved = app.context.windowStore.get(first.id)!;
+    assertTrue(r.applied === true && moved.hostId !== first.hostId, `relocated: ${r.text}`);
+    assertTrue(Math.abs(moved.position.y - first.position.y) < 1e-6, `a window keeps its sill height (y ${first.position.y} -> ${moved.position.y})`);
+    await app.say("add a door to the kitchen's front wall");
+    const door = () => app.context.doorStore.getAll()[0];
+    const frontWall = door().hostId;
+    const offsetBefore = door().hostPlacement?.offset ?? 0;
+    r = await app.say("move the door on the front wall 1 m left");
+    assertEqual(door().hostId, frontWall, `a slide stays in its wall: ${r.text}`);
+    assertTrue(Math.abs((door().hostPlacement?.offset ?? 0) - offsetBefore) > 0.5, "and slides along it");
+    r = await app.say("put the kitchen door on the left wall");
+    assertTrue(!r.applied && /overlaps/.test(r.text) && door().hostId === frontWall, `the left wall already holds the window: refused, nothing changed: ${r.text}`);
+    r = await app.say("put the kitchen door on the right wall");
+    assertTrue(r.applied === true && door().hostId !== frontWall && /to its right wall/.test(r.text), `"the kitchen door on the right wall": the destination, not a filter on its current wall: ${r.text}`);
+    const room = app.context.elementStore.getAll().find((element) => element.kind === "room")!;
+    const size = JSON.stringify(room.dimensions);
+    r = await app.say("make the wall in that room 4.5 m long");
+    assertEqual(JSON.stringify(app.context.elementStore.get(room.id)!.dimensions), size, `"the wall in that room" never resizes the room: ${r.text}`);
+    r = await app.say("make that room's left wall 6 m long");
+    assertEqual(JSON.stringify(app.context.elementStore.get(room.id)!.dimensions), size, `"that room's left wall" is about the wall, never the room: ${r.text}`);
+    const host = door().hostId;
+    const offset = door().hostPlacement?.offset ?? 0;
+    r = await app.say("move the door to the front wall by half a metre");
+    assertEqual(door().hostId, host, `"by half a metre" is a slide, not a move to another wall: ${r.text}`);
+    assertTrue(Math.abs(Math.abs((door().hostPlacement?.offset ?? 0) - offset) - 0.5) < 1e-6 || /can't|past|no room|Which way/i.test(r.text), `slid 0.5 m (or refused as a slide): ${r.text}`);
+  });
+
+  await check("a door between two rooms with the SAME name: the whose-wall question is answered by its chips (room ids) - no loop; a destination room the opening isn't in is refused", async () => {
+    const app = wire();
+    await app.say("Create a 4 by 4 metre bedroom at 0, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    await app.say("Create a 4 by 4 metre bedroom at 4, 0, 3 metres high, brick walls, on the ground floor");
+    r = await app.say("build it");
+    const snapshot = buildAIProjectSnapshot(app.context);
+    const rooms = listRooms(snapshot);
+    assertEqual(rooms.filter((room) => room.name === "Bedroom").length, 2, `two rooms named Bedroom: ${r.text}`);
+    const walls = rooms.map((room) => new Set(describeRoom(snapshot, room).walls.map((wall) => wall.wall.id)));
+    const shared = [...walls[0]].find((id) => walls[1].has(id));
+    assertTrue(shared, "they share a wall");
+    const added = app.context.commandExecutor.execute({ type: "door.add", door: { hostId: shared } });
+    assertTrue(added.success && added.objectId, `a door in the shared wall: ${added.message}`);
+    const doorId = added.objectId!;
+    r = await app.say(`move ${doorId} to the north wall`);
+    assertTrue(r.tone === "question" && r.choices.length === 2 && r.choices[0].label !== r.choices[1].label, `asked, with distinguishable choices: ${r.choices.map((choice) => choice.label).join(" / ")}`);
+    r = await app.say(r.choices[0].say);
+    assertTrue(r.applied === true && app.context.doorStore.get(doorId)!.hostId !== shared, `the chip answers it - no loop: ${r.text}`);
+    await app.say("undo");
+    // A destination in a room the door isn't in: refused, nothing moves.
+    await app.say("Create a 3 by 3 metre store at 20, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    r = await app.say(`move ${doorId} to the north wall of the store`);
+    assertTrue(!r.applied && /can only move to another wall/.test(r.text) && app.context.doorStore.get(doorId)!.hostId === shared, `refused, not moved into its own room's wall: ${r.text}`);
+  });
+
+  await check("a door between two rooms: 'move it to the north wall' asks whose wall - and a typed answer is understood", async () => {
+    const app = wire();
+    await app.say("Build a 12m x 9m brick house with 3 bedrooms at 0, 0");
+    r = await app.say("Build everything");
+    const snapshot = buildAIProjectSnapshot(app.context);
+    const rooms = listRooms(snapshot);
+    const shared = app.context.doorStore.getAll().find((door) => rooms.filter((room) => describeRoom(snapshot, room).openings.some((opening) => opening.object.id === door.id)).length === 2);
+    assertTrue(shared, `a door between two rooms exists (${app.context.doorStore.getAll().length} doors)`);
+    const host = shared.hostId;
+    r = await app.say(`move ${shared.id} to the north wall`);
+    assertTrue(r.tone === "question" && r.choices.length === 2 && !r.applied, `asked whose north wall: ${r.text}`);
+    assertEqual(app.context.doorStore.get(shared.id)!.hostId, host, "nothing moved yet");
+    const owner = r.choices[0].label.replace(/^The (.*)'s north wall$/, "$1");
+    r = await app.say(owner.toLowerCase());
+    assertTrue(!/AI model/.test(r.text) && r.source !== "ai", `the typed answer is taken as the answer, not sent to the AI: ${r.text}`);
+  });
+
+  await check("'which room?' remembers its question: a typed room name answers it", async () => {
+    const app = wire();
+    await app.say("Create a 4 by 5 metre kitchen at 0, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    await app.say("Create a 3 by 3 metre store at 12, 0, 3 metres high, brick walls, on the ground floor");
+    await app.say("build it");
+    const kitchen = app.context.elementStore.getAll().find((element) => element.kind === "room" && element.position.x === 0)!;
+    app.context.selectionStore.select(kitchen.id);
+    r = await app.say("make that room 3.5 metres wide");
+    assertTrue(r.tone === "question", `asked: ${r.text}`);
+    r = await app.say("the kitchen");
+    assertTrue(r.applied === true && /the kitchen\): width 5 m → 3\.5 m/.test(r.text), `answered by typing: ${r.text}`);
+    // Any verb the question accepts - its chips answer by room id, not by rebuilding a sentence. (The kitchen was just changed; select the store so "that room" could be either.)
+    const store = app.context.elementStore.getAll().find((element) => element.kind === "room" && element.id !== kitchen.id)!;
+    app.context.selectionStore.select(store.id);
+    r = await app.say("push that room 1 m north");
+    assertTrue(r.tone === "question", `asked again: ${r.text}`);
+    const before = app.context.elementStore.get(kitchen.id)!.position.z;
+    r = await app.say(r.choices.find((choice) => /kitchen/i.test(choice.label))!.say);
+    assertTrue(r.applied === true && Math.abs(app.context.elementStore.get(kitchen.id)!.position.z - (before - 1)) < 1e-6, `"push" answered by the chip: ${r.text}`);
+  });
+
+  await check("a turn still waiting on the AI is cancelled by its signal: Stop applies nothing, and an old reply arriving after a newer correction cannot change the model", async () => {
+    // A provider that answers only when told to - like a slow network.
+    const releases: Array<() => void> = [];
+    const slow = {
+      interpret: () =>
+        new Promise<{ commands: unknown[] }>((resolve) => {
+          releases.push(() => resolve({ commands: [{ type: "wall.add", wall: { position: { x: 30, z: 30 } } }] }));
+        })
+    };
+    const context = createProjectContext();
+    const service = new AIService({ provider: slow as never, commandExecutor: context.commandExecutor, history: context.history, snapshotSource: context });
+    const session = new ArchitectSession({ commandExecutor: context.commandExecutor, history: context.history, snapshot: () => buildAIProjectSnapshot(context), undo: () => context.history.undo(), fallback: (instruction, options) => service.submit(instruction, options) });
+    const walls = () => context.wallStore.getAll().length;
+
+    // 1. Stop while thinking.
+    const stopped = new AbortController();
+    const pending = session.handle("add a garden pergola by the gate", { signal: stopped.signal });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assertEqual(releases.length, 1, "the AI was asked");
+    stopped.abort();
+    releases[0]();
+    const cancelled = await pending;
+    assertTrue(cancelled.cancelled === true && !cancelled.applied, `cancelled, not applied: ${cancelled.text}`);
+    assertEqual(walls(), 0, "the late reply's wall was never built");
+    assertEqual(context.history.canUndo(), false, "and nothing reached the undo history");
+
+    // 2. A newer correction while the old turn is still thinking.
+    const old = new AbortController();
+    const oldTurn = session.handle("add a garden pergola by the gate", { signal: old.signal });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    old.abort(); // what the panel does when a new turn arrives
+    const newer = await session.handle("Create a 3 by 3 metre store at 0, 0, 3 metres high, brick walls, on the ground floor");
+    assertTrue(newer.tone === "question", `the correction runs at once: ${newer.text}`);
+    const built = await session.handle("build it");
+    assertTrue(built.applied === true, `and is built: ${built.text}`);
+    const after = JSON.stringify(context.wallStore.getAll().map((wall) => [wall.id, wall.position]));
+    releases[1](); // the old reply finally arrives
+    const late = await oldTurn;
+    assertTrue(late.cancelled === true && !late.applied, `the old reply is dropped: ${late.text}`);
+    assertEqual(JSON.stringify(context.wallStore.getAll().map((wall) => [wall.id, wall.position])), after, "the newer correction stands untouched");
+  });
+
   // --- a room after save and reopen: nothing remembered, everything read from the saved scene ---
 
   /** Saves `app`'s project as JSON and opens it in a brand-new context and session - no memory of how anything was built. */

@@ -2,6 +2,7 @@
 // (engine/architect/verify.ts does). Harmless for Vite.
 import { parseHouseIntent, readHouseRequest } from "../ai/houseIntent.ts";
 import { isAdjustment } from "./adjust.ts";
+import { isRelocation } from "./roomEdits.ts";
 import { isPipeRun } from "./pipeRun.ts";
 import type { HouseDesignRequest } from "../ai/houseIntent.ts";
 import type { HouseFootprint } from "../ai/housePlan.ts";
@@ -51,12 +52,14 @@ export type Utterance =
   | { kind: "show"; text: string }
   | { kind: "show-roof" }
   | { kind: "refurnish"; text: string }
-  | { kind: "move-opening"; text: string; opening: "door" | "window"; distance?: number; direction?: Direction }
+  /** `relocate`: into another wall ("put the door on the other wall"), not along its own. */
+  | { kind: "move-opening"; text: string; opening: "door" | "window"; distance?: number; direction?: Direction; relocate?: true }
   | { kind: "wall-length"; text: string; length?: number }
   /** One new wall, built by conversation (wallBuilder.ts) - "add a 5 m brick wall", "build a wall". */
   | { kind: "build-wall"; text: string }
   /** A change to one existing element - "move it 2 m east", "make it 3 m high", "use brick instead" (adjust.ts). */
-  | { kind: "adjust"; text: string }
+  /** `room`: the words named a room ("make that room 4.5 m wide") - the target is a room, never another object. */
+  | { kind: "adjust"; text: string; room?: true }
   /** One new room, built by conversation (roomBuilder.ts) - "create a 4 m by 5 m kitchen, 3 m high". */
   | { kind: "build-room"; text: string }
   | { kind: "pipe-run"; text: string }
@@ -279,11 +282,24 @@ export function parseUtterance(raw: string): Utterance {
   if (!/\bselected\b/i.test(text) && !DIMENSIONS.test(text) && !/\bbed(?:room)?s?\b/i.test(text) && !HOUSE_NOUN.test(text) && isAdjustment(text)) {
     return { kind: "adjust", text };
   }
+  // "Make that room 4.5 metres wide", "move this room 2 m east": the room itself is what's changed - read as "it", but only ever a room.
+  // Only when it is the verb's own object: "make the wall in that room 4 m long" is about the wall, not the room.
+  // Never the possessive: "make that room's left wall 6 m long" is about the wall.
+  const THAT_ROOM = /\b(make|move|shift|resize|change|set|extend|shrink|enlarge|widen|lengthen|stretch|push|slide|nudge)\s+(?:that|this)\s+(?:room|space)\b(?!['’]s\b)/i;
+  if (THAT_ROOM.test(text) && !/\bselected\b/i.test(text) && !HOUSE_NOUN.test(text)) {
+    const asIt = text.replace(THAT_ROOM, "$1 it");
+    if (isAdjustment(asIt)) return { kind: "adjust", text: asIt, room: true };
+  }
   if (SHOW_ROOF.test(text)) return { kind: "show-roof" };
   if (SHOW.test(text)) return { kind: "show", text };
   if (REFURNISH.test(text)) return { kind: "refurnish", text };
   if (!/\bselected\b/i.test(text)) {
     const opening = OPENING_REF.exec(text);
+    // Any distance the slide would read ("by half a metre") means a slide along the wall, never a move to another wall.
+    if (opening && isRelocation(text) && readDistance(text) === undefined) {
+      const word = (opening[1] ?? opening[2]).toLowerCase();
+      return { kind: "move-opening", text, opening: word.startsWith("window") ? "window" : "door", relocate: true };
+    }
     if (MOVE.test(text) && opening) {
       const word = (opening[1] ?? opening[2]).toLowerCase();
       const distance = readDistance(text);

@@ -6,6 +6,9 @@ import type { HandsFreeStatus } from "./handsFree";
 import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState";
 import type { CopilotEvent, CopilotState } from "./copilotState";
 import { createLevelMeter } from "./levelMeter";
+import { createTurnController } from "./turnController";
+import { LANGUAGE_CHOICES, PAUSE_CHOICES, chooseVoice, readVoiceSettings, saveVoiceSettings } from "./voiceSettings";
+import type { SettingsStorage, VoiceSettings } from "./voiceSettings";
 import { isAiPromptSubmitKey } from "../engine/ai/AiPromptController";
 import type { ArchitectChoice, ArchitectReply, ArchitectSession, ArchitectViewState } from "../engine/architect/ArchitectSession";
 import type { PlanPoint } from "../engine/architect/parseUtterance";
@@ -23,6 +26,13 @@ import type { HouseFootprint } from "../engine/ai/housePlan";
  * session's behalf are viewport actions: framing the objects a turn built
  * (`onFocus`) and arming a ground pick when the session asks for a
  * location (`onPickLocation`).
+ *
+ * Turns are cancellable (turnController.ts): Stop cancels the one in
+ * flight, and a new turn while one is thinking replaces it - a reply that
+ * arrives after either never changes the model, and is neither shown nor
+ * read aloud. With "interrupt by speaking" on, the microphone stays open
+ * while a reply is read, and the user's own words (not the reply echoing
+ * back) stop the speech at once and become the next turn.
  */
 export interface ArchitectPanelOptions {
   session: ArchitectSession;
@@ -31,6 +41,8 @@ export interface ArchitectPanelOptions {
   onPickLocation: (footprint: HouseFootprint | null, done: (point: PlanPoint | null) => void) => void;
   /** Hides or shows objects in the viewport (a view setting, never the model) - "show me the living room" lifts the roof out of the way. */
   onSetHidden: (objectIds: readonly string[], hidden: boolean) => void;
+  /** Where the voice settings are remembered (localStorage); null: for this page only. */
+  storage?: SettingsStorage | null;
 }
 
 export interface ArchitectPanel {
@@ -43,8 +55,37 @@ function fmt(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
 
+/** What the companion is doing right now - one word, always visible in the header. */
+type CompanionState = "ready" | "listening" | "thinking" | "speaking" | "applied" | "stopped";
+const STATE_LABEL: Readonly<Record<CompanionState, string>> = {
+  ready: "Ready",
+  listening: "Listening",
+  thinking: "Thinking",
+  speaking: "Speaking",
+  applied: "Applied",
+  stopped: "Stopped"
+};
+
+/** A labelled tool button: an icon and a word, so nobody has to guess what it does. */
+function toolButton(className: string, icon: string, label: string, ariaLabel: string): HTMLButtonElement {
+  return el("button", { className: `architect__tool ${className}`, attrs: { type: "button", "aria-label": ariaLabel } }, [
+    el("span", { className: "architect__tool-icon", text: icon, attrs: { "aria-hidden": "true" } }),
+    el("span", { className: "architect__tool-label", text: label })
+  ]) as HTMLButtonElement;
+}
+
+function speechVoices(): SpeechSynthesisVoice[] {
+  try {
+    return typeof window !== "undefined" && "speechSynthesis" in window ? window.speechSynthesis.getVoices() : [];
+  } catch {
+    return [];
+  }
+}
+
 export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectPanel {
   const { session } = options;
+  const storage = options.storage ?? null;
+  let settings: VoiceSettings = readVoiceSettings(storage);
 
   const log = el("div", { className: "architect__log", attrs: { role: "log", "aria-live": "polite", "aria-label": "Conversation with the EAVARA architect" } });
   const stages = el("ol", { className: "architect__stages", attrs: { "aria-label": "Build stages" } });
@@ -52,26 +93,50 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
 
   const input = el("input", {
     className: "architect__input",
-    attrs: { type: "text", placeholder: "Describe your site or house…", "aria-label": "Instruction for the architect", autocomplete: "off" }
-  });
-  const pickButton = el("button", { className: "architect__tool", text: "📍", attrs: { type: "button", title: "Pick a location on the ground", "aria-label": "Pick a location" } });
-  const micButton = el("button", { className: "architect__tool architect__mic", text: "🎤", attrs: { type: "button", "aria-label": "Speak an instruction" } });
-  const handsFreeButton = el("button", {
-    className: "architect__tool architect__hands-free",
-    text: "🔊",
-    attrs: { type: "button", "aria-label": "Hands-free: read questions aloud and listen for the answers", "aria-pressed": "false" }
-  });
+    attrs: { type: "text", placeholder: "Describe your site, a room, or a change…", "aria-label": "Instruction for the architect", autocomplete: "off" }
+  }) as HTMLInputElement;
+  const pickButton = toolButton("architect__pick", "📍", "Pick", "Pick a location on the ground");
+  pickButton.title = "Pick a location on the ground";
+  const micButton = toolButton("architect__mic", "🎤", "Speak", "Speak an instruction");
+  const handsFreeButton = toolButton("architect__hands-free", "🔊", "Hands-free", "Hands-free: read replies aloud and listen for the answers");
+  handsFreeButton.setAttribute("aria-pressed", "false");
+  const settingsButton = toolButton("architect__voice-settings-toggle", "⚙", "Voice", "Voice settings");
+  settingsButton.setAttribute("aria-expanded", "false");
+  settingsButton.title = "Voice settings: language, voice, pause before your turn ends, interrupting";
   const sendButton = el("button", { className: "architect__send", text: "Send", attrs: { type: "submit" } });
   const voiceNote = el("p", { className: "architect__voice-note" });
   voiceNote.hidden = true;
 
-  const composer = el("form", { className: "architect__composer" }, [pickButton, input, micButton, handsFreeButton, sendButton]);
+  const composer = el("form", { className: "architect__composer" }, [pickButton, input, micButton, handsFreeButton, settingsButton, sendButton]);
+
+  // --- voice settings ---
+  const field = (label: string, control: HTMLElement): HTMLElement => el("label", { className: "architect__setting" }, [el("span", { className: "architect__setting-label", text: label }), control]);
+  const languageSelect = el("select", { className: "architect__select", attrs: { "aria-label": "Language for listening and speaking" } }, LANGUAGE_CHOICES.map((choice) => el("option", { text: choice.label, attrs: { value: choice.code } }))) as HTMLSelectElement;
+  const voiceSelect = el("select", { className: "architect__select", attrs: { "aria-label": "Voice for spoken replies" } }) as HTMLSelectElement;
+  const pauseSelect = el("select", { className: "architect__select", attrs: { "aria-label": "Pause that ends your turn" } }, PAUSE_CHOICES.map((choice) => el("option", { text: choice.label, attrs: { value: String(choice.ms) } }))) as HTMLSelectElement;
+  const lengthSelect = el("select", { className: "architect__select", attrs: { "aria-label": "How much of each reply is read aloud" } }, [
+    el("option", { text: "Short - the gist and the question", attrs: { value: "short" } }),
+    el("option", { text: "Full - everything on screen", attrs: { value: "full" } })
+  ]) as HTMLSelectElement;
+  const bargeInBox = el("input", { attrs: { type: "checkbox" } }) as HTMLInputElement;
+  const bargeInLabel = el("label", { className: "architect__setting architect__setting--check" }, [bargeInBox, el("span", { text: "Speaking over a reply interrupts it - use headphones (with speakers it would hear itself). 🎤 Speak and Stop always interrupt." })]);
+  const voiceDescription = el("p", { className: "architect__setting-note", attrs: { role: "status" } });
+  const settingsPanel = el("section", { className: "architect__voice-settings", attrs: { "aria-label": "Voice settings" } }, [
+    field("Language", languageSelect),
+    field("Voice", voiceSelect),
+    field("Your turn ends after a pause of", pauseSelect),
+    field("Read replies", lengthSelect),
+    bargeInLabel,
+    voiceDescription
+  ]);
+  settingsPanel.hidden = true;
 
   const collapseButton = el("button", { className: "architect__collapse", text: "–", attrs: { type: "button", title: "Minimise", "aria-label": "Minimise the architect panel" } });
+  const stateChip = el("span", { className: "architect__state architect__state--ready", text: "Ready", attrs: { role: "status", "aria-live": "polite", title: "What the architect is doing" } });
   const header = el("header", { className: "architect__header" }, [
     el("span", { className: "architect__mark", text: "✦", attrs: { "aria-hidden": "true" } }),
     el("span", { className: "architect__title", text: "EAVARA Architect" }),
-    el("span", { className: "architect__badge", text: "works offline", attrs: { title: "Site, location, design and every build stage run locally - no AI server needed" } }),
+    stateChip,
     collapseButton
   ]);
 
@@ -84,18 +149,34 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   const transcriptLine = el("p", { className: "copilot__transcript" });
   const levelBars = el("div", { className: "copilot__level", attrs: { "aria-hidden": "true" } }, Array.from({ length: 14 }, () => el("span", { className: "copilot__bar" })));
   levelBars.hidden = true; // shown only while a real microphone level arrives
-  const stopButton = el("button", { className: "copilot__stop", text: "■ Stop", attrs: { type: "button", title: "Stop speaking and listening now" } });
+  const stopButton = el("button", { className: "copilot__stop", text: "■ Stop", attrs: { type: "button", title: "Stop speaking, listening and any request still thinking - nothing half-done is applied" } });
   const status = el("div", { className: "copilot__status" }, [stepper, el("div", { className: "copilot__state-row" }, [levelBars, stateLine, stopButton]), transcriptLine]);
-  const body = el("div", { className: "architect__body" }, [stages, status, log, composer, voiceNote]);
+  const body = el("div", { className: "architect__body" }, [stages, status, log, settingsPanel, composer, voiceNote]);
   const element = el("aside", { className: "architect", attrs: { "aria-label": "EAVARA Architect" } }, [header, body]);
 
-  let busy = false;
   let activeChoices: HTMLElement | null = null;
   /** The latest reply - what a spoken answer is matched against, and what hands-free reads out when turned on. */
   let lastReply: ArchitectReply | null = null;
   let copilot: CopilotState = INITIAL_COPILOT_STATE;
   const gate = createInputGate();
   let levelHistory: number[] = [];
+  let stopped = false;
+  const turns = createTurnController<ArchitectReply>((text, { signal }) => session.handle(text, { signal }));
+
+  const companionState = (): CompanionState => {
+    if (handsFree.speaking) return "speaking";
+    if (voice.listening && !turns.busy) return "listening";
+    if (turns.busy) return "thinking";
+    if (stopped) return "stopped";
+    if (copilot.phase === "applied") return "applied";
+    return "ready";
+  };
+  const renderState = (): void => {
+    const state = companionState();
+    stateChip.textContent = STATE_LABEL[state];
+    stateChip.className = `architect__state architect__state--${state}`;
+    element.classList.toggle("architect--busy", turns.busy);
+  };
 
   const renderCopilot = (): void => {
     const statuses = stepStatuses(copilot);
@@ -106,8 +187,9 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     stateLine.className = `copilot__state copilot__state--${copilot.phase}`;
     transcriptLine.hidden = copilot.transcript.length === 0;
     transcriptLine.textContent = copilot.transcript ? `“${copilot.transcript}”` : "";
-    stopButton.hidden = !(copilot.phase === "listening" || copilot.phase === "transcribing" || handsFree.speaking || handsFree.enabled);
-    status.hidden = copilot.phase === "idle" && copilot.detail.length === 0 && !handsFree.enabled;
+    stopButton.hidden = !(copilot.phase === "listening" || copilot.phase === "transcribing" || handsFree.speaking || handsFree.enabled || turns.busy);
+    status.hidden = copilot.phase === "idle" && copilot.detail.length === 0 && !handsFree.enabled && !turns.busy;
+    renderState();
   };
   const dispatch = (event: CopilotEvent): void => {
     copilot = nextCopilotState(copilot, event);
@@ -126,20 +208,20 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     });
   });
 
-  const setBusy = (value: boolean): void => {
-    busy = value;
-    input.disabled = value;
-    sendButton.disabled = value;
-    pickButton.disabled = value;
-    element.classList.toggle("architect--busy", value);
-  };
-
   const scrollToEnd = (): void => {
     log.scrollTop = log.scrollHeight;
   };
 
-  const addUserMessage = (text: string): void => {
-    log.append(el("div", { className: "architect__msg architect__msg--user", text }));
+  const addUserMessage = (text: string): HTMLElement => {
+    const message = el("div", { className: "architect__msg architect__msg--user", text });
+    log.append(message);
+    scrollToEnd();
+    return message;
+  };
+
+  /** A quiet line in the conversation (a cancelled or replaced request) - never read aloud. */
+  const addNote = (text: string): void => {
+    log.append(el("div", { className: "architect__msg architect__msg--note", text, attrs: { role: "note" } }));
     scrollToEnd();
   };
 
@@ -158,9 +240,7 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
       { className: "architect__choices" },
       choices.map((choice) => {
         const button = el("button", { className: "architect__choice", text: choice.label, attrs: { type: "button" } });
-        button.addEventListener("click", () => {
-          if (!busy) void send(choice.say, choice.label);
-        });
+        button.addEventListener("click", () => void send(choice.say, choice.label));
         return button;
       })
     );
@@ -211,7 +291,7 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     options.onPickLocation(footprint, (point) => {
       element.classList.remove("architect--picking");
       if (!point) {
-        showReply({ text: "Location pick cancelled. Click 📍 to try again, or type coordinates like “at 4, -2”.", tone: "info", choices: [] });
+        showReply({ text: "Location pick cancelled. Click 📍 Pick to try again, or type coordinates like “at 4, -2”.", tone: "info", choices: [] });
         return;
       }
       retireChoices();
@@ -222,40 +302,53 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     });
   };
 
+  /**
+   * One turn. A turn still thinking is replaced by this one (cancelled
+   * first - its late reply changes nothing and is never shown or spoken).
+   */
   async function send(text: string, shown = text): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
-    const admitted = gate.admit(trimmed, busy, Date.now());
-    if (admitted === "duplicate") return;
-    if (admitted === "queued") {
-      setNote(`Queued: “${trimmed}” - I'll take it as soon as the current answer is in.`);
-      return;
-    }
+    // The same words twice within a moment (a spoken final and a typed Send of the same box) run once.
+    if (gate.admit(trimmed, false, Date.now()) === "duplicate") return;
+    stopped = false;
     retireChoices();
     addUserMessage(shown);
     input.value = "";
-    setBusy(true);
     dispatch({ type: "sent", text: trimmed });
-    try {
-      const reply = await session.handle(trimmed);
-      dispatch({ type: "reply", reply });
-      showReply(reply);
-    } catch (error) {
-      const failure: ArchitectReply = { text: `Something went wrong: ${error instanceof Error ? error.message : String(error)} Nothing was changed.`, tone: "error", choices: [] };
-      dispatch({ type: "reply", reply: failure });
-      showReply(failure);
-    } finally {
-      setBusy(false);
-      input.focus();
-      const next = gate.takeQueued();
-      if (next) void send(next, next);
+    const turn = turns.send(trimmed);
+    renderCopilot(); // now busy: Thinking, with Stop
+    const outcome = await turn;
+    if (outcome.kind === "cancelled") {
+      addNote(
+        outcome.reason === "stopped"
+          ? `Stopped - “${trimmed}” was cancelled before it changed anything.`
+          : `Replaced - “${trimmed}” was cancelled in favour of your newer instruction; it changed nothing.`
+      );
+      renderCopilot();
+      return;
     }
+    const reply: ArchitectReply =
+      outcome.kind === "failed"
+        ? { text: `Something went wrong: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)} Nothing was changed.`, tone: "error", choices: [] }
+        : outcome.reply;
+    if (reply.cancelled) {
+      addNote(`“${trimmed}” was cancelled before it changed anything.`);
+      renderCopilot();
+      return;
+    }
+    dispatch({ type: "reply", reply });
+    showReply(reply);
+    renderCopilot();
+    if (document.activeElement === document.body || document.activeElement === null) input.focus();
   }
 
   composer.addEventListener("submit", (event) => {
     event.preventDefault();
     // Sending the box while recognition is still running: the box is what's sent - drop the speech session, so its final words don't run a second time.
     if (voice.listening) voice.cancel();
+    // Typing a correction while a reply is read: stop reading it.
+    if (handsFree.speaking) handsFree.bargeIn();
     void send(input.value);
   });
   input.addEventListener("keydown", (event) => {
@@ -271,11 +364,18 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
   };
 
   const voice = createVoiceInput({
-    onInterim: (text) => {
+    lang: settings.lang,
+    pauseMs: settings.pauseMs,
+    onInterim: (heardText) => {
+      // While a reply is read with the mic open: only the user's own words count - and they interrupt it.
+      if (handsFree.speaking && !handsFree.heardWhileSpeaking(heardText)) return;
+      const text = handsFree.userWords(heardText);
       input.value = text;
       if (text) dispatch({ type: "interim", text });
     },
-    onFinal: (text) => {
+    onFinal: (heardText) => {
+      const text = handsFree.acceptFinal(heardText);
+      if (!text) return; // only the reply echoing back
       dispatch({ type: "heard", text });
       handsFree.heard();
       // "Concrete block", "build it", "pick another spot": a spoken choice
@@ -288,49 +388,63 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
     onState: (state: VoiceState, message?: string, code?: string) => {
       micButton.classList.toggle("architect__mic--listening", state === "listening");
       micButton.setAttribute("aria-pressed", String(state === "listening"));
+      // The browser's own no-speech timeout while the mic is only held open during a reply: not an error to show (hands-free reopens it).
+      if (state === "error" && code === "no-speech" && handsFree.speaking) {
+        handsFree.listenerError(code, message ?? "");
+        renderState();
+        return;
+      }
       if (state === "listening") {
-        dispatch({ type: "listening" });
+        handsFree.sessionStarted();
+        if (!handsFree.speaking) dispatch({ type: "listening" });
         meter.start();
       } else {
         meter.stop();
         if (state === "error") dispatch({ type: "voice-error", message: message ?? "Speech recognition stopped." });
         else if (copilot.phase === "listening") dispatch({ type: "stopped" });
       }
+      renderState();
       if (handsFree.enabled) {
         if (state === "error") handsFree.listenerError(code ?? "", message ?? "Speech recognition stopped.");
         return;
       }
-      setNote(state === "idle" ? null : state === "listening" ? "Listening… speak your instruction." : (message ?? ""), state === "error");
+      setNote(state === "idle" ? null : state === "listening" ? "Listening… speak your instruction; a pause ends your turn." : (message ?? ""), state === "error");
     },
     onEnd: () => handsFree.listenerEnded()
   });
 
+  /** The voice replies are read with - recomputed per reply, since the browser's voice list loads late. */
+  const currentVoice = (): SpeechSynthesisVoice | null => chooseVoice(speechVoices(), settings).voice;
+  const speechOutput = createSpeechOutput(() => ({ voice: currentVoice(), lang: settings.lang }));
   const handsFree = createHandsFree({
-    speech: createSpeechOutput(),
+    speech: speechOutput,
     listener: voice,
+    bargeIn: () => settings.bargeIn,
+    replyLength: () => settings.replyLength,
     onStatus: (status: HandsFreeStatus) => {
       const on = status.kind === "speaking" || status.kind === "listening";
       handsFreeButton.setAttribute("aria-pressed", String(on));
       handsFreeButton.classList.toggle("architect__hands-free--on", on);
       renderCopilot();
-      if (status.kind === "speaking") setNote("🔊 Speaking… (hands-free)");
+      if (status.kind === "speaking") setNote(settings.bargeIn ? "🔊 Speaking… talk over me, or press Stop, to interrupt." : "🔊 Speaking… press 🎤 Speak or Stop to interrupt.");
       else if (status.kind === "listening") setNote("🎤 Listening… answer out loud, or type.");
       else if (status.kind === "stopped") setNote(status.message, true);
       else setNote(null);
     }
   });
   if (voice.supported) {
-    micButton.title = "Speak an instruction";
+    micButton.title = "Speak an instruction (a pause ends your turn)";
     micButton.addEventListener("click", () => {
       if (handsFree.speaking) {
         handsFree.bargeIn();
         return;
       }
-      if (!busy) voice.toggle();
+      // Speaking while the architect is still thinking is allowed: what you say replaces that request.
+      voice.toggle();
     });
-    handsFreeButton.title = createSpeechOutput()
-      ? "Hands-free: I read each question aloud and listen for your answer"
-      : "Hands-free: I listen for your answer after each question (this browser can't speak, so read the questions here)";
+    handsFreeButton.title = speechOutput
+      ? "Hands-free: I read each reply aloud and listen for your answer"
+      : "Hands-free: I listen for your answer after each reply (this browser can't speak, so read the replies here)";
     handsFreeButton.addEventListener("click", () => {
       if (handsFree.enabled) handsFree.setEnabled(false);
       else handsFree.enableWith(lastReply);
@@ -344,12 +458,58 @@ export function createArchitectPanel(options: ArchitectPanelOptions): ArchitectP
 
   stopButton.addEventListener("click", () => {
     if (handsFree.enabled || handsFree.speaking) handsFree.interrupt();
-    // Stop means stop: whatever was half-heard is dropped, never sent.
+    // Stop means stop: whatever was half-heard is dropped, never sent - and a request still thinking is cancelled unapplied.
     voice.cancel();
     if (input.value && copilot.phase === "transcribing") input.value = "";
     meter.stop();
+    turns.stop();
+    stopped = true;
     dispatch({ type: "stopped" });
   });
+
+  // --- voice settings: shown values, changes saved and applied at once ---
+  const fillVoices = (): void => {
+    const family = settings.lang.split("-")[0].toLowerCase();
+    const voices = speechVoices().filter((candidate) => candidate.lang.replace(/_/g, "-").toLowerCase().split("-")[0] === family);
+    voiceSelect.replaceChildren(
+      el("option", { text: "Automatic - best for the language", attrs: { value: "" } }),
+      ...voices.map((candidate) => el("option", { text: `${candidate.name} (${candidate.lang})`, attrs: { value: candidate.voiceURI } }))
+    );
+    voiceSelect.value = settings.voiceURI && voices.some((candidate) => candidate.voiceURI === settings.voiceURI) ? settings.voiceURI : "";
+    voiceDescription.textContent = speechOutput ? chooseVoice(speechVoices(), settings).note : "This browser can't speak replies - they stay on screen.";
+  };
+  const showSettings = (): void => {
+    languageSelect.value = settings.lang;
+    pauseSelect.value = String(settings.pauseMs);
+    lengthSelect.value = settings.replyLength;
+    bargeInBox.checked = settings.bargeIn;
+    fillVoices();
+  };
+  const update = (changes: Partial<VoiceSettings>): void => {
+    settings = { ...settings, ...changes };
+    saveVoiceSettings(storage, settings);
+    voice.setLanguage(settings.lang);
+    voice.setPauseMs(settings.pauseMs);
+    showSettings();
+  };
+  languageSelect.addEventListener("change", () => update({ lang: languageSelect.value, voiceURI: null }));
+  voiceSelect.addEventListener("change", () => update({ voiceURI: voiceSelect.value || null }));
+  pauseSelect.addEventListener("change", () => update({ pauseMs: Number(pauseSelect.value) }));
+  lengthSelect.addEventListener("change", () => update({ replyLength: lengthSelect.value === "full" ? "full" : "short" }));
+  bargeInBox.addEventListener("change", () => update({ bargeIn: bargeInBox.checked }));
+  settingsButton.addEventListener("click", () => {
+    settingsPanel.hidden = !settingsPanel.hidden;
+    settingsButton.setAttribute("aria-expanded", String(!settingsPanel.hidden));
+    settingsButton.classList.toggle("architect__tool--on", !settingsPanel.hidden);
+    if (!settingsPanel.hidden) showSettings();
+  });
+  if (typeof window !== "undefined" && "speechSynthesis" in window) {
+    // The browser's voice list arrives after the page loads.
+    window.speechSynthesis.addEventListener?.("voiceschanged", () => {
+      if (!settingsPanel.hidden) fillVoices();
+    });
+  }
+  showSettings();
 
   collapseButton.addEventListener("click", () => {
     const collapsed = element.classList.toggle("architect--collapsed");

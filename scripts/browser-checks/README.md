@@ -57,8 +57,11 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - the choice is saved, and after a reload the page is already dark when `<body>` is created (before the first paint and before the app starts)
 - at 1280, 1366, 1440 and 1920 px the AI panel covers neither the view controls, the inspector nor the bottom panel
 
-**`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. It checks:
-- hands-free speaking, and barge-in with the mic
+**`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. Its stand-in recogniser behaves like Chrome's continuous mode: a session never ends by itself, so the app's own end-of-turn pause is what is tested. It checks:
+- hands-free speaking with the mic closed by default (interrupting by speaking is opt-in); turning it on in ⚙ Voice (saved), then speaking with the mic held open (recognition continuous, in English (India)), and barge-in with the mic button
+- a reply read to the end: the session that heard it is dropped and a fresh one opened, so answering with the reply's own words (its "Set up a 30 × 20 m site" choice) is sent in full
+- a short pause (0.9 s) not ending the turn; the 1.6 s pause ending it
+- talking over a reply: its own echo does not interrupt it; the user's words stop the speech at once, the state chip says Listening, and the echoed lead-in is not sent
 - partial words shown but not sent
 - a complete spoken room request reaching the preview, with "four by five" read as "4 by 5"
 - a correction mid-speech
@@ -66,6 +69,7 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - a typed Send while the recogniser holds the same words running exactly once
 - the 3D result in the record book
 - Stop dropping half-heard words, including after a final result has arrived
+- a request still thinking (the AI reply held inside the test browser with Chrome's Fetch interception - it never reaches a backend; a throwaway account on the LOCAL mock backend): the state says Thinking; Stop says Stopped at once and the late reply changes nothing and is never shown; a newer instruction replaces it at once and the old reply arriving later changes nothing
 
 ## Manual procedure: real microphone (and, in V8 only, live Claude)
 
@@ -86,10 +90,12 @@ Copy the table at the end and fill it in for every run.
 - If the recogniser mishears a number, the architect must ask; it must never build a guessed size. Note what was heard.
 
 **V3 - Correcting a dimension while the assistant is speaking.** Turn on 🔊 hands-free; it starts reading the preview.
-- While it is still speaking, press 🎤 and say *"make it four point five metres wide"*.
-- Expect: the speech stops immediately, and you're listening.
-- Expect: the preview becomes 4 m × 4.5 m and is read out again.
-- (Talking over the assistant *without* pressing 🎤 is not supported: the mic is closed while it speaks.)
+- First turn on ⚙ Voice → "Speaking over a reply interrupts it" (off by default) and wear headphones - with speakers the microphone hears the reply itself.
+- While it is still speaking, just say *"make it four point five metres wide"* (no button).
+- Expect: the speech stops within a word or two, the state chip reads Listening, and the preview becomes 4 m × 4.5 m.
+- Repeat with the mic button instead: press 🎤 while it speaks, then say it. Same result.
+- Pause mid-sentence for under a second ("make it four… point five metres wide"): expect it to keep listening, not send half a sentence.
+- With that setting off (the default), talking over it does nothing; 🎤 Speak or Stop interrupt it at once.
 
 **V4 - An ambiguous correction.** While it reads, press 🎤 and say *"make it five metres"*.
 - Expect the question "Is 5 m the room's length (east–west), width (north–south) or ceiling height?" with nothing built.
@@ -112,6 +118,7 @@ Copy the table at the end and fill it in for every run.
 - Say something the app doesn't handle itself, e.g. *"add a garden pergola by the gate"*.
 - Passes only if the reply carries the **AI model** tag. Record the reply.
 - A sign-in, timeout or "unable to connect" message is a fail for V8 (note it), never a pass.
+- Then ask it again and press **■ Stop** while the state chip reads *Thinking*. Expect: *Stopped* at once, a note that the request was cancelled, and nothing added to the scene or the Measurements tab when Claude's answer arrives a moment later.
 
 ### Results record
 

@@ -23,7 +23,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 // Explicit .ts extension: Node runs this file directly (see above).
 import { SPLASH_HOLD_MS, SPLASH_REDUCED_HOLD_MS, splashRemainingMs } from "./splash.ts";
-import { createHandsFree, matchSpokenChoice, spokenNumbers, spokenReply } from "./handsFree.ts";
+import { createHandsFree, isEchoOf, matchSpokenChoice, shortSpoken, spokenNumbers, spokenReply, stripContinuation, wordsAfter } from "./handsFree.ts";
+import { DEFAULT_VOICE_SETTINGS, VOICE_SETTINGS_KEY, chooseVoice, readVoiceSettings, saveVoiceSettings } from "./voiceSettings.ts";
+import { createTurnController } from "./turnController.ts";
 import type { HandsFreeStatus } from "./handsFree.ts";
 import { COPILOT_STEPS, INITIAL_COPILOT_STATE, createInputGate, nextCopilotState, stepStatuses } from "./copilotState.ts";
 import type { CopilotEvent } from "./copilotState.ts";
@@ -694,6 +696,74 @@ function run(): void {
     });
   });
 
+  /** Timers the test fires by hand. */
+  const fakeTimers = () => {
+    let next = 1;
+    const live = new Map<number, { fn: () => void; ms: number }>();
+    return {
+      timers: { set: (fn: () => void, ms: number) => (live.set(next, { fn, ms }), next++), clear: (handle: unknown) => void live.delete(handle as number) },
+      pending: () => [...live.values()].map((entry) => entry.ms),
+      fire: (ms: number) => {
+        for (const [handle, entry] of [...live]) {
+          if (entry.ms === ms) {
+            live.delete(handle);
+            entry.fn();
+          }
+        }
+      }
+    };
+  };
+  const withPausedRecognition = (pauseMs: number, run: (voice: ReturnType<typeof createVoiceInput>, heard: { interim: string[]; final: string[]; ended: number }, clock: ReturnType<typeof fakeTimers>) => void): void => {
+    const scope = globalThis as unknown as { window?: unknown };
+    const previous = scope.window;
+    scope.window = { webkitSpeechRecognition: FakeRecognition };
+    try {
+      const clock = fakeTimers();
+      const heard = { interim: [] as string[], final: [] as string[], ended: 0 };
+      const voice = createVoiceInput({ lang: "en-IN", pauseMs, silenceMs: 8000, timers: clock.timers, onInterim: (text) => void heard.interim.push(text), onFinal: (text) => void heard.final.push(text), onState: () => undefined, onEnd: () => void (heard.ended += 1) });
+      run(voice, heard, clock);
+    } finally {
+      scope.window = previous;
+    }
+  };
+
+  check("end of turn: a short pause mid-sentence keeps listening; only the configured pause after speech ends the turn - continuous recognition, in the chosen language", () => {
+    withPausedRecognition(1600, (voice, heard, clock) => {
+      voice.start();
+      const recogniser = FakeRecognition.last!;
+      assertTrue(recogniser.continuous === true && recogniser.lang === "en-IN", "continuous, en-IN");
+      assertEqual(clock.pending().join(","), "8000", "before any words: only the silence limit");
+      recogniser.results(0, ["make the kitchen", false]);
+      assertEqual(clock.pending().join(","), "1600", "words heard: the pause timer replaces it");
+      // A short pause, then more words: the timer restarts - the turn isn't over.
+      recogniser.results(0, ["make the kitchen", true], ["four point five metres wide", false]);
+      assertEqual(clock.pending().join(","), "1600", "still one pause timer, restarted");
+      assertEqual(heard.final.length, 0, "nothing sent mid-sentence");
+      clock.fire(1600);
+      assertEqual(heard.final.join(" / "), "make the kitchen four point five metres wide", "the whole turn, words not yet final included");
+      assertEqual(heard.ended, 1, "and it ended on its own (hands-free carries on)");
+      assertEqual(clock.pending().length, 0, "no timer left behind");
+    });
+  });
+
+  check("end of turn: silence with nothing said ends listening after the silence limit; while a reply is read (held open) silence never does", () => {
+    withPausedRecognition(1200, (voice, heard, clock) => {
+      voice.start();
+      clock.fire(8000);
+      assertTrue(heard.final.length === 0 && heard.ended === 1 && !voice.listening, "silent turn: ended, nothing sent");
+      voice.holdOpen(true);
+      voice.start();
+      assertEqual(clock.pending().length, 0, "held: no silence limit while a reply is read");
+      FakeRecognition.last!.results(0, ["make it wider", false]);
+      assertEqual(clock.pending().length, 0, "held: words don't end the turn yet either");
+      voice.holdOpen(false);
+      assertEqual(clock.pending().join(","), "1200", "released after words: the pause starts now");
+      voice.setPauseMs(2500);
+      clock.fire(1200);
+      assertEqual(heard.final.join(" / "), "make it wider", "delivered");
+    });
+  });
+
   check("spoken numbers: words become digits the way a typed instruction has them - and nothing else changes", () => {
     const cases: [string, string][] = [
       ["create a four by five metre kitchen three metres high", "create a 4 by 5 metre kitchen 3 metres high"],
@@ -817,6 +887,184 @@ function run(): void {
     const topBar = readFileSync(fileURLToPath(new URL("./topBar.ts", import.meta.url)), "utf8");
     assertTrue(/className: "app-header__theme"/.test(topBar) && /store\.toggle\(\)/.test(topBar), "the top bar has the one-click switch");
     assertTrue(/themeStore\.subscribe\(\(theme\) => sceneManager\.current\?\.setTheme\(theme\)\)/.test(mainSource), "main.ts sends the theme to the viewport");
+  });
+
+  // --- The AI companion's voice: settings, cancellable turns, end of turn on a pause, barge-in by voice ---
+  check("voice settings: defaults to English (India), saved and read back, anything odd falls back to the default", () => {
+    const saved = new Map<string, string>();
+    const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => void saved.set(key, value) };
+    assertEqual(JSON.stringify(readVoiceSettings(storage)), JSON.stringify(DEFAULT_VOICE_SETTINGS), "defaults");
+    assertEqual(DEFAULT_VOICE_SETTINGS.lang, "en-IN", "English (India) first");
+    assertEqual(DEFAULT_VOICE_SETTINGS.bargeIn, false, "interrupting by speaking is opt-in (it needs headphones); the mic button and Stop always interrupt");
+    saveVoiceSettings(storage, { lang: "en-GB", voiceURI: "voice-7", pauseMs: 2500, bargeIn: false, replyLength: "full" });
+    assertEqual(JSON.stringify(readVoiceSettings(storage)), JSON.stringify({ lang: "en-GB", voiceURI: "voice-7", pauseMs: 2500, bargeIn: false, replyLength: "full" }), "round trip");
+    saved.set(VOICE_SETTINGS_KEY, JSON.stringify({ lang: "<script>", pauseMs: 99999, bargeIn: "yes", replyLength: "loud" }));
+    assertEqual(JSON.stringify(readVoiceSettings(storage)), JSON.stringify(DEFAULT_VOICE_SETTINGS), "invalid values are ignored");
+    saved.set(VOICE_SETTINGS_KEY, "{not json");
+    assertEqual(readVoiceSettings(storage).lang, "en-IN", "unreadable storage: defaults");
+  });
+
+  check("voice choice: an English (India) voice when the browser has one - and, when it doesn't, it says so instead of claiming one", () => {
+    const voices = [
+      { name: "Google UK English Female", lang: "en-GB", voiceURI: "uk" },
+      { name: "Microsoft Heera - English (India)", lang: "en-IN", voiceURI: "heera" },
+      { name: "Google US English", lang: "en-US", voiceURI: "us", default: true }
+    ];
+    const indian = chooseVoice(voices, { lang: "en-IN", voiceURI: null });
+    assertEqual(indian.voice?.voiceURI, "heera", "the en-IN voice");
+    assertTrue(/Heera/.test(indian.note), indian.note);
+    assertEqual(chooseVoice(voices, { lang: "en-IN", voiceURI: "us" }).voice?.voiceURI, "us", "a voice the user picked wins");
+    const none = chooseVoice(voices.filter((voice) => voice.lang !== "en-IN"), { lang: "en-IN", voiceURI: null });
+    assertTrue(none.voice !== null && /no English \(India\) voice/.test(none.note) && !/Heera/.test(none.note), `honest fallback: ${none.note}`);
+    assertEqual(chooseVoice([], { lang: "en-IN", voiceURI: null }).voice, null, "no voices at all: the engine default");
+    assertEqual(chooseVoice([{ name: "x", lang: "en_IN", voiceURI: "x" }], { lang: "en-IN", voiceURI: null }).voice?.voiceURI, "x", "en_IN (Android spelling) counts");
+  });
+
+  check("turns: Stop cancels the one in flight (its late reply is dropped); a new turn supersedes an old one; replies and failures come through", async () => {
+    const pending: Array<{ text: string; signal: AbortSignal; resolve: (value: string) => void }> = [];
+    const turns = createTurnController<string>((text, { signal }) => new Promise<string>((resolve) => void pending.push({ text, signal, resolve })));
+    const first = turns.send("add a pergola");
+    assertTrue(turns.busy, "busy while thinking");
+    assertTrue(turns.stop(), "Stop cancels it");
+    assertTrue(pending[0].signal.aborted && !turns.busy, "aborted at once, and free for the next turn");
+    pending[0].resolve("pergola added");
+    assertEqual(JSON.stringify(await first), JSON.stringify({ kind: "cancelled", reason: "stopped" }), "the late reply is dropped");
+    const old = turns.send("make it 4 m wide");
+    const newer = turns.send("make it 4.5 m wide");
+    assertTrue(pending[1].signal.aborted && !pending[2].signal.aborted, "the older turn is cancelled, the newer one runs");
+    pending[2].resolve("4.5");
+    pending[1].resolve("4");
+    assertEqual(JSON.stringify(await newer), JSON.stringify({ kind: "reply", reply: "4.5" }), "the correction's reply");
+    assertEqual(JSON.stringify(await old), JSON.stringify({ kind: "cancelled", reason: "superseded" }), "the old reply never lands");
+    // A request that never answers (a hung network): Stop still resolves the turn at once.
+    const hung = createTurnController<string>(() => new Promise<string>(() => undefined));
+    const stuck = hung.send("add a pergola");
+    hung.stop();
+    assertEqual(JSON.stringify(await stuck), JSON.stringify({ kind: "cancelled", reason: "stopped" }), "Stop doesn't wait for a reply that may never come");
+    const failing = createTurnController<string>(() => Promise.reject(new Error("offline")));
+    const outcome = await failing.send("x");
+    assertTrue(outcome.kind === "failed" && outcome.error instanceof Error, "a failure is reported, not swallowed");
+    assertEqual(turns.stop(), false, "Stop with nothing in flight does nothing");
+  });
+
+  check("spoken replies: the short form reads the gist and the question, at most three choices - the full text stays on screen", () => {
+    const reply = {
+      text: "Built room-1: a 4 m × 5 m kitchen (20 m² to wall centrelines), 3 m ceiling, 230 mm brick walls, centred at (8, 6) on the ground floor with 4 walls (wall-1, wall-2, wall-3, wall-4). One undo removes all of it. Shall I add a door?",
+      choices: [{ label: "Yes", say: "yes" }, { label: "No", say: "no" }, { label: "Undo", say: "undo" }, { label: "Show me", say: "show" }]
+    };
+    const short = spokenReply(reply, "short");
+    assertTrue(short.startsWith("Built room-1") && short.includes("Shall I add a door?") && !short.includes("One undo removes"), short);
+    assertTrue(/You can say: Yes, No, or Undo\.$/.test(short), `three choices: ${short}`);
+    assertTrue(spokenReply(reply, "full").includes("One undo removes all of it"), "full reads everything");
+    assertTrue(shortSpoken("word ".repeat(120).trim() + ".").length <= 221, "a long first sentence is cut");
+  });
+
+  check("echo guard: the reply coming back through the speakers is recognised as such - the user's own words are not; exactly the earlier echo is removed", () => {
+    const spoken = "Ready to build a 4 metres by 5 metres kitchen, centred at 8, 6. Build it? You can say: Build it, Pick another spot, or Cancel.";
+    assertTrue(isEchoOf("ready to build a 4 metres by 5 metres", spoken), "a stretch of the reply");
+    assertTrue(isEchoOf("Build it", spoken), "words the reply itself says");
+    assertTrue(!isEchoOf("make it 4.5 metres wide", spoken), "a correction");
+    assertTrue(!isEchoOf("no stop put the door on the other wall", spoken), "an interruption");
+    assertEqual(wordsAfter("ready to build a 4 metres make it four point five", "ready to build a 4 metres"), "make it four point five", "after the echo heard before the user spoke");
+    assertEqual(wordsAfter("ready to build a four metres make it wider", "ready to build a 4 metres"), "make it wider", "a word the recogniser revised in the echo doesn't leak");
+    assertEqual(wordsAfter("make it wider", ""), "make it wider", "no echo: unchanged");
+    // However the recogniser writes the echo: numbers as words, US spellings.
+    assertTrue(isEchoOf("ready to build a four meters by five meters", spoken), "number words and US spelling are still the reply");
+    assertTrue(isEchoOf("kitchen centered at eight six", spoken), "centered = centred, eight = 8");
+    // The words the reply was saying next, delivered with the user's first words, are left out too.
+    assertEqual(stripContinuation("by 5 metres kitchen no make it 6 metres wide", spoken, "ready to build a 4 metres"), "no make it 6 metres wide", "the echo's continuation is removed");
+    assertEqual(stripContinuation("by five meters kitchen make it wider", spoken, "ready to build a four meters"), "make it wider", "in any spelling");
+    assertEqual(stripContinuation("make it 6 metres wide", spoken, "ready to build a 4 metres"), "make it 6 metres wide", "nothing continuing the echo: unchanged");
+    assertEqual(stripContinuation("by the window", spoken, "ready to build a 4 metres"), "by the window", "one shared word may be the user's own");
+  });
+
+  check("barge-in by voice: the mic is held open while a reply is read; only two or more words the reply never says interrupt it; exactly the earlier echo is left out", () => {
+    const speech = fakeSpeech();
+    const log: string[] = [];
+    let pending = "";
+    const listener = {
+      supported: true,
+      start: () => void log.push("start"),
+      stop: () => void log.push("stop"),
+      cancel: () => void log.push("cancel"),
+      holdOpen: (on: boolean) => void log.push(`hold:${on}`),
+      pendingWords: () => pending
+    };
+    const statuses: string[] = [];
+    const handsFree = createHandsFree({ speech: speech.output, listener, bargeIn: () => true, replyLength: () => "short", onStatus: (status) => void statuses.push(status.kind) });
+    handsFree.enableWith(null);
+    speech.finish();
+    const reply = { text: "Ready to build a 4 m × 5 m kitchen, centred at (8, 6). Build it?", choices: [{ label: "Build it", say: "build it" }, { label: "Cancel", say: "cancel" }] };
+    log.length = 0;
+    handsFree.replied(reply);
+    assertTrue(handsFree.speaking && log.includes("hold:true") && log.includes("start"), `reading, with the mic held open: ${log.join(",")}`);
+    assertEqual(handsFree.heardWhileSpeaking("ready to build a 4 metres"), false, "its own echo doesn't interrupt");
+    assertEqual(handsFree.heardWhileSpeaking("ready to build a 4 metres sae"), false, "one misheard echo word doesn't either");
+    assertEqual(handsFree.heardWhileSpeaking("ready to build a four meters by five meters kitchen centered"), false, "nor the echo written with number words and US spelling");
+    assertTrue(handsFree.speaking && speech.cancelled() === 0, "still speaking");
+    // "four" is the reply's own "4" however it is written - the user is recognised by words the reply never says.
+    assertEqual(handsFree.heardWhileSpeaking("ready to build a 4 metres make it four"), false, "only one word the reply never says (\"make\"): not yet");
+    assertEqual(handsFree.heardWhileSpeaking("ready to build a 4 metres make it wider"), true, "two words the reply never says: the user is talking");
+    assertTrue(!handsFree.speaking && speech.cancelled() === 1 && log.includes("hold:false"), "speech cancelled at once, the mic no longer held");
+    assertEqual(statuses[statuses.length - 1], "listening", "the turn is the user's");
+    assertEqual(handsFree.userWords("ready to build a 4 metres make it wider please"), "make it wider please", "the box shows only the user's words");
+    assertEqual(handsFree.acceptFinal("ready to build a 4 metres make it wider by half a metre"), "make it wider by half a metre", "sent without the echo heard before");
+    const starts = log.filter((entry) => entry === "start").length;
+    speech.finish();
+    assertEqual(log.filter((entry) => entry === "start").length, starts, "the cancelled speech's late “finished” opens nothing");
+
+    // Read to the end, not interrupted: the session that heard it is dropped, and the answer is heard in a fresh one - quoted choices intact.
+    handsFree.replied({ text: "Shall I lay the foundation?", choices: [{ label: "Lay the foundation", say: "lay the foundation" }, { label: "Cancel", say: "cancel" }] });
+    log.length = 0;
+    speech.finish();
+    assertEqual(log.join(","), "hold:false,cancel,start", "echo session dropped, a fresh one opened");
+    assertEqual(handsFree.acceptFinal("lay the foundation"), "lay the foundation", "the user's answer goes through as said, though the reply said those words");
+
+    // The browser ends the session mid-reply (or times out with no speech): that's not the user's silence.
+    handsFree.replied(reply);
+    assertEqual(handsFree.acceptFinal("ready to build a 4 metres by"), null, "a session that ended mid-reply heard only the reply");
+    handsFree.listenerError("no-speech", "I didn't hear anything");
+    log.length = 0;
+    handsFree.listenerEnded();
+    assertTrue(handsFree.enabled && handsFree.speaking && log.includes("start"), `still reading, listening again: ${log.join(",")}`);
+
+    // Stop clears it all: a plain mic turn afterwards is sent exactly as heard.
+    handsFree.heardWhileSpeaking("make it wider please");
+    handsFree.interrupt();
+    assertEqual(handsFree.acceptFinal("ready to build make it wider"), "ready to build make it wider", "no stale echo is stripped after Stop");
+
+    // The mic button while a reply is read with the mic held open: the session holding the echo is dropped, a fresh one opened.
+    handsFree.enableWith(null);
+    speech.finish();
+    handsFree.replied(reply);
+    log.length = 0;
+    handsFree.bargeIn();
+    assertTrue(!handsFree.speaking && log.join(",").includes("cancel") && log[log.length - 1] === "start", `fresh session after the press: ${log.join(",")}`);
+    assertEqual(handsFree.acceptFinal("make it wider"), "make it wider", "only what was said after the press, as said");
+
+    // A new reply arriving while the previous one is still read (a chip, a ground pick): it is read, in a fresh session - the old echo isn't the user.
+    handsFree.replied(reply);
+    pending = "ready to build a 4 metres";
+    const spokenCount = speech.spoken.length;
+    log.length = 0;
+    handsFree.replied({ text: "Built room-1. Shall I add a door?", choices: [{ label: "Add a door", say: "add a door" }] });
+    assertTrue(speech.spoken.length === spokenCount + 1 && /Built room-1/.test(speech.spoken[speech.spoken.length - 1]), "the new reply is read");
+    assertTrue(log.includes("cancel") && log.includes("start"), `in a fresh session: ${log.join(",")}`);
+    pending = "";
+    handsFree.interrupt();
+
+    // A reply arriving while the user is mid-sentence is not read over them.
+    handsFree.enableWith(null);
+    speech.finish();
+    const spokenBefore = speech.spoken.length;
+    pending = "make it four";
+    handsFree.replied(reply);
+    assertEqual(speech.spoken.length, spokenBefore, "not spoken - the user is still talking");
+    pending = "";
+
+    const quiet = createHandsFree({ speech: fakeSpeech().output, listener: fakeListener().listener, bargeIn: () => false, onStatus: () => undefined });
+    quiet.enableWith(reply);
+    assertEqual(quiet.heardWhileSpeaking("make it four point five metres wide"), false, "with barge-in off, only the mic button or Stop interrupts");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

@@ -99,11 +99,16 @@ export async function launch({ name, width = 1440, height = 900, port = 9340, ma
   await new Promise((resolve) => ws.addEventListener("open", resolve));
   let id = 0;
   const pending = new Map();
+  /** Protocol event listeners, by method (e.g. "Fetch.requestPaused") - see on(). */
+  const listeners = new Map();
   ws.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.id && pending.has(message.id)) {
       pending.get(message.id)(message);
       pending.delete(message.id);
+    }
+    if (message.method && listeners.has(message.method)) {
+      for (const listener of listeners.get(message.method)) listener(message.params);
     }
     if (message.method === "Page.javascriptDialogOpening") {
       console.log(`dialog (${message.params.type}) accepted: ${message.params.message}`);
@@ -126,6 +131,11 @@ export async function launch({ name, width = 1440, height = 900, port = 9340, ma
   return {
     send,
     evaluate,
+    /** Calls `listener(params)` for every protocol event named `method`. */
+    on(method, listener) {
+      if (!listeners.has(method)) listeners.set(method, []);
+      listeners.get(method).push(listener);
+    },
     async shot(outDir, shotName) {
       const { result } = await send("Page.captureScreenshot", { format: "png" });
       writeFileSync(join(outDir, `${shotName}.png`), Buffer.from(result.data, "base64"));

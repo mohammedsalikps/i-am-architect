@@ -2658,14 +2658,40 @@ button {
   letter-spacing: 0.2px;
 }
 
-.architect__badge {
-  font-size: 10px;
+/* What the architect is doing, always visible (ui/architectPanel.ts): Ready, Listening, Thinking, Speaking, Applied, Stopped. */
+.architect__state {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-strong);
   text-transform: uppercase;
   letter-spacing: var(--letter-spacing-label);
-  color: var(--color-success);
-  border: 1px solid rgba(76, 175, 125, 0.4);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-pill);
-  padding: 1px 7px;
+  padding: 1px 8px;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+}
+
+.architect__state--listening {
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-soft);
+}
+
+.architect__state--thinking,
+.architect__state--speaking {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.architect__state--applied {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.architect__state--stopped {
+  color: var(--color-text);
+  border-color: var(--color-text-muted);
 }
 
 .architect__collapse {
@@ -3474,4 +3500,77 @@ button {
 .app-header__theme-icon {
   font-size: 14px;
   line-height: 1;
+}
+
+/* --- AI companion: labelled tools, voice settings, quiet notes (ui/architectPanel.ts) --- */
+.architect__composer .architect__tool {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.architect__tool-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.architect__tool--on {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.architect__voice-settings {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+
+.architect__voice-settings[hidden] {
+  display: none;
+}
+
+.architect__setting {
+  display: grid;
+  gap: 3px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.architect__setting--check {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: var(--space-2);
+  color: var(--color-text);
+}
+
+.architect__select {
+  height: var(--control-height);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0 6px;
+}
+
+.architect__setting-note {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.architect__msg--note {
+  align-self: center;
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px dashed var(--color-border);
 }

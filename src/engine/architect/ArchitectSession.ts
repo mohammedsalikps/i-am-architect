@@ -25,7 +25,7 @@ import { friendlyAiErrorMessage, isNetworkUnreachable, summarizeCreatedObjects, 
 import type { AIContextObject, AIPipelineResult, AIProjectSnapshot, AIRunOptions } from "../ai/types";
 import { planFurnishingsInScene } from "./interiors.ts";
 import { parseUtterance } from "./parseUtterance.ts";
-import { addOpeningToRoom, furnishRooms, moveOpening, setWallLength, showRoom } from "./roomEdits.ts";
+import { addOpeningToRoom, furnishRooms, moveOpening, relocateOpening, setWallLength, showRoom } from "./roomEdits.ts";
 import type { PendingOption, RoomEditContext, RoomEditResult } from "./roomEdits.ts";
 import { listRooms } from "./roomModel.ts";
 import {
@@ -103,6 +103,9 @@ export interface ArchitectChoice {
 
 export type ArchitectTone = "info" | "question" | "success" | "error";
 
+/** A turn cancelled before it changed anything (see handle()'s `signal`). */
+const CANCELLED_REPLY: ArchitectReply = { text: "Cancelled - that request was stopped before it changed anything.", tone: "info", choices: [], cancelled: true };
+
 export interface ArchitectReply {
   text: string;
   tone: ArchitectTone;
@@ -123,6 +126,8 @@ export interface ArchitectReply {
   undone?: boolean;
   /** Where the answer came from: this session's own rules, or the AI model (the backend provider was actually called). */
   source?: "architect" | "ai";
+  /** The turn was cancelled (Stop, or a newer turn) before it changed anything - nothing to show or speak. */
+  cancelled?: boolean;
 }
 
 export interface ArchitectStageView {
@@ -217,7 +222,8 @@ type Pending =
   /** The house's wall material, asked just before its walls go up - then these stages are built. */
   | { kind: "house-material"; stages: ArchitectStage[] }
   /** "It" could be the wall just built or the selection - which one did the user mean? */
-  | { kind: "adjust-target"; text: string; options: string[] }
+  /** `names`: each option's room name, so a typed name ("the kitchen") answers too - when it names exactly one. */
+  | { kind: "adjust-target"; text: string; options: string[]; names?: string[] }
   /** One new room being specified (roomBuilder.ts): the slot asked about, "side" (which side of its neighbour), or "confirm". */
   | { kind: "room"; draft: RoomDraft; slot: RoomSlot | "side" | "confirm" };
 
@@ -354,8 +360,12 @@ export class ArchitectSession {
     };
   }
 
-  /** Handles one typed or spoken turn. */
-  async handle(text: string): Promise<ArchitectReply> {
+  /**
+   * Handles one typed or spoken turn. `signal` cancels it: a turn that is
+   * still waiting on the AI when it is aborted (Stop, or a newer
+   * correction) changes nothing and comes back `cancelled`.
+   */
+  async handle(text: string, options: { signal?: AbortSignal } = {}): Promise<ArchitectReply> {
     const utterance = parseUtterance(text);
     const pending = this.pending;
     this.pending = null;
@@ -367,7 +377,9 @@ export class ArchitectSession {
     }
     const before = this.sceneSignature();
     const answered = pending ? this.answer(pending, utterance, text) : null;
-    const result = answered ?? (await this.route(utterance, text));
+    const result = answered ?? (await this.route(utterance, text, options.signal));
+    // Cancelled: whatever changed meanwhile was another turn's doing, not this one's.
+    if (result.cancelled) return result;
     this.emit();
     return this.sceneSignature() !== before ? { ...result, applied: true } : result;
   }
@@ -453,10 +465,15 @@ export class ArchitectSession {
         return this.answerWall(pending, u, text);
       case "room":
         return this.answerRoom(pending, u, text);
-      case "adjust-target":
-        if (pending.options.includes(text.trim())) return this.adjustElement(pending.text, text.trim());
+      case "adjust-target": {
+        const answer = text.trim();
+        if (pending.options.includes(answer)) return this.adjustElement(pending.text, answer);
+        const said = answer.toLowerCase().replace(/^the\s+/, "").replace(/[.!?]+$/, "");
+        const byName = pending.names ? pending.options.filter((_, index) => pending.names![index].toLowerCase() === said) : [];
+        if (byName.length === 1) return this.adjustElement(pending.text, byName[0]);
         if (u.kind === "no") return reply("OK — nothing was changed.", "info");
         return null;
+      }
       case "house-material": {
         const material = readWallMaterial(text);
         if (material) {
@@ -492,7 +509,7 @@ export class ArchitectSession {
     return reply("The roof is back.", "info", [], { showIds: hidden, focusIds: hidden });
   }
 
-  private async route(u: Utterance, text: string): Promise<ArchitectReply> {
+  private async route(u: Utterance, text: string, signal?: AbortSignal): Promise<ArchitectReply> {
     switch (u.kind) {
       case "yes":
       case "no":
@@ -544,7 +561,7 @@ export class ArchitectSession {
       case "refurnish":
         return this.roomEdit(furnishRooms(this.rooms, u.text, true));
       case "move-opening":
-        return this.roomEdit(moveOpening(this.rooms, u));
+        return this.roomEdit(u.relocate ? relocateOpening(this.rooms, u) : moveOpening(this.rooms, u));
       case "wall-length":
         if (u.length === undefined) {
           return reply("How long should the wall be? Say it with a unit, e.g. “make the back wall of the kitchen 4 metres long”.", "question");
@@ -556,13 +573,13 @@ export class ArchitectSession {
       case "build-wall":
         return this.continueWall(readWallDraft(u.text));
       case "adjust":
-        return this.adjustElement(u.text);
+        return u.room ? this.adjustThatRoom(u.text) : this.adjustElement(u.text);
       case "build-room":
         return this.startRoom(u.text);
       case "pipe-run":
         return this.pipeRun(u.text);
       case "unknown":
-        return this.namedRoomEdit(text) ?? this.fallback(text);
+        return this.namedRoomEdit(text) ?? this.fallback(text, signal);
     }
   }
 
@@ -1616,6 +1633,34 @@ export class ArchitectSession {
    * a room named by its name (not "it"). Null when the words don't name
    * exactly one room to move or resize - the AI fallback gets them.
    */
+  /**
+   * "Make that room 4.5 metres wide": the room being talked about - the one
+   * just built, or the selected room, or the only room there is. Two
+   * candidates, or none, is asked about; never guessed at, and never
+   * applied to something that isn't a room.
+   */
+  private adjustThatRoom(text: string): ArchitectReply {
+    const rooms = this.roomsNow();
+    const snapshot = this.options.snapshot();
+    const isRoom = (id: string | null | undefined): id is string => !!id && rooms.some((room) => room.id === id);
+    const last = isRoom(this.lastBuiltId) ? this.lastBuiltId : null;
+    const selected = isRoom(snapshot.selectedObjectId) ? snapshot.selectedObjectId : null;
+    const target = last && selected && last !== selected ? null : (last ?? selected ?? (rooms.length === 1 ? rooms[0].id : null));
+    if (!target) {
+      if (rooms.length === 0) return reply("There's no room yet. Build one first - e.g. “Create a 4 by 5 metre kitchen at 0, 0”.", "info");
+      const options = (last && selected ? rooms.filter((room) => room.id === last || room.id === selected) : rooms).slice(0, 8);
+      // Answered by id (each chip says its room's id), or by a room name that is unique - never by rebuilding a sentence.
+      const label = (room: { id: string; name: string }): string => (options.some((other) => other.id !== room.id && other.name.toLowerCase() === room.name.toLowerCase()) ? `${room.name} (${room.id})` : room.name);
+      this.pending = { kind: "adjust-target", text, options: options.map((room) => room.id), names: options.map((room) => room.name) };
+      return reply(
+        `Which room do you mean${last && selected ? ` - ${last}, which I just built, or the selected ${selected}` : ""}? Nothing was changed.`,
+        "question",
+        [...options.map((room) => ({ label: label(room), say: room.id })), { label: "Neither", say: "cancel" }]
+      );
+    }
+    return this.adjustRoom(target, text);
+  }
+
   private namedRoomEdit(text: string): ArchitectReply | null {
     const lower = text.toLowerCase().replace(/\s+/g, " ");
     const rooms = this.roomsNow();
@@ -1624,7 +1669,7 @@ export class ArchitectSession {
       .sort((a, b) => b.length - a.length)
       .find((name) =>
         new RegExp(
-          String.raw`\b(?:move|shift|nudge|slide|make|resize|change|put|place)\s+the\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}` +
+          String.raw`\b(?:move|shift|nudge|slide|make|resize|change|put|place)\s+(?:the|that|this)\s+${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}` +
             // The name must end the noun: "the kitchen 2 m east", "the kitchen beside ...", never "the kitchen table ...".
             String.raw`(?=\s*(?:$|[,.;]|-?\d|(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen|twenty|half)\b|(?:by|to|beside|next|adjacent|alongside|east|west|north|south|behind|in\s+front)\b))` +
             String.raw`(?!\s*(?:m\b|mm\b|cm\b|met))`
@@ -1937,16 +1982,19 @@ export class ArchitectSession {
     return overlaps;
   }
 
-  private async fallback(text: string): Promise<ArchitectReply> {
+  private async fallback(text: string, signal?: AbortSignal): Promise<ArchitectReply> {
     if (!this.options.fallback) {
       return this.help("I didn't catch that.");
     }
     let result: AIPipelineResult;
     try {
-      result = await this.options.fallback(text, { housePlan: "return" });
+      result = await this.options.fallback(text, { housePlan: "return", ...(signal ? { signal } : {}) });
     } catch (error) {
+      if (signal?.aborted) return CANCELLED_REPLY;
       return { ...this.aiFailure(text, error instanceof Error ? error.message : String(error)), source: "ai" };
     }
+    // Stopped or superseded while the AI was thinking: nothing of it is applied, shown or spoken.
+    if (signal?.aborted || result.errors.some((error) => error.stage === "cancelled")) return CANCELLED_REPLY;
     const source: "architect" | "ai" = result.usedProvider ? "ai" : "architect";
     const answer = this.fallbackReply(text, result);
     return { ...answer, source };

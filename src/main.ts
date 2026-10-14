@@ -246,6 +246,8 @@ function pickArchitectLocation(footprint: HouseFootprint | null, done: (point: P
 
 const architectPanel = createArchitectPanel({
   session: architect,
+  // Voice settings (language, voice, pause, interrupting) are remembered per browser.
+  storage: sessionStore(),
   onFocus: (objectIds) => sceneManager.current?.focusOn(objectIds),
   onPickLocation: pickArchitectLocation,
   // The same VisibilityStore as the hierarchy's eye buttons - a view
