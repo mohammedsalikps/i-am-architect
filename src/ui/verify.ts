@@ -30,6 +30,9 @@ import type { CopilotEvent } from "./copilotState.ts";
 import { rmsLevel } from "./levelMeter.ts";
 import { createVoiceInput } from "./voiceInput.ts";
 import { searchProjectItems } from "./projectSearch.ts";
+import { THEME_STORAGE_KEY, createThemeStore, readSavedTheme, themeToggleLabel } from "./theme.ts";
+import type { Theme } from "./theme.ts";
+import { SCENE_PALETTES } from "../scene/sceneTheme.ts";
 
 function assertTrue(condition: unknown, message: string): asserts condition {
   if (!condition) {
@@ -724,6 +727,96 @@ function run(): void {
       FakeRecognition.last!.results(0, ["late words", true]);
       assertEqual(heard.interim.includes("late words"), false, "a late result after Stop is ignored");
     });
+  });
+
+  // --- Light / dark theme (ui/theme.ts, styles.css, scene/sceneTheme.ts) ---
+  check("the theme store switches, saves, tells subscribers, and starts from what the page already applied", () => {
+    const saved = new Map<string, string>();
+    const storage = { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => void saved.set(key, value) };
+    const root = { dataset: {} as Record<string, string | undefined> };
+    const store = createThemeStore({ storage, root });
+    assertEqual(store.get(), "light", "light by default");
+    assertEqual(root.dataset.theme, "light", "applied to <html>");
+    const seen: Theme[] = [];
+    store.subscribe((theme) => seen.push(theme));
+    assertEqual(store.toggle(), "dark", "toggle");
+    assertEqual(root.dataset.theme, "dark", "data-theme follows");
+    assertEqual(saved.get(THEME_STORAGE_KEY), "dark", "saved under the shared key");
+    assertEqual(seen.join(","), "light,dark", "subscribers get the current theme, then each change");
+    // A reload: index.html has already set data-theme from storage; the store starts there.
+    const reloaded = createThemeStore({ storage, root: { dataset: { theme: "dark" } } });
+    assertEqual(reloaded.get(), "dark", "the choice survives a reload");
+    assertEqual(readSavedTheme(storage), "dark", "readSavedTheme");
+    saved.set(THEME_STORAGE_KEY, "purple");
+    assertEqual(readSavedTheme(storage), "light", "an unknown saved value falls back to light");
+  });
+
+  check("a browser that refuses storage still switches themes", () => {
+    const refusing = {
+      getItem: (): string | null => {
+        throw new Error("denied");
+      },
+      setItem: (): void => {
+        throw new Error("denied");
+      }
+    };
+    const root = { dataset: {} as Record<string, string | undefined> };
+    const store = createThemeStore({ storage: refusing, root });
+    assertEqual(store.get(), "light", "default");
+    store.set("dark");
+    assertEqual(root.dataset.theme, "dark", "switched anyway");
+    assertEqual(themeToggleLabel("dark").text, "Light", "the toggle offers the other theme");
+    assertEqual(themeToggleLabel("light").text, "Dark", "and back");
+  });
+
+  const themeCss = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+  const tokenBlock = (selector: string): Map<string, string> => {
+    const start = themeCss.indexOf(`${selector} {`);
+    assertTrue(start >= 0, `${selector} block exists`);
+    const body = themeCss.slice(start, themeCss.indexOf("\n}", start));
+    return new Map([...body.matchAll(/^\s*(--[a-z0-9-]+):\s*([^;]+);/gm)].map((match) => [match[1], match[2].trim()]));
+  };
+
+  check("the dark theme redefines every colour, shadow, overlay and scrim token the light theme defines - and to different values", () => {
+    const light = tokenBlock(":root");
+    const dark = tokenBlock(':root[data-theme="dark"]');
+    const themed = [...light.keys()].filter((name) => /^--(color-|shadow-|overlay-|scrim|hatch-)/.test(name) && !/^var\(/.test(light.get(name)!));
+    assertTrue(themed.length >= 20, `enough themed tokens found (${themed.length})`);
+    const missing = themed.filter((name) => !dark.has(name));
+    assertEqual(missing.join(", "), "", "every themed token has a dark value");
+    const same = themed.filter((name) => dark.get(name) === light.get(name));
+    assertEqual(same.join(", "), "", "and each differs from light");
+    assertTrue(/color-scheme:\s*dark/.test(themeCss) && /color-scheme:\s*light/.test(themeCss), "native controls (scrollbars, inputs) follow the theme too");
+  });
+
+  check("no rule paints a fixed colour outside the token blocks (a theme switch reaches every surface)", () => {
+    const withoutComments = themeCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    const offenders = withoutComments
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /#[0-9a-fA-F]{3,8}\b/.test(line) && !/^--[a-z0-9-]+:/.test(line));
+    assertEqual(offenders.join(" | "), "", "hex colours only in token definitions");
+  });
+
+  check("there is a visible focus ring and a disabled state for every control, from tokens", () => {
+    assertTrue(/:where\([^)]*button[^)]*\):focus-visible\s*{[^}]*outline:\s*var\(--focus-ring-width\) solid var\(--focus-ring-color\)/.test(themeCss), "focus-visible ring");
+    assertTrue(/:where\(button, input, select, textarea\):disabled\s*{[^}]*cursor:\s*not-allowed/.test(themeCss), "disabled controls say so");
+  });
+
+  check("index.html applies the saved theme before the first paint (a same-origin file, so the CSP allows it), with the same storage key", () => {
+    const preload = readFileSync(fileURLToPath(new URL("../../public/theme-preload.js", import.meta.url)), "utf8");
+    assertTrue(preload.includes(`localStorage.getItem("${THEME_STORAGE_KEY}")`) && preload.includes('setAttribute("data-theme"'), "same key as ui/theme.ts, applied to <html>");
+    const tag = indexHtml.indexOf('<script src="/theme-preload.js"></script>');
+    assertTrue(tag > 0 && tag < indexHtml.indexOf("</head>") && tag < indexHtml.indexOf('src="/src/main.ts"'), "a classic script in <head>, before the app");
+    assertTrue(/html\[data-theme="dark"\][^{]*{\s*background:/.test(indexHtml), "a dark page background before styles.css loads");
+  });
+
+  check("the 3D viewport has its own palette per theme - backdrop, fog, ground and grid all change", () => {
+    const { light, dark } = SCENE_PALETTES;
+    assertTrue(light.fog !== dark.fog && light.ground !== dark.ground && light.gridMajor !== dark.gridMajor && light.sky.horizon !== dark.sky.horizon, "every viewport colour differs");
+    const topBar = readFileSync(fileURLToPath(new URL("./topBar.ts", import.meta.url)), "utf8");
+    assertTrue(/className: "app-header__theme"/.test(topBar) && /store\.toggle\(\)/.test(topBar), "the top bar has the one-click switch");
+    assertTrue(/themeStore\.subscribe\(\(theme\) => sceneManager\.current\?\.setTheme\(theme\)\)/.test(mainSource), "main.ts sends the theme to the viewport");
   });
 
   console.log(`\n${passed} passed, ${failed} failed.`);

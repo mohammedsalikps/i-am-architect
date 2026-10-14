@@ -53,6 +53,7 @@ import { createArchitectPanel } from "./ui/architectPanel";
 import { createSiteOverlay } from "./scene/siteOverlay";
 import { createMeasureTool, MEASURE_TOOL_ID, type MeasureTool } from "./scene/measureTool";
 import { createViewportTools } from "./ui/viewportTools";
+import { createThemeStore } from "./ui/theme";
 
 const appRoot = document.getElementById("app");
 
@@ -724,7 +725,11 @@ const viewportTools = createViewportTools({
   onMeasure: () => measureTool?.toggle()
 });
 
+// Light/dark for the whole workspace: index.html has already applied the saved choice to <html>.
+const themeStore = createThemeStore({ storage: sessionStore(), root: document.documentElement });
+
 const shell = createAppShell({
+  theme: themeStore,
   projectMeta,
   persistence,
   auth,
@@ -790,6 +795,8 @@ sceneManager.current = new SceneManager(
   visibilityStore
 );
 sceneManager.current.start();
+// The viewport follows the theme (backdrop, fog, ground, grid).
+themeStore.subscribe((theme) => sceneManager.current?.setTheme(theme));
 // The floating AI Architect copilot covers the viewport's left side: frame
 // the scene in the part still visible, following the panel as it is
 // resized or collapsed.

@@ -6,6 +6,9 @@ import { GTAOPass } from "three/examples/jsm/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { addLights } from "./lights";
 import { addGround } from "./ground";
+import type { GroundHandle } from "./ground";
+import { SCENE_PALETTES } from "./sceneTheme";
+import type { Theme } from "../ui/theme";
 import { createHorizonBackground, HORIZON_FOG_COLOR } from "./environment";
 import { WallLayer } from "./wall/WallLayer";
 import { PillarLayer } from "./pillar/PillarLayer";
@@ -91,6 +94,8 @@ export class SceneManager {
    * data, and never written back to any store.
    */
   private readonly highlightedMeshes = new Map<THREE.Mesh, THREE.Color>();
+  private readonly ground: GroundHandle;
+  private theme: Theme = "light";
 
   constructor(
     container: HTMLElement,
@@ -222,7 +227,7 @@ export class SceneManager {
     this.controls.maxPolarAngle = Math.PI * 0.49;
 
     addLights(this.scene);
-    addGround(this.scene);
+    this.ground = addGround(this.scene);
 
     // Not stored on `this`: every *Layer stays alive via the
     // subscriptions it registers with its store/selectionStore/
@@ -512,6 +517,26 @@ export class SceneManager {
    * step normally either way and only reports the unresolved count,
    * rather than throwing (task section 6).
    */
+  /**
+   * The workspace theme's viewport: the backdrop, fog, ground and grid
+   * (scene/sceneTheme.ts). Construction objects keep their own colours.
+   */
+  setTheme(theme: Theme): void {
+    if (theme === this.theme) return;
+    this.theme = theme;
+    const palette = SCENE_PALETTES[theme];
+    const previous = this.scene.background;
+    this.scene.background = createHorizonBackground(palette);
+    if (previous instanceof THREE.Texture) previous.dispose();
+    if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.setHex(palette.fog);
+    this.ground.setPalette(palette);
+  }
+
+  /** The viewport's current theme. */
+  getTheme(): Theme {
+    return this.theme;
+  }
+
   highlightConstructionObjects(objectIds: readonly string[] | null): { resolved: number; unresolved: number } {
     for (const [mesh, color] of this.highlightedMeshes) {
       (mesh.material as THREE.MeshStandardMaterial).color.copy(color);

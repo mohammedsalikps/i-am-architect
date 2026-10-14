@@ -1,7 +1,14 @@
-/* Light architectural theme: warm white and light grey surfaces, navy text,
-   one architectural-blue accent, subtle borders and minimal shadows. */
+/* Two themes from one set of design tokens. Light (the default): warm white
+   and light grey surfaces, navy text, one architectural-blue accent, subtle
+   borders and minimal shadows. Dark: the same hierarchy on graphite
+   surfaces (:root[data-theme="dark"] below). Every colour, shadow and
+   state in this file reads a token, so a theme switch changes the whole
+   workspace - and the 3D viewport follows it (scene/sceneTheme.ts).
+   ui/theme.ts sets data-theme on <html>; index.html applies the saved
+   choice before the first paint. */
 
 :root {
+  color-scheme: light;
   --color-bg: #f3f4f6;
   --color-surface: #ffffff;
   --color-surface-raised: #f2f4f8;
@@ -27,6 +34,15 @@
   --color-danger: #c2412d;
   --color-danger-soft: rgba(194, 65, 45, 0.09);
   --color-danger-border: #e3a497;
+  /* Text on the brand-coloured badge. */
+  --color-brand-text: #221a0c;
+  /* The "no colour yet" swatch's hatch. */
+  --hatch-a: #eef0f3;
+  --hatch-b: #e2e5ea;
+  /* Keyboard focus: one visible ring everywhere (see "Interaction states" at the end). */
+  --focus-ring-color: var(--color-accent);
+  --focus-ring-width: 2px;
+  --disabled-opacity: 0.45;
   --shadow-panel: 0 10px 28px rgba(16, 24, 40, 0.1);
   /* A dialog sits above a dimming scrim, so it earns a slightly heavier
      shadow than an in-page panel - project-chooser and auth-dialog each
@@ -71,6 +87,18 @@
      differ by role. */
   --letter-spacing-label: 0.06em;
 
+  /* Type scale - labels, body, section titles, panel titles. */
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-md: 13px;
+  --font-size-lg: 15px;
+  --font-weight-medium: 500;
+  --font-weight-strong: 600;
+  /* Controls: one height and one quick transition. */
+  --control-height: 30px;
+  --transition-fast: 120ms ease;
+
   --topbar-height: 52px;
   --mainnav-height: 36px;
   --ribbon-height: 72px;
@@ -90,9 +118,38 @@
   --bottomworkspace-height: 190px;
   --statusbar-height: 26px;
 
-  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Arial, sans-serif;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-md);
   color: var(--color-text);
+}
+
+/* Dark: graphite surfaces, light text, a lighter blue accent (dark text on
+   it for contrast), deeper shadows. Same tokens, same hierarchy. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #11151b;
+  --color-surface: #191e26;
+  --color-surface-raised: #222833;
+  --color-surface-sunken: #141920;
+  --color-border: #2d3540;
+  --color-text: #e5e9ef;
+  --color-text-muted: #9ba6b5;
+  --color-accent: #6aa5ff;
+  --color-accent-soft: rgba(106, 165, 255, 0.16);
+  --color-accent-text: #0b1322;
+  --color-success: #45c083;
+  --color-brand: #c9a660;
+  --color-danger: #f07a63;
+  --color-danger-soft: rgba(240, 122, 99, 0.14);
+  --color-danger-border: #8f4134;
+  --color-brand-text: #1d160a;
+  --hatch-a: #232a35;
+  --hatch-b: #1b2129;
+  --shadow-panel: 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 18px 44px rgba(0, 0, 0, 0.55);
+  --shadow-elevation-1: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --overlay-bg: rgba(25, 30, 38, 0.94);
+  --scrim: rgba(0, 0, 0, 0.55);
 }
 
 button {
@@ -224,7 +281,7 @@ button {
   height: 28px;
   border-radius: var(--radius-md);
   background: var(--color-brand);
-  color: #221a0c;
+  color: var(--color-brand-text);
   font-weight: 700;
   font-size: 12px;
   letter-spacing: 0.02em;
@@ -232,8 +289,8 @@ button {
 }
 
 /* The EAVARA pine mark (brandMark.ts) fills the badge with a little
-   margin; its fill is currentColor, so it takes the badge's own #221a0c
-   text color above for free. */
+   margin; its fill is currentColor, so it takes the badge's own
+   --color-brand-text above for free. */
 .app-header__brand-mark svg {
   width: 14px;
   height: 20px;
@@ -1885,10 +1942,10 @@ button {
 .color-swatch--placeholder {
   background: repeating-linear-gradient(
     45deg,
-    #eef0f3,
-    #eef0f3 4px,
-    #e2e5ea 4px,
-    #e2e5ea 8px
+    var(--hatch-a),
+    var(--hatch-a) 4px,
+    var(--hatch-b) 4px,
+    var(--hatch-b) 8px
   );
 }
 
@@ -3378,4 +3435,43 @@ button {
 
 .record-book__row--derived td:first-child .record-book__id {
   font-style: italic;
+}
+
+/* --- Interaction states, both themes (zero specificity: a component's own rule still wins) --- */
+:where(button, [role="button"], a, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring-color);
+  outline-offset: 2px;
+}
+
+:where(button, input, select, textarea):disabled {
+  cursor: not-allowed;
+}
+
+/* --- Theme toggle (top bar; ui/theme.ts) --- */
+.app-header__theme {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--control-height);
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.app-header__theme:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-accent);
+}
+
+.app-header__theme-icon {
+  font-size: 14px;
+  line-height: 1;
 }

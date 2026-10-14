@@ -28,6 +28,7 @@ import type { AuthController } from "../engine/auth/AuthController";
 import type { VisibilityStore } from "../scene/visibility/VisibilityStore";
 import { buildAIProjectSnapshot } from "../engine/ai/types.ts";
 import type { HighlightConstructionObjects } from "./constructionMethodPanel.ts";
+import type { ThemeStore } from "./theme";
 
 export type AppShellOptions = {
   /** The project's identity - its name is shown and edited in the top bar, and shown in the status bar. */
@@ -85,6 +86,8 @@ export type AppShellOptions = {
   onHighlightConstructionObjects: HighlightConstructionObjects;
   /** A close-up of one point - a pipe fitting picked in the record book. See SceneManager.focusOnPoint(). */
   onFocusPoint?: (point: { x: number; y: number; z: number }) => void;
+  /** Light/dark - the top bar's switch (ui/theme.ts). */
+  theme?: ThemeStore;
   /** The EAVARA Architect conversation (ui/architectPanel.ts), floated over the viewport. When present, the empty state's "Ask AI to Design" opens it. */
   architect?: { element: HTMLElement; focusInput: () => void };
 };
@@ -192,6 +195,7 @@ export function createAppShell(options: AppShellOptions): AppShell {
   const topBar = createTopBar({
     onSearch: (query) => leftSidebar.searchProject(query),
     onSearchPick: () => leftSidebar.pickFirstSearchResult(),
+    theme: options.theme,
     projectMeta: options.projectMeta,
     persistence: options.persistence,
     auth: options.auth,

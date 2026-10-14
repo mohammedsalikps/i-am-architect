@@ -5,6 +5,8 @@ import type { HistoryManager } from "../engine/history/HistoryManager";
 import type { ProjectMetaStore } from "../engine/project/ProjectMetaStore";
 import type { ProjectPersistenceController } from "../engine/project/ProjectPersistenceController";
 import type { AuthController } from "../engine/auth/AuthController";
+import { themeToggleLabel } from "./theme";
+import type { ThemeStore } from "./theme";
 
 export type TopBarOptions = {
   projectMeta: ProjectMetaStore;
@@ -22,6 +24,8 @@ export type TopBarOptions = {
   /** The search box: each change searches the project (the Project tree shows the matches); Enter picks the first. Without these the box stays disabled. */
   onSearch?: (query: string) => void;
   onSearchPick?: () => boolean;
+  /** The light/dark switch, beside the account - see ui/theme.ts. */
+  theme?: ThemeStore;
 };
 
 /**
@@ -206,5 +210,22 @@ export function createTopBar(options: TopBarOptions): HTMLElement {
     signOutButton.hidden = state.status !== "signed-in";
   });
 
-  return el("header", { className: "app-header" }, [branding, quickAccess, projectArea, search, account]);
+  // One click switches the whole workspace (chrome and viewport) between light and dark; the choice is remembered.
+  const themeIcon = el("span", { className: "app-header__theme-icon", attrs: { "aria-hidden": "true" } });
+  const themeText = el("span", { className: "app-header__theme-text" });
+  const themeButton = el("button", { className: "app-header__theme", attrs: { type: "button", "aria-label": "Dark theme" } }, [themeIcon, themeText]);
+  themeButton.hidden = !options.theme;
+  if (options.theme) {
+    const store = options.theme;
+    themeButton.addEventListener("click", () => store.toggle());
+    store.subscribe((theme) => {
+      const face = themeToggleLabel(theme);
+      themeIcon.textContent = face.icon;
+      themeText.textContent = face.text;
+      themeButton.title = face.title;
+      themeButton.setAttribute("aria-pressed", String(theme === "dark"));
+    });
+  }
+
+  return el("header", { className: "app-header" }, [branding, quickAccess, projectArea, search, themeButton, account]);
 }

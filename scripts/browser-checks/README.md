@@ -31,6 +31,7 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
    node scripts/browser-checks/save-reopen.mjs
    node scripts/browser-checks/voice-simulated.mjs
    node scripts/browser-checks/plumbing.mjs
+   node scripts/browser-checks/workspace.mjs
    ```
 
    `WIN=1280x800` (or `1024x768`) changes the window size; an optional first argument is a folder for screenshots (default: `<temp>/iarchitect-browser-checks/shots`).
@@ -49,6 +50,12 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - the top-bar search driving the Project tree
 - save, reload and reopen with the record book unchanged
 - the AI panel not covering the view controls at 1300, 1366, 1400 and 1440 px
+
+**`workspace.mjs`** blocks every hosted backend (Render, Supabase, Fly.io, Vercel) inside its browser, so it stays local even against a dev server pointed at staging. It checks the light/dark theme:
+- the one-click toggle in the top bar switches every main region (top bar, nav, ribbon, both sidebars, AI panel, view controls, command bar, status bar) and the 3D viewport's own rendered pixels
+- text on each region meets 4.5:1 contrast in both themes
+- the choice is saved, and after a reload the page is already dark when `<body>` is created (before the first paint and before the app starts)
+- at 1280, 1366, 1440 and 1920 px the AI panel covers neither the view controls, the inspector nor the bottom panel
 
 **`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. It checks:
 - hands-free speaking, and barge-in with the mic
