@@ -347,7 +347,7 @@ function run(): void {
     assertEqual(vercelConfig.ignoreCommand, "node scripts/vercel-ignore-build.mjs", "Vercel's ignored-build step runs the release script");
     const script = readFileSync(fileURLToPath(new URL("../../scripts/vercel-ignore-build.mjs", import.meta.url)), "utf8");
     assertTrue(/const MARKER = "\[backend-first\]";/.test(script), "it looks for the [backend-first] marker");
-    assertTrue(/if \(commitMessage\(\)\.includes\(MARKER\)\) \{[\s\S]*?process\.exit\(0\);[\s\S]*?\}\s*console\.log\("Building the frontend\."\);\s*process\.exit\(1\);/.test(script), "skips (exit 0) only with the marker; otherwise builds (exit 1)");
+    assertTrue(/const subject = commitMessage\(\)\.split\("\\n"\)\[0\];\s*if \(subject\.includes\(MARKER\)\) \{[\s\S]*?process\.exit\(0\);[\s\S]*?\}\s*console\.log\("Building the frontend\."\);\s*process\.exit\(1\);/.test(script), "skips (exit 0) only with the marker in the subject line; otherwise builds (exit 1)");
     assertTrue(/catch \{\s*return "";\s*\}/.test(script), "no commit message to read: it builds");
   });
   const permissionsPolicies = (vercelConfig.headers ?? [])

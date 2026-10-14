@@ -422,7 +422,8 @@ opens as a gable). Render and Vercel both deploy every commit on
 `master`, so such a release goes out in two commits:
 
 1. Merge to `master` with **`[backend-first]`** in the merge commit's
-   message. Render deploys it; Vercel's ignored-build step
+   subject line (its first line - the marker anywhere else is ignored).
+   Render deploys it; Vercel's ignored-build step
    (`vercel.json` `ignoreCommand` → `scripts/vercel-ignore-build.mjs`)
    skips the frontend build for that commit.
 2. Wait until the backend runs it: `GET /health` answers with an
