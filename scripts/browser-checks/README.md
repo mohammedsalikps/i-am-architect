@@ -35,6 +35,16 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
    node scripts/browser-checks/coordinates.mjs
    ```
 
+   `production-csp.mjs` runs against the **production build** instead, served by `vite preview` - the only place the Content-Security-Policy is enforced (the dev server has none):
+
+   ```bash
+   npm run build && npx vite preview --port 5175 --strictPort
+   ```
+
+   ```bash
+   node scripts/browser-checks/production-csp.mjs
+   ```
+
    `WIN=1280x800` (or `1024x768`) changes the window size; an optional first argument is a folder for screenshots (default: `<temp>/iarchitect-browser-checks/shots`).
 
 **Housekeeping.** Each run refuses to start with less than 500 MB free, uses a throwaway Chrome profile under `<temp>/iarchitect-browser-checks/`, keeps Chrome's caches and scratch folders inside it, and deletes it (and kills its own Chrome) on exit - including after a failure or the 8-minute watchdog. `save-reopen.mjs` creates a throwaway account on the mock backend with credentials generated at run time; they are never printed and disappear with the mock.
@@ -68,6 +78,8 @@ Needs Node 22+ and desktop Chrome (`CHROME_PATH` overrides the default location)
 - the dimension labels in the rendered pixels in the light and dark themes, with the summary unchanged and the model untouched by the switch
 - the popover's 30 × 40 m preset and a refused 2 m plot, the kitchen untouched
 - save, reload (workspace settings kept: Snap Off, Grid 0.5 m) and reopen: the record book identical, the labels back, and the reopened kitchen moving to X 12, Y 8 with its walls
+
+**`production-csp.mjs`** loads the production build (`APP`, default `http://localhost:5175/`) with its Content-Security-Policy in force, builds a furnished 3-bedroom house by conversation (no backend needed), and fails on any CSP violation or blocked fetch in the console - the furniture's glTF models are inlined as `data:` URLs, which a too-strict `connect-src` silently refused on the hosted site.
 
 **`voice-simulated.mjs`** replaces only the browser's `SpeechRecognition` and `speechSynthesis` with scripted stand-ins, and refuses `getUserMedia`, so no microphone is involved. Its stand-in recogniser behaves like Chrome's continuous mode: a session never ends by itself, so the app's own end-of-turn pause is what is tested. It checks:
 - hands-free speaking with the mic closed by default (interrupting by speaking is opt-in); turning it on in ⚙ Voice (saved), then speaking with the mic held open (recognition continuous, in English (India)), and barge-in with the mic button

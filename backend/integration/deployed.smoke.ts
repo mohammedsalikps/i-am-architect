@@ -104,7 +104,7 @@ async function run(): Promise<number> {
     assertEqual(page.status, 200, "the page");
     const html = await page.text();
     const csp = /<meta[^>]+http-equiv="Content-Security-Policy"[^>]+content="([^"]+)"/i.exec(html)?.[1] ?? "";
-    assertTrue(csp.includes(`connect-src 'self' ${new URL(backend).origin}`), `the CSP lets the page reach only itself and the backend: "${csp}"`);
+    assertTrue(csp.includes(`connect-src 'self' data: ${new URL(backend).origin}`), `the CSP lets the page reach only itself and the backend (data: is the page's own embedded models): "${csp}"`);
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((match) => new URL(match[1], frontend).toString());
     const styles = [...html.matchAll(/<link[^>]+href="([^"]+\.css)"/g)].map((match) => new URL(match[1], frontend).toString());
     assertTrue(scripts.length > 0, "the page loads its bundle");
